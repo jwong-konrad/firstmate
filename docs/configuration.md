@@ -182,6 +182,8 @@ An explicit `--model` or `--effort` overrides the matching token from `config/se
 When `config/crew-dispatch.json` exists, crewmate and scout spawns require an explicit resolved harness instead of automatically falling back to `config/crew-harness`.
 The inherited-local-material contract is owned by `secondmate-provisioning`; for harness behavior, its propagated config items make a secondmate's own crewmates, dispatch profiles, and backlog backend use the primary values.
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
+`fm-spawn.sh` prefixes every launch - crewmate, scout, and secondmate, on every harness, including raw launch-command spawns - with `FM_MANAGED=1`, so framework notification hooks running inside a spawned agent can recognize a firstmate-managed session and skip human-facing alerts such as a macOS banner or sound.
+Like every per-launch env prefix, it applies only to firstmate-launched agents and never touches the captain's own primary session or global config.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 
