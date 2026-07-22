@@ -29,7 +29,7 @@ The goal is a session the captain can clear or reset with confidence that the ne
      This is the nuance stow deliberately does not file, so capture it in full rather than flattening it to a bare next step.
    - Concrete next steps, specific enough to act on without rereading the whole thread.
    - A where-to-look map: related task ids, key file paths, PR URLs (full `https://...`), status log paths, and scout report paths.
-   - The raw-transcript pointer: the current session's id and its `jsonl` path under `~/.claude/projects/<escaped-cwd>/`, where `<escaped-cwd>` is the working directory with every `/` replaced by `-`, recorded as the full-fidelity record that this document only distills.
+   - The raw-transcript pointer: the current session's id and its `jsonl` path under `~/.claude/projects/<escaped-cwd>/`, where `<escaped-cwd>` is the working directory with each non-path-safe character such as `/` and `.` replaced by `-` (so `/Users/me/.config` becomes `-Users-me--config`), recorded as the full-fidelity record that this document only distills.
      The pointer is a pointer, not a dump; when the session was long, add a distilled conversation-outline section rather than pasting the transcript.
      Harnesses other than claude may not expose a discoverable transcript path; when it cannot be resolved, write "transcript pointer unavailable on this harness" and continue rather than failing the handoff.
 
