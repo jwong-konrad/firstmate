@@ -751,6 +751,41 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
+# --- App-source checkout refresh (qa-framework GAP-13 §3.0 companion) ---------
+# A crewmate reads its project's APP SOURCE (e.g. kgportal, konrad.com) READ-ONLY
+# via an absolute path, and the codebase write-guard correctly blocks it from
+# pulling — so app-source freshness must come from a step that runs as the user.
+# The scheduled recon dispatcher does this for scheduled work; this hook does it
+# for ad-hoc captain spawns, so both dispatch paths refresh app source at spawn.
+# Keyed by project basename via config/app-checkouts (lines: "<project> <abs>").
+# Lock-guarded (shared lock name with the dispatcher so the two never double-pull
+# the same checkout) and FAIL-OPEN: any failure warns and never blocks the spawn.
+# Kill-switch: FM_NO_CHECKOUT_PULL=1. Skipped for secondmate spawns.
+fm_recon_app_checkout_pull() {  # <project-basename>
+  [ "${FM_NO_CHECKOUT_PULL:-0}" = 1 ] && return 0
+  local proj=$1 map="$CONFIG/app-checkouts" checkout lock hash
+  [ -f "$map" ] || return 0
+  checkout=$(awk -v p="$proj" '!/^[[:space:]]*#/ && $1==p {print $2; exit}' "$map" 2>/dev/null || true)
+  [ -n "$checkout" ] || return 0
+  if [ ! -d "$checkout/.git" ]; then
+    echo "warning: app-checkout for $proj not a git repo: $checkout (skipping pull)" >&2
+    return 0
+  fi
+  hash=$(printf '%s' "$checkout" | shasum 2>/dev/null | cut -c1-12)
+  lock="/tmp/qa-recon-checkout-${hash:-$proj}.lock"
+  if mkdir "$lock" 2>/dev/null; then
+    git -C "$checkout" pull --ff-only --quiet 2>/dev/null \
+      || echo "warning: app-checkout ff-pull failed for $checkout (spawn continues)" >&2
+    rmdir "$lock" 2>/dev/null || true
+  else
+    echo "info: app-checkout lock held for $checkout — skipping pull (another refresh running)" >&2
+  fi
+  return 0
+}
+if [ "$KIND" != secondmate ]; then
+  fm_recon_app_checkout_pull "$(basename "$PROJ_ABS")" || true
+fi
+
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
 # Every backend's own current-path read (tmux's pane_current_path, herdr's
@@ -1274,6 +1309,23 @@ fi
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+# --- Per-project crewmate env injection (qa-framework GAP-13 companion) -------
+# Optional per-project environment declared in config/project-env (lines:
+# "<project> KEY=VALUE [KEY=VALUE ...]"; '#' comments allowed). Exported into the
+# crewmate's pane shell BEFORE the launch, exactly like GOTMPDIR above, so the
+# agent AND its children inherit it — e.g. "polaris PW_MCP_AUTH_APP=polaris" makes
+# the crewmate's Playwright MCP launch load polaris's captured auth state. Generic
+# KEY=VALUE (not PW-specific). Fail-open; skipped for secondmate spawns.
+if [ "$KIND" != secondmate ] && [ -f "$CONFIG/project-env" ]; then
+  proj_env=$(awk -v p="$PROJ_NAME" '!/^[[:space:]]*#/ && $1==p {$1=""; sub(/^[[:space:]]+/,""); print; exit}' "$CONFIG/project-env" 2>/dev/null || true)
+  if [ -n "$proj_env" ]; then
+    for kv in $proj_env; do
+      case "$kv" in
+        *=*) spawn_send_text_line "$T" "export $kv" ;;
+      esac
+    done
+  fi
+fi
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
