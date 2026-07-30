@@ -11,6 +11,11 @@
 #     instead of a quiet skip.
 # The pre-existing fast-forward / already-current / local-only / no-origin paths
 # must be unchanged, and bootstrap must relay the new outcomes as FLEET_SYNC lines.
+#   - a dirty tree on the default branch is inspected before refusing: untracked-
+#     only dirt that the pending fast-forward's changed paths do not touch still
+#     syncs, untracked dirt that collides with an incoming path still refuses
+#     loudly (naming the colliding paths), and any tracked modification/staged
+#     change/conflict refuses exactly as before (STUCK, untouched).
 #
 # It also pins the orphaned .git/packed-refs.lock recovery in the fetch step
 # (fetch_with_packed_refs_lock_guard, backed by bin/fm-lock-lib.sh's shared
@@ -44,6 +49,7 @@ new_home() {
 
 commit_file() {
   local dir=$1 file=$2 content=$3 msg=$4
+  mkdir -p "$(dirname "$dir/$file")"
   printf '%s\n' "$content" > "$dir/$file"
   git -C "$dir" add "$file"
   git -C "$dir" commit -qm "$msg"
@@ -78,6 +84,18 @@ advance_origin() {
   local home=$1 name=$2 msg=$3 work
   work="$home/work-$name"
   commit_file "$work" file.txt "$msg" "$msg"
+  git -C "$work" push -q origin main
+}
+
+# advance_origin_add_file <home> <name> <relpath> <content> <msg>: push a commit
+# that ADDS a new file (rather than modifying the existing tracked file.txt), so
+# origin/main's pending fast-forward touches a path that did not exist locally
+# before - the shape colliding_untracked_paths needs to detect a collision with a
+# same-named untracked file.
+advance_origin_add_file() {
+  local home=$1 name=$2 relpath=$3 content=$4 msg=$5 work
+  work="$home/work-$name"
+  commit_file "$work" "$relpath" "$content" "$msg"
   git -C "$work" push -q origin main
 }
 
@@ -274,6 +292,60 @@ test_dirty_is_stuck_untouched() {
   [ "$(head_sha "$clone")" = "$before" ] || fail "dirty clone HEAD was moved"
   grep -q "uncommitted edit" "$clone/file.txt" || fail "dirty working-tree change was discarded"
   pass "dirty working tree is reported STUCK and left untouched"
+}
+
+test_untracked_only_no_collision_still_syncs() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair "$home" sigma)
+  advance_origin "$home" sigma C1
+  mkdir -p "$clone/.auth"
+  printf 'token\n' > "$clone/.auth/session"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "sigma: synced" "untracked-only no-collision dirt still fast-forwards"
+  assert_not_contains "$out" "STUCK" "untracked-only no-collision dirt is not flagged STUCK"
+  [ -f "$clone/.auth/session" ] || fail "untracked folder was discarded"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] || fail "clone was not fast-forwarded"
+  pass "untracked-only dirt that the incoming fast-forward does not touch still syncs"
+}
+
+test_untracked_collision_is_stuck_untouched() {
+  local home clone out before
+  home=$(new_home)
+  clone=$(build_pair "$home" tau)
+  advance_origin_add_file "$home" tau added.txt v1 "add added.txt"
+  printf 'local secret\n' > "$clone/added.txt"
+  before=$(head_sha "$clone")
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "tau: STUCK:" "colliding untracked dirt reports STUCK"
+  assert_contains "$out" "untracked path(s) collide with incoming changes" "STUCK names the collision case"
+  assert_contains "$out" "added.txt" "STUCK names the colliding untracked path"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "clone with colliding untracked dirt was advanced"
+  grep -q "local secret" "$clone/added.txt" || fail "untracked file was discarded"
+  pass "untracked dirt colliding with the incoming fast-forward refuses loudly and is left untouched"
+}
+
+test_untracked_dir_collision_is_stuck_untouched() {
+  local home clone out before
+  home=$(new_home)
+  clone=$(build_pair "$home" upsilon)
+  advance_origin_add_file "$home" upsilon .auth/config v1 "add .auth/config"
+  mkdir -p "$clone/.auth"
+  printf 'token\n' > "$clone/.auth/session"
+  before=$(head_sha "$clone")
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "upsilon: STUCK:" "colliding untracked directory reports STUCK"
+  assert_contains "$out" "untracked path(s) collide with incoming changes" "STUCK names the collision case"
+  assert_contains "$out" ".auth/" "STUCK names the colliding untracked directory"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "clone with colliding untracked directory was advanced"
+  grep -q "token" "$clone/.auth/session" || fail "untracked directory contents were discarded"
+  pass "untracked directory colliding with an incoming path inside it refuses loudly and is left untouched"
 }
 
 test_non_default_branch_is_stuck_untouched() {
@@ -607,6 +679,9 @@ test_detached_clean_ancestor_recovers
 test_detached_unique_commit_is_stuck_untouched
 test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched
 test_dirty_is_stuck_untouched
+test_untracked_only_no_collision_still_syncs
+test_untracked_collision_is_stuck_untouched
+test_untracked_dir_collision_is_stuck_untouched
 test_non_default_branch_is_stuck_untouched
 test_diverged_is_stuck_untouched
 test_on_default_clean_behind_fast_forwards
