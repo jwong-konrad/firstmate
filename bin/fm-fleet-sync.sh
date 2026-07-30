@@ -7,10 +7,21 @@
 # no unique commits (it is an ancestor of origin/<default>) and whose <default>
 # branch is free to check out is re-attached and then fast-forwarded ("recovered:").
 # Every other off-default state - a non-default named branch, a detached HEAD with
-# unique commits, a dirty tree, or a diverged default - may hold real work, so it
-# is left untouched and reported as a quantified, loud "STUCK: ... N commits behind
-# ... - needs attention" warning rather than a quiet drift. Nothing is ever forced,
-# stashed, or discarded.
+# unique commits, or a diverged default - may hold real work, so it is left
+# untouched and reported as a quantified, loud "STUCK: ... N commits behind ...
+# - needs attention" warning rather than a quiet drift.
+# On the default branch, a dirty tree is inspected before refusing rather than
+# refused outright. A TRACKED modification, staged change, or conflict still
+# refuses exactly as above (STUCK, untouched). Untracked-only dirt (nothing
+# tracked is dirty) is further split by whether the pending fast-forward's
+# changed paths (git diff --name-only <default> <base>) collide with any
+# untracked path: no collision - e.g. a human-provisioned untracked folder the
+# incoming commits never touch - proceeds with the fast-forward (git's own
+# checkout still refuses to overwrite an untracked file it somehow missed here;
+# that refusal is left as a loud failure, never forced); a real collision
+# refuses loudly with its own quantified warning naming the colliding untracked
+# paths, because proceeding would risk overwriting that data.
+# Nothing is ever forced, stashed, or discarded.
 # Still skips (benignly) local-only/no-origin projects, missing remotes/branches,
 # and fetch failures.
 # Pruning never deletes the checked-out branch or a branch that still has a
@@ -289,6 +300,70 @@ report_stuck() {
   echo "$label: STUCK: on $state, $behind commits behind $BASE - needs attention"
 }
 
+# True when every line of the given `git status --porcelain` output is an
+# untracked entry ("?? path"), i.e. no tracked modification, staged change, or
+# conflict is present. Empty input (a clean tree) is vacuously true but callers
+# only reach this after already confirming the tree is dirty.
+untracked_only_dirty() {
+  ! printf '%s\n' "$1" | grep -qv '^?? '
+}
+
+# The untracked paths themselves from a `git status --porcelain` blob that
+# untracked_only_dirty already confirmed is untracked-only, one per line,
+# stripped of the leading "?? " marker. An untracked directory with no tracked
+# files inside it appears as one entry with a trailing '/' (git's default
+# collapsed form), which colliding_untracked_paths relies on below.
+untracked_paths() {
+  printf '%s\n' "$1" | sed -n 's/^?? //p'
+}
+
+# Among the given untracked paths, the subset that the pending fast-forward
+# ($DEFAULT..$BASE) would create or modify: an exact file match, or a changed
+# path that falls inside an untracked directory (trailing '/'). Each colliding
+# untracked path is printed once. Empty output means the fast-forward touches
+# none of the untracked dirt, so it is safe to proceed - git's own checkout
+# still refuses to overwrite an untracked file it somehow missed here, and that
+# refusal is left as a loud failure, never forced.
+colliding_untracked_paths() {
+  local untracked=$1 changed line
+  changed=$(git -C "$PROJ" diff --name-only "$DEFAULT" "$BASE" 2>/dev/null) || return 0
+  [ -n "$changed" ] || return 0
+  # Arrays built with a plain read loop rather than `mapfile` (bash 4+ only;
+  # macOS ships bash 3.2) so this stays portable across every supported harness.
+  local -a untracked_arr=() changed_arr=()
+  while IFS= read -r line; do untracked_arr+=("$line"); done <<< "$untracked"
+  while IFS= read -r line; do changed_arr+=("$line"); done <<< "$changed"
+  local u c
+  for u in "${untracked_arr[@]}"; do
+    [ -n "$u" ] || continue
+    for c in "${changed_arr[@]}"; do
+      [ -n "$c" ] || continue
+      case "$u" in
+        */)
+          case "$c" in
+            "$u"*) printf '%s\n' "$u"; break ;;
+          esac
+          ;;
+        *)
+          if [ "$c" = "$u" ]; then
+            printf '%s\n' "$u"
+            break
+          fi
+          ;;
+      esac
+    done
+  done
+}
+
+# Loud, quantified report for untracked dirt that collides with the pending
+# fast-forward - the case where proceeding would risk overwriting that data.
+report_untracked_collision() {
+  local paths=$1 count list
+  count=$(printf '%s\n' "$paths" | grep -c .)
+  list=$(printf '%s\n' "$paths" | paste -sd ' ' -)
+  echo "$label: STUCK: $count untracked path(s) collide with incoming changes ($list) - needs attention"
+}
+
 sync_project() {
   PROJ=$1
   label=$(project_label)
@@ -334,8 +409,9 @@ sync_project() {
   fi
 
   cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
+  porcelain=$(git -C "$PROJ" status --porcelain 2>/dev/null)
   dirty=no
-  [ -z "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ] || dirty=yes
+  [ -z "$porcelain" ] || dirty=yes
   recovered=no
 
   if [ "$cur" != "$DEFAULT" ]; then
@@ -362,9 +438,21 @@ sync_project() {
       return 0
     fi
   elif [ "$dirty" = yes ]; then
-    # On the default branch but with uncommitted changes we must not disturb.
-    report_stuck "$(stuck_state)"
-    return 0
+    # On the default branch but dirty. A tracked modification, staged change,
+    # or conflict must not be disturbed, same as always. Untracked-only dirt
+    # (e.g. a human-provisioned folder nobody has gitignored yet) is further
+    # split: proceed when the pending fast-forward touches none of it, refuse
+    # loudly and name the paths when it does.
+    if untracked_only_dirty "$porcelain"; then
+      collisions=$(colliding_untracked_paths "$(untracked_paths "$porcelain")")
+      if [ -n "$collisions" ]; then
+        report_untracked_collision "$collisions"
+        return 0
+      fi
+    else
+      report_stuck "$(stuck_state)"
+      return 0
+    fi
   fi
 
   if ! git -C "$PROJ" rev-parse --verify --quiet "$DEFAULT^{commit}" >/dev/null; then
