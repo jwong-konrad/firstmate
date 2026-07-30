@@ -1266,6 +1266,11 @@ LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
+# FM_MANAGED=1 marks this process as firstmate-launched so downstream framework
+# notification hooks can skip human-facing alerts (macOS banner/sound) for it.
+# A per-launch env prefix, same mechanism as CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION
+# above: it never touches the captain's own primary session or global config.
+LAUNCH="FM_MANAGED=1 $LAUNCH"
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
