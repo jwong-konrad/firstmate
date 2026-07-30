@@ -49,6 +49,7 @@ new_home() {
 
 commit_file() {
   local dir=$1 file=$2 content=$3 msg=$4
+  mkdir -p "$(dirname "$dir/$file")"
   printf '%s\n' "$content" > "$dir/$file"
   git -C "$dir" add "$file"
   git -C "$dir" commit -qm "$msg"
@@ -326,6 +327,25 @@ test_untracked_collision_is_stuck_untouched() {
   [ "$(head_sha "$clone")" = "$before" ] || fail "clone with colliding untracked dirt was advanced"
   grep -q "local secret" "$clone/added.txt" || fail "untracked file was discarded"
   pass "untracked dirt colliding with the incoming fast-forward refuses loudly and is left untouched"
+}
+
+test_untracked_dir_collision_is_stuck_untouched() {
+  local home clone out before
+  home=$(new_home)
+  clone=$(build_pair "$home" upsilon)
+  advance_origin_add_file "$home" upsilon .auth/config v1 "add .auth/config"
+  mkdir -p "$clone/.auth"
+  printf 'token\n' > "$clone/.auth/session"
+  before=$(head_sha "$clone")
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "upsilon: STUCK:" "colliding untracked directory reports STUCK"
+  assert_contains "$out" "untracked path(s) collide with incoming changes" "STUCK names the collision case"
+  assert_contains "$out" ".auth/" "STUCK names the colliding untracked directory"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "clone with colliding untracked directory was advanced"
+  grep -q "token" "$clone/.auth/session" || fail "untracked directory contents were discarded"
+  pass "untracked directory colliding with an incoming path inside it refuses loudly and is left untouched"
 }
 
 test_non_default_branch_is_stuck_untouched() {
@@ -661,6 +681,7 @@ test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched
 test_dirty_is_stuck_untouched
 test_untracked_only_no_collision_still_syncs
 test_untracked_collision_is_stuck_untouched
+test_untracked_dir_collision_is_stuck_untouched
 test_non_default_branch_is_stuck_untouched
 test_diverged_is_stuck_untouched
 test_on_default_clean_behind_fast_forwards

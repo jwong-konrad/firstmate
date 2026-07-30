@@ -409,7 +409,7 @@ sync_project() {
   fi
 
   cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
-  porcelain=$(git -C "$PROJ" status --porcelain 2>/dev/null)
+  porcelain=$(git -C "$PROJ" status --porcelain 2>/dev/null) || porcelain=""
   dirty=no
   [ -z "$porcelain" ] || dirty=yes
   recovered=no
