@@ -9,10 +9,12 @@
 # pool slot while the first task was still in flight - two agents briefly
 # shared one workspace. This simulates a fake tmux/treehouse that always hands
 # back one fixed worktree path and asserts: a path already recorded as
-# worktree= in another live task's meta refuses the spawn (never launching an
-# agent into the collision); a path with no other matching meta proceeds
-# normally; and a path whose only prior owner's meta has already been removed
-# (torn down) is freely reusable.
+# worktree= in another live task's meta refuses the spawn immediately, on the
+# first detection, with no second `treehouse get` and without touching the
+# other task's worktree or meta (so an agent is never launched into the
+# collision); a path with no other matching meta proceeds normally; and a path
+# whose only prior owner's meta has already been removed (torn down) is freely
+# reusable.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -42,7 +44,12 @@ case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
-  send-keys) exit 0 ;;
+  send-keys)
+    if [ -n "${FM_FAKE_SENDKEYS_LOG:-}" ]; then
+      printf '%s\n' "$*" >> "$FM_FAKE_SENDKEYS_LOG"
+    fi
+    exit 0
+    ;;
 esac
 exit 0
 SH
@@ -70,14 +77,17 @@ make_collision_case() {
 }
 
 read_collision_record() {
-  IFS='|' read -r _ HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR <<EOF
+  IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR <<EOF
 $1
 EOF
+  SENDKEYS_LOG="$CASE_DIR/sendkeys.log"
 }
 
 run_collision_spawn() {
   local id=$1
+  : > "$SENDKEYS_LOG"
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_FAKE_SENDKEYS_LOG="$SENDKEYS_LOG" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
@@ -87,11 +97,12 @@ run_collision_spawn() {
 }
 
 # A worktree already recorded as worktree= in another IN-FLIGHT task's meta
-# (the pool hands back the exact same path on the re-pool retry too, the
-# worst case from the live incidents) must refuse the spawn rather than
-# launch an agent into the collision.
+# must refuse the spawn on the spot rather than launch an agent into the
+# collision - no re-pool attempt (the pane already sits in the colliding
+# worktree, so a second `treehouse get` proves nothing) and no cleanup of the
+# other task's worktree.
 test_collision_with_live_meta_is_refused() {
-  local rec id other_id out status
+  local rec id other_id out status sends
   id=collide-new-z1
   other_id=collide-other-z1
   rec=$(make_collision_case collision-refused "$id")
@@ -114,6 +125,10 @@ test_collision_with_live_meta_is_refused() {
   assert_absent "$HOME_DIR/state/$id.meta" "a refused spawn must never write meta for the new task"
   assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$other_id.meta" \
     "the other in-flight task's own meta must be left untouched"
+  [ -d "$WT_DIR" ] || fail "the colliding task's worktree must never be removed by the guard"
+  sends=$(grep -c 'treehouse get' "$SENDKEYS_LOG" 2>/dev/null || true)
+  [ "${sends:-0}" = 1 ] \
+    || fail "guard must refuse on first detection: expected exactly 1 'treehouse get', got ${sends:-0}"
   pass "a spawn colliding with another live task's recorded worktree is refused, never launched"
 }
 

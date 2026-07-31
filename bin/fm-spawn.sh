@@ -84,10 +84,13 @@
 #   Double-allocation guard: after a worktree is allocated (treehouse or
 #   Orca), the resolved path is compared against every OTHER in-flight task's
 #   state/<id>.meta worktree= value; a torn-down task has no meta file left
-#   and is never a match. A collision makes exactly one re-pool/re-request
-#   attempt; if the pool still hands back a colliding path, the spawn refuses,
-#   names the colliding task id, and exits nonzero rather than risk two agents
-#   sharing one worktree. Never applies to --secondmate (its home already
+#   and is never a match. Any detected collision refuses immediately - the
+#   spawn names the colliding task id and the worktree path and exits nonzero,
+#   with no re-pool/re-request attempt: a safe in-process re-pool is not
+#   achievable today (the pane is already sitting in the colliding worktree, so
+#   a second `treehouse get` cannot be distinguished from the first) and
+#   force-removing another task's worktree is exactly the destruction this
+#   guard exists to prevent. Never applies to --secondmate (its home already
 #   passes a separate marker-file uniqueness check in
 #   validate_firstmate_home_for_spawn).
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
@@ -859,6 +862,12 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 # runs for --secondmate (its "worktree" is a provisioned home already made
 # unique by validate_firstmate_home_for_spawn's marker-file check, not a
 # treehouse/orca pool slot).
+#
+# A match refuses on the spot. There is deliberately no re-pool attempt: the
+# pane already sits in the colliding worktree, so a second `treehouse get`
+# cannot be told apart from the first, and releasing the rejected slot would
+# mean removing a directory another in-flight task may be working in - the very
+# destruction this guard exists to prevent.
 fm_spawn_collision_conflicting_task() {  # <self-id> <candidate-worktree>
   local self_id=$1 candidate=$2 candidate_real meta mid val val_real
   [ -n "$candidate" ] || return 1
@@ -876,6 +885,11 @@ fm_spawn_collision_conflicting_task() {  # <self-id> <candidate-worktree>
     fi
   done
   return 1
+}
+
+fm_spawn_refuse_collision() {  # <allocator-label> <worktree> <colliding-id>
+  echo "error: refusing to spawn $ID - $1 handed worktree $2, already recorded as in-flight for task $3 (state/$3.meta). Inspect task $3: tear it down properly if it is finished or dead, or get captain guidance before retrying $ID." >&2
+  exit 1
 }
 
 W="fm-$ID"
@@ -1025,32 +1039,7 @@ EOF
     validate_spawn_worktree "orca worktree create" "$W"
     ORCA_COLLIDE_ID=$(fm_spawn_collision_conflicting_task "$ID" "$WT" || true)
     if [ -n "$ORCA_COLLIDE_ID" ]; then
-      echo "warning: orca handed worktree $WT, already in-flight for task $ORCA_COLLIDE_ID; requesting a different worktree" >&2
-      ORCA_REJECTED_WORKTREE_ID=$ORCA_WORKTREE_ID
-      set +e
-      ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
-      ORCA_WT_STATUS=$?
-      set -e
-      if [ "$ORCA_WT_STATUS" -ne 0 ]; then
-        if [ "$ORCA_WT_STATUS" -eq 2 ] && [ -n "$ORCA_WT_RAW" ]; then
-          if parse_orca_worktree_result "$ORCA_WT_RAW" && [ -n "$ORCA_WORKTREE_ID" ]; then
-            ORCA_ABORT_CLEANUP=1
-          fi
-        fi
-        exit 1
-      fi
-      parse_orca_worktree_result "$ORCA_WT_RAW" || true
-      if [ -z "$ORCA_WORKTREE_ID" ] || [ -z "$WT" ]; then
-        echo "error: orca did not return a worktree id/path for $W" >&2
-        exit 1
-      fi
-      validate_spawn_worktree "orca worktree create" "$W"
-      fm_backend_remove_worktree orca "$ORCA_REJECTED_WORKTREE_ID" 2>/dev/null || true
-      ORCA_COLLIDE_ID=$(fm_spawn_collision_conflicting_task "$ID" "$WT" || true)
-      if [ -n "$ORCA_COLLIDE_ID" ]; then
-        echo "error: refusing to spawn $ID - orca handed worktree $WT again, already recorded as in-flight for task $ORCA_COLLIDE_ID (state/$ORCA_COLLIDE_ID.meta). Inspect task $ORCA_COLLIDE_ID: tear it down properly if it is finished or dead, or get captain guidance before retrying $ID." >&2
-        exit 1
-      fi
+      fm_spawn_refuse_collision "orca worktree create" "$WT" "$ORCA_COLLIDE_ID"
     fi
     if [ -z "$ORCA_TERMINAL" ]; then
       ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
@@ -1119,8 +1108,6 @@ spawn_send_key() {  # <target> <key>
 # a mismatch just becomes the new candidate rather than resetting the wait, so a
 # pane that is already settled by the first real read only costs the one existing
 # inter-poll sleep as confirmation, not a whole extra cycle on top.
-# A shared function (not inlined) so the double-allocation guard below can call
-# it again for a single re-pool attempt when the pool hands back a colliding path.
 spawn_treehouse_get_worktree() {  # sets WT as a side effect; returns 0 on success
   local candidate="" p p_real
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
@@ -1151,14 +1138,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
   TH_COLLIDE_ID=$(fm_spawn_collision_conflicting_task "$ID" "$WT" || true)
   if [ -n "$TH_COLLIDE_ID" ]; then
-    echo "warning: treehouse handed worktree $WT, already in-flight for task $TH_COLLIDE_ID; requesting a different worktree" >&2
-    spawn_treehouse_get_worktree || { echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2; exit 1; }
-    validate_spawn_worktree "treehouse get" "$T"
-    TH_COLLIDE_ID=$(fm_spawn_collision_conflicting_task "$ID" "$WT" || true)
-    if [ -n "$TH_COLLIDE_ID" ]; then
-      echo "error: refusing to spawn $ID - treehouse handed worktree $WT again, already recorded as in-flight for task $TH_COLLIDE_ID (state/$TH_COLLIDE_ID.meta). Inspect task $TH_COLLIDE_ID: tear it down properly if it is finished or dead, or get captain guidance before retrying $ID." >&2
-      exit 1
-    fi
+    fm_spawn_refuse_collision "treehouse get" "$WT" "$TH_COLLIDE_ID"
   fi
 fi
 
