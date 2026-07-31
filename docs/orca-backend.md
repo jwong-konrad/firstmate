@@ -69,9 +69,10 @@ Spawn:
 
 1. Ensure the project repo is registered in Orca, adding it with `orca repo add --path` when needed.
 2. Create an independent Orca worktree with `orca worktree create --repo id:<repo> --name fm-<id> --no-parent --setup skip`.
-3. Reuse the terminal returned by Orca worktree creation only when it appears in the verified `result.terminal.handle` shape, or create a titled terminal in that worktree when Orca returns only the worktree.
-4. Install firstmate's per-harness turn-end hooks in the Orca worktree.
-5. Write metadata, then send `GOTMPDIR` export and the selected harness launch through the recorded Orca terminal.
+3. Refuse the spawn if the created worktree path is already recorded as another in-flight task's `worktree=`; the abort cleanup releases the rejected Orca worktree before exiting, and no terminal is created. `bin/fm-spawn.sh`'s header owns this double-allocation guard.
+4. Reuse the terminal returned by Orca worktree creation only when it appears in the verified `result.terminal.handle` shape, or create a titled terminal in that worktree when Orca returns only the worktree.
+5. Install firstmate's per-harness turn-end hooks in the Orca worktree.
+6. Write metadata, then send `GOTMPDIR` export and the selected harness launch through the recorded Orca terminal.
 
 Operation routing:
 
