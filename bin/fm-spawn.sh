@@ -81,6 +81,15 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   Double-allocation guard: after a worktree is allocated (treehouse or
+#   Orca), the resolved path is compared against every OTHER in-flight task's
+#   state/<id>.meta worktree= value; a torn-down task has no meta file left
+#   and is never a match. A collision makes exactly one re-pool/re-request
+#   attempt; if the pool still hands back a colliding path, the spawn refuses,
+#   names the colliding task id, and exits nonzero rather than risk two agents
+#   sharing one worktree. Never applies to --secondmate (its home already
+#   passes a separate marker-file uniqueness check in
+#   validate_firstmate_home_for_spawn).
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -840,6 +849,35 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
   esac
 }
 
+# Double-allocation guard (motivating incidents: a dead or session-relaunched
+# crewmate no longer holds its treehouse LEASE, so a later spawn for the same
+# project can be handed the SAME pool slot while the first task is still
+# in-flight, two agents briefly sharing one worktree with a `git reset --hard`
+# one approval away from destroying the other's branch). Compares the just-
+# allocated worktree against every OTHER task's recorded state/<id>.meta
+# worktree=; a torn-down task has no meta file left and is never a match. Never
+# runs for --secondmate (its "worktree" is a provisioned home already made
+# unique by validate_firstmate_home_for_spawn's marker-file check, not a
+# treehouse/orca pool slot).
+fm_spawn_collision_conflicting_task() {  # <self-id> <candidate-worktree>
+  local self_id=$1 candidate=$2 candidate_real meta mid val val_real
+  [ -n "$candidate" ] || return 1
+  candidate_real=$(real_path_or_raw "$candidate")
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    mid=$(basename "$meta" .meta)
+    [ "$mid" != "$self_id" ] || continue
+    val=$(grep '^worktree=' "$meta" | tail -1 | cut -d= -f2- || true)
+    [ -n "$val" ] || continue
+    val_real=$(real_path_or_raw "$val")
+    if [ "$val_real" = "$candidate_real" ]; then
+      printf '%s\n' "$mid"
+      return 0
+    fi
+  done
+  return 1
+}
+
 W="fm-$ID"
 case "$BACKEND" in
   tmux)
@@ -985,6 +1023,35 @@ EOF
       exit 1
     fi
     validate_spawn_worktree "orca worktree create" "$W"
+    ORCA_COLLIDE_ID=$(fm_spawn_collision_conflicting_task "$ID" "$WT" || true)
+    if [ -n "$ORCA_COLLIDE_ID" ]; then
+      echo "warning: orca handed worktree $WT, already in-flight for task $ORCA_COLLIDE_ID; requesting a different worktree" >&2
+      ORCA_REJECTED_WORKTREE_ID=$ORCA_WORKTREE_ID
+      set +e
+      ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
+      ORCA_WT_STATUS=$?
+      set -e
+      if [ "$ORCA_WT_STATUS" -ne 0 ]; then
+        if [ "$ORCA_WT_STATUS" -eq 2 ] && [ -n "$ORCA_WT_RAW" ]; then
+          if parse_orca_worktree_result "$ORCA_WT_RAW" && [ -n "$ORCA_WORKTREE_ID" ]; then
+            ORCA_ABORT_CLEANUP=1
+          fi
+        fi
+        exit 1
+      fi
+      parse_orca_worktree_result "$ORCA_WT_RAW" || true
+      if [ -z "$ORCA_WORKTREE_ID" ] || [ -z "$WT" ]; then
+        echo "error: orca did not return a worktree id/path for $W" >&2
+        exit 1
+      fi
+      validate_spawn_worktree "orca worktree create" "$W"
+      fm_backend_remove_worktree orca "$ORCA_REJECTED_WORKTREE_ID" 2>/dev/null || true
+      ORCA_COLLIDE_ID=$(fm_spawn_collision_conflicting_task "$ID" "$WT" || true)
+      if [ -n "$ORCA_COLLIDE_ID" ]; then
+        echo "error: refusing to spawn $ID - orca handed worktree $WT again, already recorded as in-flight for task $ORCA_COLLIDE_ID (state/$ORCA_COLLIDE_ID.meta). Inspect task $ORCA_COLLIDE_ID: tear it down properly if it is finished or dead, or get captain guidance before retrying $ID." >&2
+        exit 1
+      fi
+    fi
     if [ -z "$ORCA_TERMINAL" ]; then
       ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
     fi
@@ -1032,30 +1099,32 @@ spawn_send_key() {  # <target> <key>
     cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
   esac
 }
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+# Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+# Target the stable window id, not the name: if the name is ever lost (e.g. an
+# automatic-rename slips through), display-message -t <bad-name> falls back to the
+# active client's window, which would misread firstmate's OWN pane path as the
+# worktree and tangle a hook into the primary checkout. The window id never lies.
+# Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
+# prefix would otherwise make the pane's OS-level cwd read differ from
+# PROJ_ABS on the very first poll, before the pane has actually moved.
+#
+# A single read that already differs from PROJ_ABS_REAL is not proof the pane
+# settled there: on some tmux/WSL setups a brand-new window's pane_current_path
+# transiently reports an unrelated stale path (seen live as another real git
+# checkout entirely) before the shell catches up with treehouse get's cd. That
+# stale path still passes the PROJ_ABS_REAL comparison and validate_spawn_worktree
+# below (it resolves to a real, distinct worktree top-level too), so accepting it
+# on one read alone silently records the wrong worktree= in state/<id>.meta. Require
+# two consecutive reads to agree on the same non-project path before accepting it;
+# a mismatch just becomes the new candidate rather than resetting the wait, so a
+# pane that is already settled by the first real read only costs the one existing
+# inter-poll sleep as confirmation, not a whole extra cycle on top.
+# A shared function (not inlined) so the double-allocation guard below can call
+# it again for a single re-pool attempt when the pool hands back a colliding path.
+spawn_treehouse_get_worktree() {  # sets WT as a side effect; returns 0 on success
+  local candidate="" p p_real
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
-
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
-  # Target the stable window id, not the name: if the name is ever lost (e.g. an
-  # automatic-rename slips through), display-message -t <bad-name> falls back to the
-  # active client's window, which would misread firstmate's OWN pane path as the
-  # worktree and tangle a hook into the primary checkout. The window id never lies.
-  # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
-  # prefix would otherwise make the pane's OS-level cwd read differ from
-  # PROJ_ABS on the very first poll, before the pane has actually moved.
-  #
-  # A single read that already differs from PROJ_ABS_REAL is not proof the pane
-  # settled there: on some tmux/WSL setups a brand-new window's pane_current_path
-  # transiently reports an unrelated stale path (seen live as another real git
-  # checkout entirely) before the shell catches up with treehouse get's cd. That
-  # stale path still passes the PROJ_ABS_REAL comparison and validate_spawn_worktree
-  # below (it resolves to a real, distinct worktree top-level too), so accepting it
-  # on one read alone silently records the wrong worktree= in state/<id>.meta. Require
-  # two consecutive reads to agree on the same non-project path before accepting it;
-  # a mismatch just becomes the new candidate rather than resetting the wait, so a
-  # pane that is already settled by the first real read only costs the one existing
-  # inter-poll sleep as confirmation, not a whole extra cycle on top.
-  candidate=""
+  WT=
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ]; then
@@ -1074,12 +1143,23 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     fi
     sleep 1
   done
-  if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
-    exit 1
-  fi
+  [ -n "$WT" ]
+}
 
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  spawn_treehouse_get_worktree || { echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2; exit 1; }
   validate_spawn_worktree "treehouse get" "$T"
+  TH_COLLIDE_ID=$(fm_spawn_collision_conflicting_task "$ID" "$WT" || true)
+  if [ -n "$TH_COLLIDE_ID" ]; then
+    echo "warning: treehouse handed worktree $WT, already in-flight for task $TH_COLLIDE_ID; requesting a different worktree" >&2
+    spawn_treehouse_get_worktree || { echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2; exit 1; }
+    validate_spawn_worktree "treehouse get" "$T"
+    TH_COLLIDE_ID=$(fm_spawn_collision_conflicting_task "$ID" "$WT" || true)
+    if [ -n "$TH_COLLIDE_ID" ]; then
+      echo "error: refusing to spawn $ID - treehouse handed worktree $WT again, already recorded as in-flight for task $TH_COLLIDE_ID (state/$TH_COLLIDE_ID.meta). Inspect task $TH_COLLIDE_ID: tear it down properly if it is finished or dead, or get captain guidance before retrying $ID." >&2
+      exit 1
+    fi
+  fi
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
