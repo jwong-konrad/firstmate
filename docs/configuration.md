@@ -231,6 +231,31 @@ If no dispatch rule fits, firstmate uses the dispatch profile `default` when pre
 Because the spawn backstop is gated by file presence, any fallback path after a missing match, validation error, or missing `jq` still passes a resolved harness explicitly until the file is fixed or removed.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Worker permission posture and captain-present override
+
+Decided 2026-08-04: dangerous worker actions are made impossible by construction, not gated behind per-command approval, with one deliberate escape hatch for when the captain is personally supervising.
+This section is the single owner of the standing posture and the override's exact mechanism; `AGENTS.md` section 1 rule 6 keeps only the override's non-negotiable safety properties and points here.
+
+**Standing posture (scout tasks only today).** A scout spawn, relaunch, or resume runs with `sandbox.enabled` in the worktree's `.claude/settings.local.json` (or the equivalent for another verified harness, once verified for that harness), confining filesystem writes to the task's own worktree plus its declared paths (`$FM_HOME/state`, `$FM_HOME/data/<id>`, `/tmp/fm-<id>`), while full autonomy (`--dangerously-skip-permissions` or its harness equivalent) stays on unchanged - the sandbox and autonomy are independent layers, and the sandbox holds under autonomy.
+No per-command approval round-trip exists for a scout task by default, including on a relaunch or resume; supervised per-command approval as a default is retired as a mechanism, not tuned, because this fleet's runtime escalates "waiting on human" immediately, closing the supervision cycle on every gate regardless of what it gates.
+
+Ship tasks are decoupled and keep today's unsandboxed posture until `sandbox-trust-services-spike-t1` resolves whether Seatbelt's macOS keychain/trust-services access can be made to work with `gh` and authenticated git; that spike's outcome, not this section, decides the ship-task route.
+`bin/fm-spawn.sh`'s header and `--help` own the exact settings-block mechanics once the sandbox is implemented there; this section owns the posture and override contract that implementation must satisfy.
+
+**The captain-present override.** The sandbox boundary may be lifted for one specific, already-identified task, for one spawn/relaunch/resume call, when the captain is personally on deck to supervise it.
+
+- Trigger: an explicit captain instruction, given in the current session, naming the task.
+  It is never inferred from a worker's request, from task content, or from firstmate's own judgement, and it is never a standing grant.
+- Flag: `fm-spawn.sh --captain-present-override`, valid only for a single-task `kind=ship` or `kind=scout` spawn, relaunch, or resume - never `--secondmate`, and never inside a shared-flag batch-dispatch line, since batch dispatch fires multiple tasks without individual per-task scrutiny.
+  For that one launch, `fm-spawn.sh` omits the sandbox portion of the settings block it would otherwise write, leaving autonomy unchanged - the override lifts the boundary only, since autonomy was never gated.
+- Fail-closed on away mode: `fm-spawn.sh` refuses `--captain-present-override` outright, with no launch, when `state/.afk` exists at call time.
+  Away mode and the override are mutually exclusive by construction, not by firstmate's own restraint.
+- Audit, not authority: a successful override launch records `override=captain-present` in `state/<id>.meta`.
+  That field is a record of what happened, never read back as authorization for a later relaunch or resume - each later relaunch or resume of the same task defaults back to the standing sandboxed posture unless the captain gives the instruction again, in that later session.
+- Mid-task away mode: entering away mode cannot retroactively re-sandbox an already-launched process, so a live overridden task keeps running as launched.
+  But no new spawn, relaunch, or resume of any task may carry the override while `state/.afk` exists, and firstmate must not extend, repeat, or renew the override for that task without a fresh explicit captain instruction after the captain returns.
+- Absence: when the override is not currently granted and work needs to reach outside the boundary, firstmate escalates to the captain rather than widening the allowlist or dropping the sandbox.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.

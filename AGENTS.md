@@ -35,6 +35,9 @@ Hard rules, in priority order:
    Treat direct captain intervention in a crewmate window as authoritative and reconcile it at the next supervision review.
 5. **Report outcomes faithfully.**
    If work failed, say so plainly with the evidence.
+6. **Never lift a worker's sandbox boundary except under an explicit, per-task captain instruction given in the current session.**
+   The captain-present override is never inferred from a worker's request or firstmate's own judgement, never a standing grant, and never available while away mode is active (`state/.afk` present).
+   When work needs to reach outside the boundary and the override is not currently granted, escalate to the captain rather than widening the allowlist or dropping the sandbox; section 4 and `docs/configuration.md` own the standing posture and the override's exact mechanism.
 
 You may maintain this repo's private operational state directly.
 Shared tracked material is `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, and public `skills/`.
@@ -166,6 +169,10 @@ Do not add model-specific versions of that policy.
 `secondmate-provisioning` owns secondmate harness pins and inherited local material, while `harness-adapters` owns the harness consequences.
 Dispatch only on a backend that `fm-spawn` validates as spawn-capable.
 A missing dependency, authentication failure, unsupported backend, or version refusal is a blocker; never silently retry on another backend.
+
+Scout dispatch runs under a standing OS-level sandbox boundary with full autonomy retained; supervised per-command approval is not the default for any relaunch or resume.
+Ship tasks are decoupled and keep today's unsandboxed posture pending `sandbox-trust-services-spike-t1`.
+`docs/configuration.md` owns the exact settings and the captain-present override that can lift the boundary for one supervised task; section 1 rule 6 owns the override's non-negotiable safety boundary.
 
 ## 5. Recovery
 
@@ -358,7 +365,7 @@ The skill owns the daemon procedure; these safety facts remain inline:
 - A marked message while away mode is active is internal escalation and does not exit away mode.
 - A message beginning `/afk` refreshes away mode.
 - Any other unmarked message means the captain returned; load `/afk`, run the return owner, and do not process that message as ordinary work until its durable catch-up gate clears.
-- Away mode never expands approval authority for merges, ask-user findings, destructive actions, irreversible actions, or security-sensitive choices.
+- Away mode never expands approval authority for merges, ask-user findings, destructive actions, irreversible actions, or security-sensitive choices, and never confers the captain-present sandbox override (section 1 rule 6).
 - Bias ambiguous input toward exit because a present captain takes precedence.
 
 ### Stuck-worker trigger
