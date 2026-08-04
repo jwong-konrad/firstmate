@@ -90,7 +90,11 @@
 #   achievable today (the pane is already sitting in the colliding worktree, so
 #   a second `treehouse get` cannot be distinguished from the first) and
 #   force-removing another task's worktree is exactly the destruction this
-#   guard exists to prevent. Never applies to --secondmate (its home already
+#   guard exists to prevent. On Orca the refusal fires before the abort
+#   cleanup is armed, so the rejected worktree registration is deliberately
+#   left in place (removing it would `orca worktree rm --force` the other
+#   task's live workspace), no terminal is created, and no metadata is
+#   written for the refused task. Never applies to --secondmate (its home already
 #   passes a separate marker-file uniqueness check in
 #   validate_firstmate_home_for_spawn).
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
@@ -888,6 +892,7 @@ fm_spawn_collision_conflicting_task() {  # <self-id> <candidate-worktree>
 }
 
 fm_spawn_refuse_collision() {  # <allocator-label> <worktree> <colliding-id>
+  ORCA_ABORT_CLEANUP=0
   echo "error: refusing to spawn $ID - $1 handed worktree $2, already recorded as in-flight for task $3 (state/$3.meta). Inspect task $3: tear it down properly if it is finished or dead, or get captain guidance before retrying $ID." >&2
   exit 1
 }
@@ -1031,16 +1036,16 @@ EOF
       exit 1
     fi
     parse_orca_worktree_result "$ORCA_WT_RAW" || true
+    ORCA_COLLIDE_ID=$(fm_spawn_collision_conflicting_task "$ID" "$WT" || true)
+    if [ -n "$ORCA_COLLIDE_ID" ]; then
+      fm_spawn_refuse_collision "orca worktree create" "$WT" "$ORCA_COLLIDE_ID"
+    fi
     ORCA_ABORT_CLEANUP=1
     if [ -z "$ORCA_WORKTREE_ID" ] || [ -z "$WT" ]; then
       echo "error: orca did not return a worktree id/path for $W" >&2
       exit 1
     fi
     validate_spawn_worktree "orca worktree create" "$W"
-    ORCA_COLLIDE_ID=$(fm_spawn_collision_conflicting_task "$ID" "$WT" || true)
-    if [ -n "$ORCA_COLLIDE_ID" ]; then
-      fm_spawn_refuse_collision "orca worktree create" "$WT" "$ORCA_COLLIDE_ID"
-    fi
     if [ -z "$ORCA_TERMINAL" ]; then
       ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
     fi

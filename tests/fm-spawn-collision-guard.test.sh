@@ -173,8 +173,98 @@ test_torn_down_task_worktree_is_reusable() {
   pass "a worktree path with no live meta (prior owner torn down) is reusable"
 }
 
+# make_orca_fakebin <dir>: a fake orca CLI that reports a ready runtime, a
+# registered repo, and a worktree create that always hands back the path in
+# FM_FAKE_ORCA_WT_PATH. Every invocation is appended to FM_FAKE_ORCA_LOG so
+# the test can assert which orca operations ran (and which never did).
+make_orca_fakebin() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -n "${FM_FAKE_ORCA_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$FM_FAKE_ORCA_LOG"
+fi
+case "${1:-} ${2:-}" in
+  'status --json')
+    printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n'
+    ;;
+  'repo show'*|'repo add'*)
+    printf '{"ok":true,"result":{"repo":{"id":"fake-repo-1"}}}\n'
+    ;;
+  'worktree create'*)
+    printf '{"ok":true,"result":{"worktree":{"id":"fake-wt-1","path":"%s"}}}\n' "${FM_FAKE_ORCA_WT_PATH:?}"
+    ;;
+  'worktree rm'*|'terminal create'*)
+    printf '{"ok":true,"result":{}}\n'
+    ;;
+  *)
+    printf '{"ok":true,"result":{}}\n'
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/orca"
+  printf '%s\n' "$fakebin"
+}
+
+# An Orca spawn whose freshly created worktree path collides with another live
+# task's meta must refuse WITHOUT arming the abort cleanup: the rejected Orca
+# worktree is the other task's live workspace, so `orca worktree rm --force`
+# on it is exactly the destruction the guard exists to prevent. No terminal is
+# created and no meta is written for the refused task.
+test_orca_collision_refusal_never_removes_or_creates() {
+  local rec id other_id orca_fakebin orca_log out status
+  id=collide-orca-z4
+  other_id=collide-orca-other-z4
+  rec=$(make_collision_case collision-orca "$id")
+  read_collision_record "$rec"
+  orca_fakebin=$(make_orca_fakebin "$CASE_DIR/fake-orca")
+  orca_log="$CASE_DIR/orca.log"
+  : > "$orca_log"
+
+  fm_write_meta "$HOME_DIR/state/$other_id.meta" \
+    "window=fm-$other_id" \
+    "worktree=$WT_DIR" \
+    "project=$PROJ_DIR" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "yolo=off" \
+    "backend=orca" \
+    "orca_worktree_id=fake-wt-0" \
+    "terminal=fake-term-0"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 \
+    FM_FAKE_ORCA_LOG="$orca_log" FM_FAKE_ORCA_WT_PATH="$WT_DIR" \
+    PATH="$orca_fakebin:$PATH" \
+    "$SPAWN" "$id" "$PROJ_DIR" --backend orca 2>&1)
+  status=$?
+  expect_code 1 "$status" "orca spawn must refuse when the created worktree collides with a live task's meta"
+  assert_contains "$out" "$other_id" "refusal must name the colliding task id"
+  assert_contains "$out" "$WT_DIR" "refusal must name the colliding worktree path"
+  grep -q 'worktree create' "$orca_log" \
+    || fail "test setup: the fake orca never received the worktree create call"
+  if grep -q 'worktree rm' "$orca_log"; then
+    fail "collision refusal must never remove the rejected orca worktree - it is the other task's live workspace"
+  fi
+  if grep -q 'terminal create' "$orca_log"; then
+    fail "collision refusal must never create a terminal in the colliding worktree"
+  fi
+  assert_absent "$HOME_DIR/state/$id.meta" "a refused orca spawn must never write meta for the new task"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$other_id.meta" \
+    "the other in-flight task's own meta must be left untouched"
+  [ -d "$WT_DIR" ] || fail "the colliding task's worktree must never be removed by the guard"
+  pass "an orca collision refusal removes nothing, creates no terminal, and writes no meta"
+}
+
 test_collision_with_live_meta_is_refused
 test_no_collision_spawn_proceeds
 test_torn_down_task_worktree_is_reusable
+test_orca_collision_refusal_never_removes_or_creates
 
 echo "# all fm-spawn-collision-guard tests passed"
