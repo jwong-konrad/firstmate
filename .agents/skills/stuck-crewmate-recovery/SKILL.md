@@ -46,4 +46,5 @@ Escalate in order:
    Genuine wedging means looping, unresponsive, repeating the same obstacle, or truly dead.
    A low context reading is not wedging; modern harnesses auto-compact and keep going.
    The worktree and commits persist, so relaunch is cheap.
+   A relaunch never carries a prior captain-present sandbox override forward - it restarts under the standing posture unless the captain grants the override again, in the current session (`docs/configuration.md` "Worker permission posture and captain-present override").
 5. If a second relaunch fails too, write `failed` to the backlog and tell the captain the plain failure, preserved work, and consequence using `AGENTS.md` section 9; do not mention metadata, harness, window, or worktree unless the path itself is needed for action.
