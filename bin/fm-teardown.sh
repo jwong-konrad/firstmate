@@ -86,6 +86,22 @@
 # is present; teardown clears only a provably stale lock, then re-runs the safety
 # checks before any destructive return. Teardown output notes every wait, retry, and
 # removal so the operator can see what happened.
+#
+# A second, unrelated treehouse race shares the same retry path: `treehouse return
+# --force` kills lingering worktree processes just before running `git reset --hard
+# <ref>`, and that reset can occasionally lose a race against still-unwinding OS state
+# from the process just killed. Unlike a real reset failure, which git always explains,
+# this race surfaces as `failed to return worktree: git reset --hard <ref>: ` with
+# nothing after the trailing colon - an exec.ExitError with empty stderr, not a
+# diagnosed git error. treehouse's own update-availability banner ("A new version of
+# treehouse is available: ...") is unrelated cosmetic output from a separate check and
+# never affects the command's exit status; it may appear alongside either signature
+# but is not itself matched or treated as a failure. teardown_treehouse_return retries
+# this bare-reset-race signature through the same bounded FM_TREEHOUSE_RETURN_LOCK_RETRIES
+# loop as the lock case. There is no lock file for this signature, so retries exhausting
+# fails loudly with no stale-removal step; a reset failure that carries any diagnostic
+# text after the colon is a real failure and aborts immediately, exactly like any other
+# non-matching signature.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -515,6 +531,15 @@ treehouse_return_is_index_lock_error() {
   printf '%s\n' "$text" | grep -Eq "Unable to create ['\"].*index\\.lock['\"]: File exists"
 }
 
+# True when treehouse/git stderr shows the transient "git reset --hard <ref>" race
+# against killLingeringProcesses's just-issued kill: an exec.ExitError with nothing
+# after the trailing colon. A genuine reset failure always carries git's own
+# diagnostic text on the same line and must not match this or enter the retry path.
+treehouse_return_is_bare_reset_race() {
+  local text=$1
+  printf '%s\n' "$text" | grep -Eq "failed to return worktree: git reset --hard [^:]+: *\$"
+}
+
 # Absolute path to the git index lock for a worktree/repo dir, or empty when it
 # cannot be resolved (dir missing or not a git worktree at all).
 worktree_git_lock_path() {
@@ -568,7 +593,8 @@ cleanup_stale_lock_for_safety_check() {
 }
 
 # Return a worktree/home via `treehouse return --force`, tolerating a transient or
-# stale git index.lock left by a killed crew process. See the script header.
+# stale git index.lock left by a killed crew process, and the unrelated bare
+# git-reset-race signature. See the script header for both.
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
   local out lock attempt=0 max_retries lock_desc
@@ -581,13 +607,15 @@ teardown_treehouse_return() {
   fi
   [ -n "$out" ] && printf '%s\n' "$out" >&2
 
-  if ! treehouse_return_is_index_lock_error "$out"; then
+  if ! treehouse_return_is_index_lock_error "$out" && ! treehouse_return_is_bare_reset_race "$out"; then
     return 1
   fi
 
   lock=$(worktree_git_lock_path "$dir") || lock=""
   if [ -n "$lock" ]; then
     lock_desc=$lock
+  elif treehouse_return_is_bare_reset_race "$out"; then
+    lock_desc="empty-stderr git reset race"
   else
     lock_desc="index.lock"
   fi
@@ -597,21 +625,26 @@ teardown_treehouse_return() {
 
   while [ "$attempt" -lt "$max_retries" ]; do
     attempt=$(( attempt + 1 ))
-    echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
+    echo "teardown: $label return failed with a transient signature ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
     if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
       [ -n "$out" ] && printf '%s\n' "$out"
-      echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
+      echo "teardown: $label return succeeded on retry; transient signature cleared on its own" >&2
       return 0
     fi
     [ -n "$out" ] && printf '%s\n' "$out" >&2
 
-    if ! treehouse_return_is_index_lock_error "$out"; then
-      echo "teardown: $label return failed with a non-lock error after retry; aborting" >&2
+    if ! treehouse_return_is_index_lock_error "$out" && ! treehouse_return_is_bare_reset_race "$out"; then
+      echo "teardown: $label return failed with a non-transient error after retry; aborting" >&2
       return 1
     fi
   done
+
+  if ! treehouse_return_is_index_lock_error "$out"; then
+    echo "teardown: $label return failed: empty-stderr git reset race persisted across ${max_retries} retries (waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s each); aborting" >&2
+    return 1
+  fi
 
   # Refresh lock path after the patience window; it may have appeared, moved, or
   # cleared while we waited.

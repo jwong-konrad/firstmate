@@ -49,6 +49,14 @@
 #   (w) index.lock mtime read failure                         -> lock kept, REFUSE
 #   (x) transient lock cleared after first failed return      -> retry ALLOW
 #   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#
+# Also covers the unrelated bare git-reset-race signature (a killed crew process's
+# git reset --hard losing a race against killLingeringProcesses's just-issued kill,
+# surfacing as an empty-stderr "git reset --hard <ref>: " with nothing else - distinct
+# from the update-availability banner, which is cosmetic and never affects exit status):
+#   (z)  bare-reset race cleared after first failed return     -> retry ALLOW
+#   (aa) persistent bare-reset race (never clears)              -> REFUSE loudly
+#   (ab) real reset failure carrying diagnostic text            -> REFUSE immediately, no retry
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -391,6 +399,74 @@ if [ "${1:-}" = return ]; then
   fi
   echo "fatal: Unable to create '$lock': File exists." >&2
   exit 128
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+# treehouse return fails once with the real, uncovered signature - an empty-stderr
+# "git reset --hard <ref>: " wrapped error, exactly as treehouse's own return_cmd.go /
+# pool.Release / git.ResetWorktree produce when git reset --hard loses its race against
+# killLingeringProcesses's just-issued kill - then succeeds on retry, simulating the
+# race clearing on its own. Also emits the unrelated update-availability banner on the
+# first attempt, to prove the banner itself is never what the matcher keys off of.
+add_transient_bare_reset_race_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ]; then
+  count_file="${TREEHOUSE_ATTEMPT_FILE:?}"
+  count=0
+  if [ -f "$count_file" ]; then
+    count=$(cat "$count_file")
+  fi
+  count=$(( count + 1 ))
+  printf '%s\n' "$count" > "$count_file"
+  if [ "$count" -eq 1 ]; then
+    echo "A new version of treehouse is available: v2.0.1 -> v2.1.1" >&2
+    echo "failed to return worktree: git reset --hard master: " >&2
+    exit 1
+  fi
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+# treehouse return always fails with the bare-reset-race signature; used to assert
+# exhausted retries still refuse loudly, exactly like a persistent index.lock.
+add_persistent_bare_reset_race_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ]; then
+  echo "failed to return worktree: git reset --hard master: " >&2
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+# treehouse return fails with a REAL git reset failure - diagnostic text after the
+# trailing colon, exactly what a genuine reset failure always carries and the
+# empty-stderr race never does. Must abort immediately with no retry.
+add_real_reset_failure_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ]; then
+  count_file="${TREEHOUSE_ATTEMPT_FILE:?}"
+  count=0
+  if [ -f "$count_file" ]; then
+    count=$(cat "$count_file")
+  fi
+  count=$(( count + 1 ))
+  printf '%s\n' "$count" > "$count_file"
+  echo "failed to return worktree: git reset --hard master: error: Entry 'x' not uptodate. Cannot merge." >&2
+  exit 1
 fi
 exit 0
 SH
@@ -1158,6 +1234,95 @@ test_persistent_index_lock_exhausts_retries_and_refuses_loudly() {
   pass "persistent index.lock exhausts retries and refuses without force-removing the lock"
 }
 
+test_transient_bare_reset_race_clears_after_first_attempt_and_retry_succeeds() {
+  local case_dir rc attempt_file
+  case_dir=$(make_case transient-bare-reset-race)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  add_transient_bare_reset_race_treehouse "$case_dir"
+
+  attempt_file="$case_dir/treehouse-attempts"
+  : > "$attempt_file"
+
+  set +e
+  TREEHOUSE_ATTEMPT_FILE="$attempt_file" \
+  FM_TREEHOUSE_RETURN_LOCK_RETRIES=2 \
+  FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=0 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "transient-bare-reset-race: teardown should succeed on retry after the race clears"
+  assert_grep "succeeded on retry" "$case_dir/stderr" \
+    "transient-bare-reset-race: teardown did not report success on retry"
+  assert_grep "A new version of treehouse is available" "$case_dir/stderr" \
+    "transient-bare-reset-race: the cosmetic banner should still pass through to output"
+  [ "$(cat "$attempt_file")" = 2 ] \
+    || fail "transient-bare-reset-race: expected exactly 2 treehouse return attempts, got $(cat "$attempt_file")"
+  pass "transient bare-reset race clears after first failed return and retry succeeds despite the update banner"
+}
+
+test_persistent_bare_reset_race_exhausts_retries_and_refuses_loudly() {
+  local case_dir rc
+  case_dir=$(make_case persistent-bare-reset-race)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  add_persistent_bare_reset_race_treehouse "$case_dir"
+
+  set +e
+  FM_TREEHOUSE_RETURN_LOCK_RETRIES=2 \
+  FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=0 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "persistent-bare-reset-race: teardown should refuse when the race never clears"
+  assert_grep "persisted across" "$case_dir/stderr" \
+    "persistent-bare-reset-race: teardown did not mention the exhausted retry window"
+  assert_grep "teardown aborted" "$case_dir/stderr" \
+    "persistent-bare-reset-race: teardown did not abort loudly"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "persistent-bare-reset-race: teardown completed despite the persistent race"
+  pass "persistent bare-reset race exhausts retries and refuses loudly"
+}
+
+test_real_reset_failure_with_diagnostic_text_aborts_immediately() {
+  local case_dir rc attempt_file
+  case_dir=$(make_case real-reset-failure)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  add_real_reset_failure_treehouse "$case_dir"
+
+  attempt_file="$case_dir/treehouse-attempts"
+  : > "$attempt_file"
+
+  set +e
+  TREEHOUSE_ATTEMPT_FILE="$attempt_file" \
+  FM_TREEHOUSE_RETURN_LOCK_RETRIES=2 \
+  FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=0 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "real-reset-failure: teardown should refuse a genuine reset failure"
+  assert_not_contains "$(cat "$case_dir/stderr")" "transient signature" \
+    "real-reset-failure: teardown wrongly treated a genuine failure as transient"
+  [ "$(cat "$attempt_file")" = 1 ] \
+    || fail "real-reset-failure: expected exactly 1 treehouse return attempt (no retry), got $(cat "$attempt_file")"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "real-reset-failure: teardown completed despite the genuine reset failure"
+  pass "a real reset failure with diagnostic text aborts immediately without retry"
+}
+
 test_empty_retry_wait_uses_default_without_aborting() {
   local case_dir rc lock attempt_file
   case_dir=$(make_case empty-retry-wait)
@@ -1401,5 +1566,8 @@ test_non_linked_index_lock_path_is_checked_from_worktree
 test_index_lock_mtime_read_failure_refuses
 test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
 test_persistent_index_lock_exhausts_retries_and_refuses_loudly
+test_transient_bare_reset_race_clears_after_first_attempt_and_retry_succeeds
+test_persistent_bare_reset_race_exhausts_retries_and_refuses_loudly
+test_real_reset_failure_with_diagnostic_text_aborts_immediately
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
