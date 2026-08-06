@@ -1114,6 +1114,14 @@ lab pane get "$OLD_RESTART_PANE" >/dev/null 2>&1 \
 if lab agent get "$OLD_RESTART_PANE" >/dev/null 2>&1; then
   fail "restart fixture unexpectedly retained a registered agent"
 fi
+# The restart killed every pane in this session, so the anchor's shell no longer
+# holds its Treehouse lease and its pool slot is handed back out - while
+# state/anchor.meta still records it as in-flight. Retire the anchor here (its
+# durable-firstmate-workspace job is done; the workspace itself survives a pane
+# teardown) so the respawn below is not handed the anchor's worktree, which
+# fm-spawn.sh's double-allocation guard correctly refuses.
+teardown_task anchor "$HOME_DIR" > "$TMP_ROOT/anchor-teardown.out" 2> "$TMP_ROOT/anchor-teardown.err" \
+  || fail "restart-released anchor teardown failed: $(cat "$TMP_ROOT/anchor-teardown.err")"
 spawn_task restart1 "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/restart-flat.out" 2> "$TMP_ROOT/restart-flat.err" \
   || fail "flat fallback after restart failed: $(cat "$TMP_ROOT/restart-flat.err")"
 NEW_RESTART_WT=$(remember_meta_worktree "$RESTART_META")
