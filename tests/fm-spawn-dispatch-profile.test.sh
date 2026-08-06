@@ -347,15 +347,84 @@ test_pi_threads_model_and_max_effort() {
   pass "pi receives --model and --thinking max profile flags"
 }
 
+# make_batch_worktree_fakebin <dir> <id1> <wt1> <wt2>: like make_spawn_fakebin,
+# but #{pane_current_path} hands back <wt1> for task <id1>'s window and <wt2>
+# for every other one - two batch pairs against the same project must land in
+# two DISTINCT worktrees (as a real treehouse pool would hand out), or
+# fm-spawn's double-allocation guard (bin/fm-spawn.sh,
+# fm_spawn_collision_conflicting_task) correctly refuses the second pair as
+# colliding with the first pair's already-recorded state/<id>.meta.
+#
+# new-window reports a per-task window id derived from the fm-<id> window name
+# it was handed, and the pane read branches on that id, so which pair gets which
+# worktree never depends on the settle loop's exact poll count.
+make_batch_worktree_fakebin() {
+  local dir=$1 id1=$2 wt1=$3 wt2=$4 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+set -u
+case "\$*" in
+  *"#{pane_current_path}"*)
+    case "\$*" in
+      *"@fm-$id1"*) printf '%s\n' "$wt1" ;;
+      *) printf '%s\n' "$wt2" ;;
+    esac
+    exit 0
+    ;;
+  *"#{window_id}"*)
+    wname=
+    prev=
+    for a in "\$@"; do
+      if [ "\$prev" = "-n" ]; then
+        wname=\$a
+      fi
+      prev=\$a
+    done
+    if [ -z "\$wname" ]; then
+      echo "fake tmux: new-window got no -n <window-name>" >&2
+      exit 1
+    fi
+    printf '@%s\n' "\$wname"
+    exit 0
+    ;;
+esac
+case "\${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+  has-session|new-session|new-window|kill-window) exit 0 ;;
+  send-keys)
+    if [ -n "\${FM_FAKE_LAUNCH_LOG:-}" ]; then
+      prev=
+      for a in "\$@"; do
+        if [ "\$prev" = "-l" ]; then
+          printf '%s\n' "\$a" >> "\${FM_FAKE_LAUNCH_LOG}"
+        fi
+        prev=\$a
+      done
+    fi
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" treehouse
+  printf '%s\n' "$fakebin"
+}
+
 test_batch_forwards_shared_profile_flags() {
-  local rec id1 id2 out status
+  local rec id1 id2 out status wt2 batch_fakebin
   id1=profile-batch-a-z9
   id2=profile-batch-b-z10
   rec=$(make_spawn_case profile-batch claude "$id1" "$id2")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
+  wt2="$CASE_DIR/wt2"
+  git -C "$PROJ_DIR" worktree add --quiet -b wt2-profile-batch "$wt2"
+  batch_fakebin=$(make_batch_worktree_fakebin "$CASE_DIR/batch-fake" "$id1" "$WT_DIR" "$wt2")
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$batch_fakebin" "$LAUNCH_LOG" \
     "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
   status=$?
   expect_code 0 "$status" "batch spawn with shared profile flags should succeed"
@@ -363,6 +432,10 @@ test_batch_forwards_shared_profile_flags() {
   assert_contains "$out" "spawned $id2 harness=codex" "second batch task did not use shared harness"
   assert_meta_profile "$HOME_DIR/state/$id1.meta" codex gpt-5 high
   assert_meta_profile "$HOME_DIR/state/$id2.meta" codex gpt-5 high
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id1.meta" \
+    "first batch pair did not record its own distinct worktree"
+  assert_grep "worktree=$wt2" "$HOME_DIR/state/$id2.meta" \
+    "second batch pair did not record its own distinct worktree"
   pass "batch dispatch forwards shared --harness, --model, and --effort to every pair"
 }
 
