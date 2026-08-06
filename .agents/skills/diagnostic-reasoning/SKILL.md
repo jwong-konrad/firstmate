@@ -51,3 +51,10 @@ Before acting on the report, verify that its claimed cause explains the end-user
 If a load-bearing element is missing, route a focused follow-up investigation instead of treating confidence or implementation detail as proof.
 A diagnosis or implementation-ready recommendation is evidence, not authorization to change code.
 Implementation still requires the captain's request or another existing lifecycle authority, and the reproduction should become the regression test when a fix is authorized.
+
+Several workers agreeing is not evidence, because they may be reading the same misleading string.
+The tell: a genuine configuration fault fails deterministically at the same step, while environmental failures die at different steps within the same minute.
+Before acting on an agreed diagnosis that would widen permissions, look for a recent counterexample.
+
+An upstream audit or scout report is evidence, not scripture.
+Brief workers so that refusing to transcribe a verifiably wrong upstream claim is the expected behavior, and when a cited report is wrong, append a marked correction to that report itself.

@@ -16,6 +16,17 @@ SECONDMATE="$ROOT/.agents/skills/secondmate-provisioning/SKILL.md"
 CONFIG="$ROOT/docs/configuration.md"
 AGENTS="$ROOT/AGENTS.md"
 BRIEF="$ROOT/bin/fm-brief.sh"
+AFK="$ROOT/.agents/skills/afk/SKILL.md"
+
+# section_body <file> <heading>: print the lines under <heading> up to the next
+# heading of the same or higher level, so placement can be asserted per section.
+section_body() {
+  awk -v want="$2" '
+    $0 == want { inside = 1; next }
+    inside && /^#+ / { inside = 0 }
+    inside { print }
+  ' "$1"
+}
 
 test_new_skill_metadata_and_triggers() {
   local skill name count
@@ -221,7 +232,54 @@ test_compressed_agents_retains_authority_and_supervision_safety() {
   pass "compressed AGENTS.md retains authority, supervision, AFK, and X safety"
 }
 
+test_migrated_operational_learnings_sit_in_trigger_matched_sections() {
+  local body
+
+  body=$(section_body "$HARNESS" "## Spawn-time and dispatch hazards")
+  assert_contains "$body" "Concurrent validation pipelines, not model tier, exhaust the usage window." \
+    "harness-adapters lost the concurrent-pipeline usage-window hazard"
+  assert_contains "$body" "A dead agent releases its treehouse lease" \
+    "harness-adapters lost the worktree-slot collision hazard"
+  assert_contains "$body" "SSH_AUTH_SOCK" \
+    "harness-adapters lost the inherited-credential exposure hazard"
+
+  body=$(section_body "$RECOVERY" "## Live-endpoint escalation")
+  assert_contains "$body" "Two common panes are not wedging and must not be relaunched." \
+    "recovery skill lost the not-wedging carve-outs"
+  assert_contains "$body" "supervised or manual permission mode generates escalations in a loop" \
+    "recovery skill lost the approval-loop pane carve-out"
+  assert_contains "$body" "A worker parked on a background validation run shows a static pane" \
+    "recovery skill lost the background-validation pane carve-out"
+
+  body=$(section_body "$AFK" "## What it does")
+  assert_contains "$body" "Away-mode entry with pending notifications is order-sensitive" \
+    "afk skill lost the entry-side ordering guidance"
+
+  body=$(section_body "$AFK" "## How to exit afk")
+  assert_contains "$body" "Clear their queued prompts first thing on return" \
+    "afk skill lost the return-side queued-prompt guidance"
+  assert_contains "$body" "the return check must pass before away mode may be re-entered" \
+    "afk skill lost the interrupted-return re-entry guard"
+
+  body=$(section_body "$PROJECT" "## Add or clone an existing project")
+  assert_contains "$body" "When a project's origin is re-pointed, re-run \`no-mistakes init\` in that project." \
+    "project-management lost the origin re-point guidance"
+  assert_contains "$body" "The pull-request target lives in no-mistakes' own state database" \
+    "project-management lost the reason a stale PR target survives a re-point"
+
+  body=$(section_body "$DIAG" "## Scope and act on the result")
+  assert_contains "$body" "Several workers agreeing is not evidence" \
+    "diagnostic-reasoning lost the agreement-is-not-evidence entry"
+  assert_contains "$body" "An upstream audit or scout report is evidence, not scripture." \
+    "diagnostic-reasoning lost the upstream-report entry"
+  assert_contains "$body" "append a marked correction to that report itself" \
+    "diagnostic-reasoning lost the marked-correction remedy"
+
+  pass "migrated operational learnings sit in their trigger-matched skill sections"
+}
+
 test_new_skill_metadata_and_triggers
+test_migrated_operational_learnings_sit_in_trigger_matched_sections
 test_diagnostic_owner_covers_causal_procedure
 test_project_management_owner_covers_guarded_operations
 test_generic_effort_fallback_respects_precedence
