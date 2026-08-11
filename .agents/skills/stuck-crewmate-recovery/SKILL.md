@@ -36,14 +36,6 @@ If the worktree or ownership cannot be reconciled safely, leave all state intact
 
 ## Live-endpoint escalation
 
-Two common panes are not wedging and must not be relaunched.
-
-A worker in supervised or manual permission mode generates escalations in a loop because it is waiting on human approval; the monitoring is behaving correctly, so unblock the worker instead of repairing supervision.
-During away mode such a worker makes no progress at all, because the away-mode daemon can escalate but never approve, so clear its queued prompts first thing on return.
-
-A worker parked on a background validation run shows a static pane, and current-state reconciliation may report a stale pre-validation line.
-Ground truth is `no-mistakes axi status` in that task's worktree: steer a passively waiting worker to run it now and report, rather than interrupting or relaunching.
-
 Escalate in order:
 
 1. Peek the pane.

@@ -46,11 +46,6 @@ A `no-mistakes` project must have an `origin` remote and must complete the initi
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
 A `local-only` project may have no remote and skips no-mistakes initialization.
 
-When a project's origin is re-pointed, re-run `no-mistakes init` in that project.
-The pull-request target lives in no-mistakes' own state database and no git or `gh` configuration reaches it, so a stale target silently opens pull requests against the wrong base.
-Never hand-write the 'raised via no-mistakes' provenance section into a pull-request body - only the pipeline's own pr step may write it.
-The authentic cheap re-issue is `no-mistakes axi run --skip=intent,rebase,review,test,document,lint`, which re-runs only push, pr, and ci and leaves the branch head unchanged.
-
 ## Create a project
 
 Creating a GitHub repository is outward-facing.
