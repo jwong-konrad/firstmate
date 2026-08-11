@@ -892,6 +892,10 @@ fm_spawn_collision_conflicting_task() {  # <self-id> <candidate-worktree>
 }
 
 fm_spawn_refuse_collision() {  # <allocator-label> <worktree> <colliding-id>
+  # Defense in depth: a collision refusal must never let the EXIT trap clean up
+  # (and thereby mutate or remove) the colliding worktree, which belongs to the
+  # other task, not this spawn attempt. Clearing this here holds even if a
+  # future reorder moves this check past where ORCA_ABORT_CLEANUP gets set.
   ORCA_ABORT_CLEANUP=0
   echo "error: refusing to spawn $ID - $1 handed worktree $2, already recorded as in-flight for task $3 (state/$3.meta). Inspect task $3: tear it down properly if it is finished or dead, or get captain guidance before retrying $ID." >&2
   exit 1
@@ -1036,6 +1040,12 @@ EOF
       exit 1
     fi
     parse_orca_worktree_result "$ORCA_WT_RAW" || true
+    # The collision check runs BEFORE ORCA_ABORT_CLEANUP=1 is set: on a match,
+    # $WT IS another live task's worktree, so a refusal must never arm the EXIT
+    # trap's `orca worktree rm --force` against it - there is nothing of THIS
+    # spawn's to clean up when the "created" worktree turns out to be someone
+    # else's. fm_spawn_refuse_collision also clears the flag defensively so a
+    # future reorder here cannot silently reintroduce that hazard.
     ORCA_COLLIDE_ID=$(fm_spawn_collision_conflicting_task "$ID" "$WT" || true)
     if [ -n "$ORCA_COLLIDE_ID" ]; then
       fm_spawn_refuse_collision "orca worktree create" "$WT" "$ORCA_COLLIDE_ID"
