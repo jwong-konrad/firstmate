@@ -242,8 +242,6 @@ No per-command approval round-trip exists for a scout task by default, including
 Ship tasks are decoupled and keep today's unsandboxed posture until `sandbox-trust-services-spike-t1` resolves whether Seatbelt's macOS keychain/trust-services access can be made to work with `gh` and authenticated git; that spike's outcome, not this section, decides the ship-task route.
 `bin/fm-spawn.sh`'s header and `--help` own the exact settings-block mechanics once the sandbox is implemented there; this section owns the posture and override contract that implementation must satisfy.
 
-The boundary described here is a filesystem-write boundary only: workers still inherit the captain's full login environment, including forwarded credentials, which is a standing exposure recorded in [`harness-adapters`](../.agents/skills/harness-adapters/SKILL.md) ("Spawn-time and dispatch hazards") and not closed by the sandbox or the override contract.
-
 **The captain-present override.** The sandbox boundary may be lifted for one specific, already-identified task, for one spawn/relaunch/resume call, when the captain is personally on deck to supervise it.
 
 - Trigger: an explicit captain instruction, given in the current session, naming the task.
