@@ -74,6 +74,8 @@ fi
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-progress-lib.sh
+. "$SCRIPT_DIR/fm-progress-lib.sh"
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -204,6 +206,16 @@ TARGET_TASK_ID=
 if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
   MARK_FROM_FIRSTMATE=1
   TARGET_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
+fi
+
+# Steering a task is firstmate deliberately restarting work on it, so drop any
+# cached "idle" progressing verdict now rather than waiting for the worker's
+# first turn-end marker to invalidate it (bin/fm-progress-lib.sh). Invalidation
+# only ever moves a task from idle back to progressing, so the guards stay on the
+# alarming side. Done BEFORE delivery: a steer that then fails to land must not
+# leave a stale idle verdict behind.
+if [ -n "$TARGET_META" ]; then
+  fm_progress_record_invalidate "$STATE" "$(fm_send_id_from_meta "$TARGET_META")"
 fi
 
 # Resolve the target's harness from its meta (recorded by fm-spawn), used only to

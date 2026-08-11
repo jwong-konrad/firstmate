@@ -108,6 +108,253 @@ test_child_worktree_and_malformed_input_fail_open() {
   pass "continuity gate excludes child worktrees and fails open on opaque input"
 }
 
+# The six commands the 2026-08-05 deadlock denied - exactly the ones that would
+# have steered the idle panes back to life and cleared the staleness.
+RECOVERY_COMMANDS=(
+  'bin/fm-send.sh restart-1 continue'
+  'bin/fm-peek.sh restart-1'
+  'bin/fm-crew-state.sh restart-1'
+  'bin/fm-brief.sh restart-1 fixture'
+  'bin/fm-spawn.sh restart-1 fixture'
+  'bin/fm-decision-hold.sh restart-1 --reason fixture'
+)
+
+CYCLE_LOG="$STATE/.watch-cycle-exits.log"
+
+# One arm-layer lifecycle record in bin/fm-watch-arm.sh's exact tab-separated
+# format. <reason> is the classified close and <ended-at> its epoch. <origin>
+# defaults to started (the arm that forked the watcher) and <successor> to none.
+ledger_record() {  # <reason> <ended-at> [origin] [successor]
+  printf 'arm_pid=4242\twatcher_pid=4243\torigin=%s\tstarted_at=%s\tended_at=%s\texit_code=0\tsignal=none\treason=%s\tbeacon_age=2\tlock_before=pid:4243|identity:fixture\tlock_after=pid:none|identity:none\tsuccessor=%s\n' \
+    "${3:-started}" "$(( $2 - 3 ))" "$2" "$1" "${4:-none}" >> "$CYCLE_LOG"
+}
+
+# Rebuild the exact 2026-08-05 shape: ten direct reports whose panes have been
+# idle far past FM_STALE_ESCALATE_SECS, every task still counting progressing
+# (no verdict record), and NO watcher holding the lock because the one-shot cycle
+# closed the instant a stale reason was available.
+stage_ten_idle_reports() {
+  local i
+  rm -rf "$STATE/.watch.lock"
+  rm -f "$CYCLE_LOG" "$STATE"/*.meta "$STATE"/*.status "$STATE"/.progress-* 2>/dev/null || true
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    printf 'project=fixture\nwindow=fm-restart-%s\n' "$i" > "$STATE/restart-$i.meta"
+    printf 'working: implementing\n' > "$STATE/restart-$i.status"
+    touch -t 200001010000 "$STATE/restart-$i.status"
+  done
+  touch -t 200001010000 "$STATE/.last-watcher-beat"
+}
+
+test_serviced_wake_does_not_deadlock_recovery() {
+  local command
+  stage_ten_idle_reports
+  # Counterfactual first: with no servicing evidence this is genuinely absent
+  # supervision, and every recovery command must still be denied. This is the
+  # pre-change behavior, and the reason the deadlock happened.
+  for command in "${RECOVERY_COMMANDS[@]}"; do
+    expect_deny "absent supervision blocks ${command%% *}" "$command" "$(basename "${command%% *}")"
+  done
+
+  # Now the watcher does what it is designed to do: it delivers one actionable
+  # stale wake and closes, leaving no lock holder. Firstmate is inside the
+  # interval it was woken to act in, so the remedy must be available.
+  ledger_record actionable-stale "$(date +%s)"
+  for command in "${RECOVERY_COMMANDS[@]}"; do
+    expect_allow "serviced wake permits ${command%% *}" "$command"
+  done
+  pass "ten reports idle past the stale threshold no longer deadlock the six recovery commands"
+}
+
+test_only_a_delivered_wake_opens_the_service_window() {
+  local reason command
+  # Every non-actionable close reason bin/fm-watch-arm.sh can record. None of
+  # them is evidence supervision ran, so none may open the window. A declined
+  # arm writes no record at all, which the empty-ledger case above covers.
+  for reason in confirmation-timeout unexpected-clean-exit nonzero-exit signal-exit \
+                arm-interrupted; do
+    stage_ten_idle_reports
+    ledger_record "$reason" "$(date +%s)"
+    expect_deny "close reason $reason is not servicing" 'bin/fm-send.sh restart-1 continue' 'fm-send.sh'
+  done
+
+  # The attach-path reasons, written with the origin the arm layer actually uses.
+  # An arm that only attached to somebody else's watcher never read its output, so
+  # its rows are not servicing evidence either.
+  for reason in attached-cycle-ended lock-replaced arm-interrupted; do
+    stage_ten_idle_reports
+    ledger_record "$reason" "$(date +%s)" attached
+    expect_deny "attached close reason $reason is not servicing" 'bin/fm-send.sh restart-1 continue' 'fm-send.sh'
+  done
+
+  # An actionable record that has aged past the grace re-closes the gate, so an
+  # abandoned wake cannot hold it open indefinitely.
+  stage_ten_idle_reports
+  ledger_record actionable-stale "$(( $(date +%s) - 4000 ))"
+  expect_deny "expired servicing evidence re-closes the gate" 'bin/fm-send.sh restart-1 continue' 'fm-send.sh'
+
+  # A truncated or garbled ended_at field must not parse as fresh servicing.
+  stage_ten_idle_reports
+  printf 'arm_pid=1\treason=actionable-stale\tended_at=notanepoch\tsuccessor=none\n' >> "$CYCLE_LOG"
+  expect_deny "unparseable servicing timestamp still denies" 'bin/fm-send.sh restart-1 continue' 'fm-send.sh'
+
+  # The ledger is gitignored runtime state, so a future-dated record must not be
+  # readable as permanently fresh servicing evidence.
+  stage_ten_idle_reports
+  ledger_record actionable-stale "$(( $(date +%s) + 999999 ))"
+  expect_deny "future-dated servicing evidence still denies" 'bin/fm-send.sh restart-1 continue' 'fm-send.sh'
+
+  # The grace is configurable, and shrinking it must re-engage the guard against
+  # evidence that would otherwise be fresh enough.
+  stage_ten_idle_reports
+  ledger_record actionable-stale "$(( $(date +%s) - 120 ))"
+  local rc=0
+  : > "$OUT"; : > "$ERR"
+  FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
+    FM_CONTINUITY_SERVICE_GRACE=30 \
+    "$CHECK" --command 'bin/fm-send.sh restart-1 continue' > "$OUT" 2> "$ERR" || rc=$?
+  [ "$rc" -eq 2 ] || fail "a shortened service grace must re-engage the guard, got exit $rc"
+
+  # Ordering: a delivered wake followed by an arm that failed, crashed, or was
+  # signalled must re-close the window on the newer record, not stay open on the
+  # older actionable one until it ages out.
+  for reason in confirmation-timeout unexpected-clean-exit nonzero-exit signal-exit \
+                arm-interrupted; do
+    stage_ten_idle_reports
+    ledger_record actionable-stale "$(( $(date +%s) - 6 ))"
+    ledger_record "$reason" "$(date +%s)"
+    expect_deny "a later $reason close re-closes the window" 'bin/fm-send.sh restart-1 continue' 'fm-send.sh'
+  done
+
+  # But a SECOND arm's bookkeeping must not supersede the owner's delivered wake.
+  # Every arm in a home appends to the same ledger, so an arm that merely attached
+  # to the owner's watcher notices the lock is gone shortly after the wake and
+  # closes its own observation. Firstmate is still inside the interval it was woken
+  # to act in, so those rows may not shut the window.
+  for reason in attached-cycle-ended lock-replaced arm-interrupted; do
+    stage_ten_idle_reports
+    ledger_record actionable-stale "$(( $(date +%s) - 12 ))"
+    ledger_record "$reason" "$(date +%s)" attached "attached:4444"
+    expect_allow "attached $reason does not mask the owner's delivered wake" 'bin/fm-send.sh restart-1 continue'
+  done
+
+  # The owner writes one stand-down row of its own: a clean close while a verified
+  # successor already holds the lock. It says nothing about wake delivery either.
+  stage_ten_idle_reports
+  ledger_record actionable-stale "$(( $(date +%s) - 12 ))"
+  ledger_record unexpected-clean-exit "$(date +%s)" started "attached:4444"
+  expect_allow "an owner hand-off to a successor does not mask a delivered wake" 'bin/fm-send.sh restart-1 continue'
+
+  # The same reason with successor=none IS the arm failing, and must still deny.
+  stage_ten_idle_reports
+  ledger_record actionable-stale "$(( $(date +%s) - 12 ))"
+  ledger_record unexpected-clean-exit "$(date +%s)" started none
+  expect_deny "an owner clean close with no successor re-closes the window" 'bin/fm-send.sh restart-1 continue' 'fm-send.sh'
+
+  # And the newest record still governs in the other direction: a fresh delivered
+  # wake after a failed close re-opens the window.
+  stage_ten_idle_reports
+  ledger_record confirmation-timeout "$(( $(date +%s) - 6 ))"
+  ledger_record actionable-stale "$(date +%s)"
+  expect_allow "a later delivered wake re-opens the window" 'bin/fm-send.sh restart-1 continue'
+
+  # Servicing evidence is read field-wise, so an actionable-looking value carried
+  # in a free-text field of a non-actionable record cannot forge it.
+  stage_ten_idle_reports
+  printf 'arm_pid=4242\twatcher_pid=4243\torigin=reason=actionable-stale ended_at=%s\tstarted_at=%s\tended_at=%s\texit_code=1\tsignal=none\treason=confirmation-timeout\tbeacon_age=2\tlock_before=none\tlock_after=none\tsuccessor=none\n' \
+    "$(date +%s)" "$(( $(date +%s) - 3 ))" "$(date +%s)" >> "$CYCLE_LOG"
+  expect_deny "field-anchored parse rejects forged servicing text" 'bin/fm-send.sh restart-1 continue' 'fm-send.sh'
+
+  # And the recovery/teardown exemptions still behave while servicing is absent.
+  stage_ten_idle_reports
+  expect_allow "wake drain still exempt while absent" 'bin/fm-wake-drain.sh'
+  expect_allow "arm still exempt while absent" 'bin/fm-watch-arm.sh'
+  pass "only a genuinely delivered wake inside the grace opens the service window"
+}
+
+# Every ledger literal the reader in bin/fm-supervision-lib.sh keys on - the reason
+# vocabulary, the cycle origins, and the successor hand-off encoding - must still
+# match what bin/fm-watch-arm.sh writes. An unclassified reason token would land in
+# whichever bucket the fallback happens to be, which is how an observer's bookkeeping
+# row came to mask a genuinely delivered wake.
+test_reader_classifies_every_reason_the_writer_emits() {
+  local token classified emitted unclassified=
+  # shellcheck source=bin/fm-supervision-lib.sh
+  . "$ROOT/bin/fm-supervision-lib.sh"
+  classified=" $FM_SUPERVISION_REASONS_DELIVERED $FM_SUPERVISION_REASONS_FAILED $FM_SUPERVISION_REASONS_STANDDOWN $FM_SUPERVISION_REASONS_ATTACHED "
+  emitted=$( {
+    grep -h 'cycle_log_append ' "$ROOT/bin/fm-watch-arm.sh" | grep -v '^[[:space:]]*#' \
+      | tr ' ' '\n' | grep -E '^[a-z]+(-[a-z]+)+$'
+    grep -oE "printf 'actionable-[a-z]+'" "$ROOT/bin/fm-watch-arm.sh" | sed "s/.*'\(.*\)'/\1/"
+    grep -oE 'reason_type="[a-z-]+"' "$ROOT/bin/fm-watch-arm.sh" | sed 's/.*"\(.*\)"/\1/'
+  } | sort -u )
+  [ -n "$emitted" ] || fail "could not enumerate the reason tokens bin/fm-watch-arm.sh emits"
+  for token in $emitted; do
+    case "$classified" in
+      *" $token "*) ;;
+      *) unclassified="$unclassified $token" ;;
+    esac
+  done
+  [ -z "$unclassified" ] || fail "bin/fm-supervision-lib.sh classifies no bucket for reason token(s):$unclassified"
+
+  # The reader keys on two more ledger literals, and drift in either fails SILENTLY
+  # in the dangerous direction: if bin/fm-watch-arm.sh grew a third cycle_begin
+  # origin, or encoded the successor hand-off differently, every genuine owner row
+  # would be skipped, the reader would report no servicing evidence, and the gate
+  # would deny always - the exact 2026-08-05 deadlock. So compare the registry in
+  # bin/fm-supervision-lib.sh against what the writer actually contains.
+  local origins expected_origins successor_prefixes expected_prefixes
+  origins=$(grep -oE 'cycle_begin "\$[A-Za-z_]+" [a-z]+' "$ROOT/bin/fm-watch-arm.sh" \
+    | awk '{print $3}' | sort -u | tr '\n' ' ')
+  expected_origins=$(printf '%s\n%s\n' "$FM_SUPERVISION_ORIGIN_OWNER" "$FM_SUPERVISION_ORIGIN_OBSERVER" \
+    | sort -u | tr '\n' ' ')
+  [ "$origins" = "$expected_origins" ] \
+    || fail "bin/fm-watch-arm.sh cycle origins ($origins) no longer match the reader's registry ($expected_origins)"
+
+  # Both writers of the successor field, which are also the only two writes to the
+  # ledger file: cycle_log_append appends the row, and cycle_mark_predecessor_successor
+  # rewrites an earlier row's successor=none in place. Covering both completes the
+  # coverage, so renaming the hand-off literal at either fails here instead of silently
+  # detaching the reader's stand-down skip from the rows it is meant to match.
+  successor_prefixes=$(grep -hE 'cycle_log_append |cycle_mark_predecessor_successor "' "$ROOT/bin/fm-watch-arm.sh" \
+    | grep -v '^[[:space:]]*#' \
+    | grep -oE '"[a-z]+:\$[A-Za-z_]+"' | sed -E 's/.*"([a-z]+:)\$.*/\1/' | sort -u | tr '\n' ' ')
+  expected_prefixes=$(printf '%s\n%s\n' "$FM_SUPERVISION_SUCCESSOR_HANDOFF_PREFIX" "$FM_SUPERVISION_SUCCESSOR_OWNED_PREFIX" \
+    | sort -u | tr '\n' ' ')
+  [ "$successor_prefixes" = "$expected_prefixes" ] \
+    || fail "bin/fm-watch-arm.sh successor encodings ($successor_prefixes) no longer match the reader's registry ($expected_prefixes)"
+
+  # And the classification is behavioral, not just declarative: a delivered token
+  # opens the window and a failed owner token closes it.
+  for token in $FM_SUPERVISION_REASONS_DELIVERED; do
+    stage_ten_idle_reports
+    ledger_record "$token" "$(date +%s)"
+    expect_allow "delivered token $token opens the window" 'bin/fm-send.sh restart-1 continue'
+  done
+  for token in $FM_SUPERVISION_REASONS_FAILED; do
+    stage_ten_idle_reports
+    ledger_record "$token" "$(date +%s)" started none
+    expect_deny "failed token $token closes the window" 'bin/fm-send.sh restart-1 continue' 'fm-send.sh'
+  done
+  pass "the servicing reader classifies every close reason the arm layer can write"
+}
+
+test_turnend_guard_grants_no_service_grace() {
+  # The asymmetry that keeps the window honest: acting on a wake is not blind,
+  # but ending a turn without re-arming is, so the Stop hook must still block on
+  # exactly the fixture the PreToolUse gate now allows.
+  local rc=0
+  stage_ten_idle_reports
+  ledger_record actionable-stale "$(date +%s)"
+  expect_allow "gate allows during servicing" 'bin/fm-send.sh restart-1 continue'
+  printf '{"stop_hook_active":false}' | FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" \
+    FM_STATE_OVERRIDE="$STATE" "$ROOT/bin/fm-turnend-guard.sh" > "$OUT" 2> "$ERR" || rc=$?
+  [ "$rc" -eq 2 ] \
+    || fail "turn-end guard must still block a blind turn end during servicing, got exit $rc"
+  grep -q 'TURN WOULD END BLIND' "$ERR" \
+    || fail "turn-end guard lost its blind-turn banner: $(cat "$ERR")"
+  pass "the servicing window bounds unlocked action without letting a turn end unsupervised"
+}
+
 test_claude_hook_registration_preserves_stop_backstop() {
   jq -e '
     [.hooks.PreToolUse[] | select(.matcher == "Bash") | .hooks[].command]
@@ -122,4 +369,8 @@ test_claude_hook_registration_preserves_stop_backstop() {
 test_gate_scope_and_recovery_exceptions
 test_live_lock_allows_fleet_command_even_with_stale_beacon
 test_child_worktree_and_malformed_input_fail_open
+test_serviced_wake_does_not_deadlock_recovery
+test_only_a_delivered_wake_opens_the_service_window
+test_reader_classifies_every_reason_the_writer_emits
+test_turnend_guard_grants_no_service_grace
 test_claude_hook_registration_preserves_stop_backstop

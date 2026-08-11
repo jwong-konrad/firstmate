@@ -7,6 +7,7 @@ Ordinary wake: drain and handle the wake, then repeat that verified wait while s
 Use `bin/fm-watch-arm.sh` only when the harness has a tracked background mechanism that survives the tool call and notifies the model on process exit.
 Use a bounded foreground wait over `bin/fm-watch.sh` when that wake mechanism is not verified.
 Never use shell `&` for watcher supervision.
+If the arm reports `watcher: not armed - nothing to watch`, nothing is progressing and there is no cycle to keep; that is a healthy resting state, not a failure.
 Failure or missing cycle only: inspect the failure and restore the same verified wait shape.
 
 Record new verification evidence before promoting an unknown harness to a named snippet.

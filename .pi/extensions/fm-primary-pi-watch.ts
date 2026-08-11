@@ -15,7 +15,7 @@ type ArmResult = {
 type LockOwnership = "owned" | "missing" | "other";
 
 type CloseClassification = {
-  kind: "actionable" | "failure";
+  kind: "actionable" | "idle" | "failure";
   message: string;
 };
 
@@ -97,6 +97,12 @@ function classifyClose(stdout: string, stderr: string, code: number | null, sign
   const combined = `${stdout}\n${stderr}`.trim();
   const reason = actionableLine(combined);
   if (reason) return { kind: "actionable", message: reason };
+  // Conditional arming declined: nothing in this home is progressing, so there
+  // is no cycle to keep and nothing to retry. Neither a wake nor a failure - a
+  // retry here would rebuild the very busy-loop the gate removes
+  // (bin/fm-progress-lib.sh, docs/supervision-arming.md).
+  const idle = combined.split(/\r?\n/).find((line) => /^watcher: not armed\b/.test(line));
+  if (idle) return { kind: "idle", message: idle };
   const healthy = combined.split(/\r?\n/).find((line) => /^watcher: healthy\b/.test(line));
   if (healthy) {
     return {
@@ -320,6 +326,10 @@ export default function (pi: ExtensionAPI) {
           await sendWake(message);
         })().catch(() => {
         });
+        return;
+      }
+      if (classification.kind === "idle") {
+        retryFailures = 0;
         return;
       }
       if (restoring) return;

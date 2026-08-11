@@ -46,6 +46,19 @@
 # state/.watch-triage.log remains exclusively the watcher's absorbed-wake debug
 # log and is never written here.
 #
+# CONDITIONAL ARMING. Before anything else, this refuses to start a doomed cycle:
+# arming requires at least one task whose reconciled run-step state is genuinely
+# progressing (bin/fm-progress-lib.sh), or some other pollable work such as an
+# armed merge poll or a pending secondmate reply. A fleet that is entirely parked,
+# awaiting firstmate's own decision, failed, or gone changes only when firstmate
+# acts, so polling it is guaranteed waste - the measured source of 136 of 169
+# monitoring cycles in one day. In that case this prints one
+#   watcher: not armed - nothing to watch (...)
+# line and exits 0. Arming is judged by run-step reconciliation, never by pane
+# presence or pane idleness; see docs/supervision-arming.md. --force overrides the
+# gate for a deliberate arm (a flag, not an env prefix, because
+# bin/fm-arm-pretool-check.sh denies an env-prefixed arm as a wrapper).
+#
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
 # state/.watch.lock) and own a fresh cycle, or attach if a verified live peer
 # wins the singleton while the duplicate child stands down. It
@@ -58,6 +71,13 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# The progressing-task predicate behind conditional arming (see the header).
+# fm-backend.sh comes with it because the authoritative reconcile resolves an
+# indeterminate reading against endpoint absence.
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-progress-lib.sh
+. "$SCRIPT_DIR/fm-progress-lib.sh"
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
@@ -316,11 +336,50 @@ print_watch_output() {
 }
 
 mode=arm
-case "${1:-}" in
-  ''|arm|--arm) mode=arm ;;
-  --restart) mode=restart ;;
-  *) echo "usage: $(basename "$0") [--restart]" >&2; exit 2 ;;
-esac
+force=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    ''|arm|--arm) mode=arm ;;
+    --restart) mode=restart ;;
+    --force) force=1 ;;
+    *) echo "usage: $(basename "$0") [--restart] [--force]" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+# Conditional arming gate (see the header). Evaluated BEFORE --restart stops the
+# current watcher, so a declined restart never leaves the home with the old cycle
+# killed and no replacement. Short-circuits on the first progressing task, so the
+# common case pays at most one reconcile; a fully idle fleet is exactly the case
+# where reading every task is worth it.
+arm_gate_allows() {
+  local meta id summary='' tasks=0
+  [ "$force" -eq 1 ] && return 0
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    id=${meta##*/}
+    id=${id%.meta}
+    tasks=$((tasks + 1))
+    # Reconcile only on a cache miss; the reconcile itself refreshes the record.
+    # Called without a command substitution so its FM_PROGRESS_* results survive.
+    if ! fm_progress_verdict_cached "$STATE" "$id"; then
+      fm_progress_reconcile "$STATE" "$id" >/dev/null
+    fi
+    [ "$FM_PROGRESS_VERDICT" = progressing ] && return 0
+    summary="$summary $id=$FM_PROGRESS_TOKEN"
+  done
+  # No progressing task. A merge poll, the X-mode relay, or a pending secondmate
+  # reply still needs a live cycle even with a fully idle fleet.
+  fm_progress_has_pollable_work "$STATE" && return 0
+  if [ "$tasks" -eq 0 ]; then
+    echo "watcher: not armed - nothing to watch (no tasks, no armed polls)"
+  else
+    echo "watcher: not armed - nothing to watch ($tasks task(s), none progressing:${summary})"
+  fi
+  return 1
+}
+
+arm_gate_allows || exit 0
 
 if [ "$mode" = restart ]; then
   # Home-scoped stop: only the watcher pid recorded in THIS home's lock.
