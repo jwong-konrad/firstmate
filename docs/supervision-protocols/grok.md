@@ -11,6 +11,8 @@ When this session owns supervision and away mode is not active:
 4. Trust only the arm's one-line status.
 5. `watcher: started ...` or `watcher: attached ...` means a live cycle exists.
    On attach, the background task follows verified identity-matched successors instead of exiting when the first cycle ends.
+   `watcher: not armed - nothing to watch` means nothing is progressing, so there is no cycle to keep.
+   That is a healthy resting state, not a failure to repair; arm again when work resumes.
 6. Failure or missing cycle only: `watcher: FAILED ...` means supervision is down; fix and re-arm.
 7. After a successful start or attach status, end the turn.
    The background arm remains the live wait until it returns an actionable wake or failure.
@@ -24,7 +26,7 @@ When you see a background-task-completed system reminder for the arm:
 1. Run `bin/fm-wake-drain.sh` first.
 2. Optionally fetch arm output with `get_command_or_subagent_output(<task_id>)` for the reason line.
 3. Handle `signal`, `stale`, `check`, or `heartbeat` using the harness-neutral contract in `AGENTS.md`.
-4. Ordinary wake: re-arm the next cycle with the same background `bin/fm-watch-arm.sh` call if work remains in flight or X mode still needs polling.
+4. Ordinary wake: re-arm the next cycle with the same background `bin/fm-watch-arm.sh` call if work is still progressing or X mode still needs polling; the arm declines on its own when nothing is.
 5. Do not invent a wake from an attach-status line alone.
    Drain the queue and act only on real wake records or a real watcher reason line.
    Re-arm attaches to an existing healthy cycle when one is already present and follows its verified successor chain.

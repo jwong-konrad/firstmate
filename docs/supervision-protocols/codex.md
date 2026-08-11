@@ -10,6 +10,7 @@ When this session owns supervision and away mode is not active:
 7. Do not run `bin/fm-watch-arm.sh` as Codex's normal supervision command.
    If it is ever shelled anyway, a backgrounded, piped, or bundled anti-pattern is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`) registered in `.codex/hooks.json`.
 8. Failure or missing cycle only: drain queued wakes, inspect the failure, then start a fresh foreground checkpoint.
+9. If a checkpoint reports that nothing is progressing, stop checkpointing until work resumes; an entirely parked fleet has nothing a checkpoint could observe.
 
 Codex cannot reason while a foreground tool call is running.
 The bounded checkpoint returns control regularly so user messages and queued wakes can be handled without relying on background-task wake semantics.

@@ -15,6 +15,10 @@ set -u
 
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$ROOT/bin/fm-supervision-lib.sh"
+# The progressing-task predicate the guards now count on; sourced explicitly so
+# these tests can seed verdict records directly.
+# shellcheck source=bin/fm-progress-lib.sh
+. "$ROOT/bin/fm-progress-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)
 fm_git_identity fmtest fmtest@example.invalid
@@ -77,6 +81,46 @@ test_predicate_queue_pending_flag() {
   pass "fm_supervision_status: FM_SUP_QUEUE_PENDING tracks state/.wake-queue"
 }
 
+# The guard counts PROGRESSING tasks, not runtime records
+# (bin/fm-progress-lib.sh, docs/supervision-arming.md). A deliberately parked
+# fleet has metadata but nothing a watcher could observe, so it must not warn;
+# anything that is progressing, unrecorded, or unreadable still must.
+
+test_predicate_parked_fleet_is_not_unhealthy() {
+  local state id
+  state="$TMP_ROOT/pred-parked/state"
+  mkdir -p "$state"
+  for id in a b c; do
+    printf 'window=test:fm-%s\nkind=ship\n' "$id" > "$state/$id.meta"
+    printf 'needs-decision: pick A or B\n' > "$state/$id.status"
+    fm_progress_record_write "$state" "$id" idle parked 'parked at review'
+  done
+  if fm_supervision_unhealthy "$state" 300; then
+    fail "a fully parked fleet with no watcher must not read as unhealthy"
+  fi
+  [ "$FM_SUP_IN_FLIGHT" -eq 3 ] || fail "the raw record count must still report 3, got $FM_SUP_IN_FLIGHT"
+  [ "$FM_SUP_PROGRESSING" -eq 0 ] || fail "expected zero progressing, got $FM_SUP_PROGRESSING"
+  pass "fm_supervision_unhealthy: false for a deliberately parked fleet with no watcher"
+}
+
+test_predicate_one_progressing_task_is_unhealthy() {
+  local state id
+  state="$TMP_ROOT/pred-one-live/state"
+  mkdir -p "$state"
+  for id in a b; do
+    printf 'window=test:fm-%s\nkind=ship\n' "$id" > "$state/$id.meta"
+    printf 'needs-decision: pick A or B\n' > "$state/$id.status"
+    fm_progress_record_write "$state" "$id" idle parked 'parked at review'
+  done
+  printf 'window=test:fm-live\nkind=ship\n' > "$state/live.meta"
+  printf 'working: validating\n' > "$state/live.status"
+  fm_progress_record_write "$state" live progressing working 'validating (running)'
+  fm_supervision_unhealthy "$state" 300 \
+    || fail "one progressing task among parked ones must still read as unhealthy"
+  [ "$FM_SUP_PROGRESSING" -eq 1 ] || fail "expected one progressing, got $FM_SUP_PROGRESSING"
+  pass "fm_supervision_unhealthy: true when one task among parked ones is progressing"
+}
+
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
 #
 # Each scenario gets its own directory carrying a copy of the two guard scripts
@@ -92,6 +136,7 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
+  cp "$ROOT/bin/fm-progress-lib.sh" "$dir/bin/fm-progress-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
@@ -203,6 +248,55 @@ test_hook_silent_when_no_work_in_flight() {
   expect_code 0 "$status" "hook must exit 0 with no in-flight work"
   [ -z "$out" ] || fail "hook produced output with no in-flight work: $out"
   pass "fm-turnend-guard: silent no-op with nothing in flight"
+}
+
+test_hook_silent_for_a_deliberately_parked_fleet() {
+  local dir out status id
+  dir=$(make_primary_dir "$TMP_ROOT/hook-parked-fleet")
+  for id in a b c; do
+    printf 'window=test:fm-%s\nkind=ship\n' "$id" > "$dir/state/$id.meta"
+    printf 'needs-decision: awaiting the captain\n' > "$dir/state/$id.status"
+    fm_progress_record_write "$dir/state" "$id" idle parked 'parked at review'
+  done
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "a parked fleet with monitoring deliberately off must not block the turn"
+  [ -z "$out" ] || fail "hook warned about a deliberately parked fleet: $out"
+  pass "fm-turnend-guard: silent when every task is parked and nothing is progressing"
+}
+
+test_hook_blocks_when_one_parked_fleet_task_progresses() {
+  local dir out status id
+  dir=$(make_primary_dir "$TMP_ROOT/hook-parked-plus-live")
+  for id in a b; do
+    printf 'window=test:fm-%s\nkind=ship\n' "$id" > "$dir/state/$id.meta"
+    printf 'needs-decision: awaiting the captain\n' > "$dir/state/$id.status"
+    fm_progress_record_write "$dir/state" "$id" idle parked 'parked at review'
+  done
+  printf 'window=test:fm-live\nkind=ship\n' > "$dir/state/live.meta"
+  printf 'working: validating\n' > "$dir/state/live.status"
+  fm_progress_record_write "$dir/state" live progressing working 'validating (running)'
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "one genuinely progressing task must still alarm loudly"
+  assert_contains "$out" "1 task(s) progressing" "the banner must report the progressing count"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: still alarms for one progressing task in an otherwise parked fleet"
+}
+
+test_hook_blocks_when_a_parked_task_resumes() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-parked-resumed")
+  printf 'window=test:fm-a\nkind=ship\n' > "$dir/state/a.meta"
+  printf 'needs-decision: awaiting the captain\n' > "$dir/state/a.status"
+  fm_progress_record_write "$dir/state" a idle parked 'parked at review'
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "the parked task must start out silent"
+  # The worker resumes and appends a status line. That changes the evidence the
+  # verdict was bound to, so the record is invalid and the task counts
+  # progressing again - without any reconcile on the hook path.
+  printf 'working: resumed after the decision\n' >> "$dir/state/a.status"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "a resumed task must re-arm the alarm immediately"
+  pass "fm-turnend-guard: a parked task that resumes re-arms the alarm on its next status line"
 }
 
 test_hook_blocks_when_fresh_beacon_has_no_live_lock() {
@@ -906,7 +1000,12 @@ test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
 test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
+test_predicate_parked_fleet_is_not_unhealthy
+test_predicate_one_progressing_task_is_unhealthy
 test_hook_silent_when_no_work_in_flight
+test_hook_silent_for_a_deliberately_parked_fleet
+test_hook_blocks_when_one_parked_fleet_task_progresses
+test_hook_blocks_when_a_parked_task_resumes
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon

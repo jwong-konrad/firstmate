@@ -9,6 +9,11 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
 WATCH="$ROOT/bin/fm-watch.sh"
+# Every arm invocation below passes --force. These cases isolate lock, identity,
+# and cycle-lifecycle mechanics from the conditional-arming POLICY, which decides
+# whether a cycle is worth starting at all and is owned by
+# tests/fm-progress-arming.test.sh. Without --force, a fixture with no
+# progressing task would decline to arm and never reach the mechanics under test.
 WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 LIB="$ROOT/bin/fm-wake-lib.sh"
@@ -111,7 +116,7 @@ test_guard_warnings() {
   # The guard's two operator-visible states, with resilient substrings instead of
   # four copy-coupled tests:
   #   (1) watcher DOWN + queued wakes: a prominent no-watcher banner leads (alarm
-  #       title, in-flight count, beacon age, fix command), the queued-wakes
+  #       title, progressing count, beacon age, fix command), the queued-wakes
   #       warning follows it, and the guidance is repair-after-drain (never the
   #       old conflicting "restart NOW first").
   #   (2) a fresh watcher and an empty queue: total silence.
@@ -120,7 +125,9 @@ test_guard_warnings() {
   state="$dir/state"
   err="$dir/guard.err"
 
-  # (1) watcher down (no beacon) + two in-flight tasks + a queued wake.
+  # (1) watcher down (no beacon) + two tasks with no verdict record - which count
+  # progressing, the fail-toward-alarming default (bin/fm-progress-lib.sh) - and a
+  # queued wake.
   # FM_ROOT_OVERRIDE points the worktree-tangle check at a non-git dir so it stays
   # inert here; this case is about the watcher-down banner, not the tangle guard.
   printf 'project=x\n' > "$state/task.meta"
@@ -133,7 +140,7 @@ test_guard_warnings() {
     *) fail "no-watcher banner is not the first thing the guard prints (got '$first')" ;;
   esac
   grep -F 'WATCHER DOWN - SUPERVISION IS OFF' "$err" >/dev/null || fail "guard banner missing the alarm title"
-  grep -F '2 task(s) in flight' "$err" >/dev/null || fail "guard banner missing the in-flight count"
+  grep -F '2 task(s) progressing' "$err" >/dev/null || fail "guard banner missing the progressing count"
   grep -F 'last beat: never' "$err" >/dev/null || fail "guard banner missing the beacon age"
   grep -F 'guarded operation WILL still run' "$err" >/dev/null || fail "guard banner missing generic continuation wording"
   ! grep -F 'requested message WILL still be sent' "$err" >/dev/null || fail "shared guard used send-specific continuation wording"
@@ -165,7 +172,22 @@ test_guard_warnings() {
   # total silence" stays a pure assertion about watcher state.
   FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
   [ ! -s "$err" ] || fail "guard warned with a fresh watcher and no queued wakes: $(cat "$err")"
-  pass "guard banner leads when down with pending wakes (repair-after-drain) and stays silent when fresh"
+
+  # (3) no watcher at all, but every task is deliberately parked -> silence.
+  # Nothing is riding on the watcher, so the banner would be pure noise
+  # (bin/fm-progress-lib.sh, docs/supervision-arming.md).
+  dir=$(make_case guard-parked)
+  state="$dir/state"
+  err="$dir/guard.err"
+  printf 'project=x\n' > "$state/task.meta"
+  printf 'needs-decision: awaiting the captain\n' > "$state/task.status"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_progress_record_write "$2" task idle parked "parked at review"
+  ' _ "$ROOT/bin/fm-progress-lib.sh" "$state" || fail "could not seed the parked verdict"
+  FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  [ ! -s "$err" ] || fail "guard warned about a deliberately parked fleet with nothing to watch: $(cat "$err")"
+  pass "guard banner leads when down with pending wakes (repair-after-drain), and stays silent when fresh or when nothing is progressing"
 }
 
 test_lock_single_winner_under_concurrency() {
@@ -412,7 +434,7 @@ test_watch_restart_rejects_reused_pid() {
   printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "stale watcher identity" > "$state/.watch.lock/pid-identity"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" --restart > "$out" &
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" --restart --force > "$out" &
   pid=$!
   # The honest arm forks the fresh watcher as a tracked child and waits on it, so
   # the lock now names that child, not the arm invocation. The property is the
@@ -452,7 +474,7 @@ test_watch_restart_attaches_to_healthy_peer() {
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
   touch "$state/.last-watcher-beat"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" --restart > "$out" &
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" --restart --force > "$out" &
   armpid=$!
   i=0
   while [ "$i" -lt 80 ]; do
@@ -509,7 +531,7 @@ test_arm_self_eviction_is_loud_without_successor() {
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
   mark_pr_check_migration_complete "$state"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout" &
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" --force > "$armout" &
   armpid=$!
   i=0
   while [ "$i" -lt 80 ]; do
@@ -551,7 +573,7 @@ test_arm_attaches_and_waits_for_live_fresh_watcher() {
   [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not take the lock"
   # Arming must attach to the existing watcher, NOT start a second one, and NOT
   # exit while the seed still holds the healthy lock.
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout" &
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" --force > "$armout" &
   armpid=$!
   i=0
   while [ "$i" -lt 80 ]; do
@@ -590,7 +612,7 @@ test_attached_arm_signal_is_recorded_in_cycle_ledger() {
     i=$((i + 1))
   done
   [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not take the lock"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout" &
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" --force > "$armout" &
   armpid=$!
   i=0
   while [ "$i" -lt 80 ]; do
@@ -633,7 +655,7 @@ test_arm_starts_and_self_heals() {
       printf '%s\n' "dead watcher identity" > "$state/.watch.lock/pid-identity"
       touch "$state/.last-watcher-beat"
     fi
-    PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+    PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" --force > "$armout" &
     armpid=$!
     i=0
     while [ "$i" -lt 80 ]; do
@@ -661,7 +683,7 @@ test_arm_hup_cleans_child_and_temp_output() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" --force > "$armout" &
   armpid=$!
   i=0
   while [ "$i" -lt 80 ]; do
@@ -704,7 +726,7 @@ SH
   FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" task >/dev/null \
     || fail "could not register immediate-wake custom check"
   rc=0
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=0 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" || rc=$?
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=0 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH_ARM" --force > "$armout" || rc=$?
   [ "$rc" -eq 0 ] || fail "arm returned non-zero for an immediate wake (status $rc): $(cat "$armout")"
   grep -F "check: $check_file: merged: https://example.test/pr/7" "$armout" >/dev/null || fail "arm did not propagate the immediate check wake"
   ! grep -qF 'watcher: FAILED' "$armout" || fail "arm printed FAILED after a valid immediate wake"
@@ -728,7 +750,7 @@ test_arm_waits_for_peer_beacon_after_child_stands_down() {
   printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=1 FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$armout" &
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=1 FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" --force > "$armout" &
   armpid=$!
   # Synchronize on the owned child declining the live peer lock before making
   # the peer healthy. Sleeping for the same one-second budget as the arm made
@@ -777,7 +799,7 @@ test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
   mkdir "$state/.watch.lock"
   printf '%s\n' "$live" > "$state/.watch.lock/pid"
   touch -t 200001010000 "$state/.last-watcher-beat"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=3 "$WATCH_ARM" > "$armout" &
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=3 "$WATCH_ARM" --force > "$armout" &
   armpid=$!
   wait_for_exit "$armpid" 120
   status=$?
@@ -808,7 +830,7 @@ SH
   FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" task >/dev/null \
     || fail "could not register cycle-ledger check"
 
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=0 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=0 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH_ARM" --force > "$armout" &
   first_arm=$!
   wait "$first_arm" || fail "first ledger cycle did not surface its actionable wake"
   grep -q "arm_pid=$first_arm.*reason=actionable-check.*successor=none" "$state/.watch-cycle-exits.log" \
@@ -816,7 +838,7 @@ SH
 
   rm -f "$check_file" "$state/task.check-trust"
   armout="$dir/successor-arm.out"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_PREDECESSOR_ARM_PID="$first_arm" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_PREDECESSOR_ARM_PID="$first_arm" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" --force > "$armout" &
   successor_arm=$!
   i=0
   while [ "$i" -lt 80 ]; do
@@ -836,7 +858,7 @@ SH
   iteration=0
   while [ "$iteration" -lt 6 ]; do
     armout="$dir/bounded-$iteration.out"
-    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_CYCLE_LOG_MAX_BYTES=1400 FM_WATCH_CYCLE_LOG_KEEP_LINES=2 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_CYCLE_LOG_MAX_BYTES=1400 FM_WATCH_CYCLE_LOG_KEEP_LINES=2 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" --force > "$armout" &
     successor_arm=$!
     i=0
     while [ "$i" -lt 80 ]; do
@@ -863,7 +885,7 @@ test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
   mark_pr_check_migration_complete "$state"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" --force > "$armout" &
   armpid=$!
   i=0
   while [ "$i" -lt 80 ]; do

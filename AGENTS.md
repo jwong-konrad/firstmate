@@ -107,7 +107,8 @@ state/               volatile runtime signals; gitignored
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
-  .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
+  .progress-<id>     durable progressing-or-idle verdict for a task; written by the arm gate and the watcher, read cheaply by the guards, and treated as progressing when absent or stale (bin/fm-progress-lib.sh, docs/supervision-arming.md)
+  .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .wedge-state-* .wedge-rechecked-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
@@ -325,6 +326,8 @@ Scratch commits and debug edits never ride along, and a reproduced bug becomes t
 Fleet supervision is an always-loaded operational contract; `docs/architecture.md`, `docs/turnend-guard.md`, the emitted session-start block, and script help own mechanisms and harness-specific recipes.
 
 Whenever work is under way, keep exactly one live supervision cycle using the emitted protocol for this primary harness.
+Arming is conditional: when nothing is progressing, `bin/fm-watch-arm.sh` declines with one "nothing to watch" line, and the turn-end and continuity guards fall silent with it.
+That is the healthy resting state for a deliberately parked fleet, not a supervision lapse to repair; resume the cycle when work resumes.
 X mode may require that same live cycle with no fleet work.
 Do not substitute another harness's wait shape, use shell `&`, or create a second cycle when a healthy one already exists.
 For every actionable wake, follow the ordinary-wake continuation in the emitted protocol; use its repair action only when the live cycle is missing or failed.

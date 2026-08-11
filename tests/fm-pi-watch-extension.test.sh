@@ -278,6 +278,62 @@ EOF
   pass "Pi actionable close starts one successor before wake delivery settles"
 }
 
+# Conditional arming can decline: with nothing progressing, fm-watch-arm.sh
+# prints "watcher: not armed - nothing to watch" and exits 0. The extension must
+# treat that as a quiet, healthy outcome - not an unexplained close - because
+# retrying it would rebuild exactly the busy-loop the gate removes
+# (bin/fm-progress-lib.sh, docs/supervision-arming.md).
+test_pi_declined_arm_is_quiet_and_never_retries() {
+  local repo home plugin log out status
+  repo="$TMP_ROOT/pi-declined-arm-root"
+  home="$TMP_ROOT/pi-declined-arm-home"
+  log="$TMP_ROOT/pi-declined-arm.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf 'watcher: not armed - nothing to watch (3 task(s), none progressing: a=parked b=paused c=failed)\n'
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let wakes = 0;
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async () => { wakes += 1; },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-declined", {}, undefined, undefined, {});
+// Well past the first retry backoff: a declined arm must stay at one launch and
+// deliver no wake. (No apostrophes here: bash 3.2 mis-parses one inside a
+// heredoc nested in a command substitution.)
+await new Promise((resolve) => setTimeout(resolve, 1500));
+const rows = existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : [];
+if (rows.length !== 1) throw new Error(`a declined arm was retried: ${rows.length} launches`);
+if (wakes !== 0) throw new Error(`a declined arm delivered ${wakes} wake(s)`);
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "a declined arm must be quiet and must not retry"
+  [ -z "$out" ] || fail "Pi declined-arm test printed output: $out"
+  pass "Pi extension treats a declined arm as a quiet outcome, never a retryable failure"
+}
+
 test_pi_hung_successor_falls_back_to_typed_wake() {
   local repo home plugin log out status
   repo="$TMP_ROOT/pi-hung-successor-root"
@@ -1556,6 +1612,67 @@ EOF
   pass "OpenCode clean empty close triggers a bounded continuity retry"
 }
 
+# The declined-arm counterpart of the empty-close retry above: an empty close is
+# unexplained and must retry, but "watcher: not armed - nothing to watch" is an
+# explicit, healthy decline. Retrying it would rebuild exactly the busy-loop
+# conditional arming removes (bin/fm-progress-lib.sh, docs/supervision-arming.md).
+test_opencode_declined_arm_is_quiet_and_never_retries() {
+  local plugin repo home log out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-declined-arm-root"
+  home="$TMP_ROOT/opencode-declined-arm-home"
+  log="$TMP_ROOT/opencode-declined-arm.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf 'watcher: not armed - nothing to watch (1 task(s), none progressing: task=parked)\n'
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let prompts = 0;
+const client = {
+  session: {
+    promptAsync: async () => {
+      prompts += 1;
+    },
+  },
+};
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+const armRows = () => (existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean)
+  : []);
+for (let i = 0; i < 250 && armRows().length < 1; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (armRows().length < 1) throw new Error("the plugin never launched the arm at all");
+// Well past the configured retry backoff: the decline must stay at one launch.
+await new Promise((resolve) => setTimeout(resolve, 800));
+const rows = armRows();
+if (rows.length !== 1) throw new Error(`a declined arm was retried: ${rows.join(" | ")}`);
+if (prompts !== 0) throw new Error(`a declined arm surfaced ${prompts} prompts`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode must treat a declined arm as quiet, not retryable"
+  [ -z "$out" ] || fail "OpenCode declined-arm test printed output: $out"
+  pass "OpenCode plugin treats a declined arm as a quiet outcome, never a retryable failure"
+}
+
 test_opencode_established_empty_close_honors_retry_limit() {
   local plugin repo home log out status
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
@@ -1829,6 +1946,7 @@ test_spawn_template_mentions_pi_watch_placeholder
 test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
 test_pi_actionable_close_starts_single_successor_before_delivery
+test_pi_declined_arm_is_quiet_and_never_retries
 test_pi_hung_successor_falls_back_to_typed_wake
 test_pi_unretired_successor_falls_back_without_retry
 test_pi_late_unretired_close_resumes_supervision
@@ -1850,6 +1968,7 @@ test_opencode_hung_successor_falls_back_to_typed_wake
 test_opencode_unretired_successor_falls_back_without_retry
 test_opencode_late_unretired_close_resumes_supervision
 test_opencode_empty_close_retries_instead_of_disappearing
+test_opencode_declined_arm_is_quiet_and_never_retries
 test_opencode_established_empty_close_honors_retry_limit
 test_opencode_actionable_close_rechecks_session_lock
 test_opencode_watch_arm_coordinates_with_turnend_guard

@@ -14,7 +14,7 @@ The primary can otherwise end a turn after handling wakes without resuming super
 On 2026-07-04, that exact gap left a parked no-mistakes gate unwatched for about nine hours.
 
 `bin/fm-turnend-guard.sh` closes the gap by checking the primary's own turn-end path.
-When tasks are in flight and there is no live identity-matched watcher with a fresh beacon, a harness hook must either block the turn end or force a bounded follow-up turn that tells the primary to repair the missing or failed watcher cycle using the recovery instruction in its emitted session-start protocol.
+When work is PROGRESSING and there is no live identity-matched watcher with a fresh beacon, a harness hook must either block the turn end or force a bounded follow-up turn that tells the primary to repair the missing or failed watcher cycle using the recovery instruction in its emitted session-start protocol.
 
 ## Shared Predicate
 
@@ -25,9 +25,11 @@ An unmarked checkout, or one with an invalid marker, falls through to the git-di
 That check keeps crewmate and scout worktrees inert because firstmate provisions them as linked git worktrees, where `git rev-parse --git-dir` differs from `git rev-parse --git-common-dir`.
 It also requires `AGENTS.md`, `bin/`, and the effective state directory to exist.
 
-For an in-scope primary checkout, it counts in-flight work from `state/*.meta`.
-If no task is in flight, it exits silently.
-If work is in flight, it requires `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`.
+For an in-scope primary checkout, it counts PROGRESSING tasks through `bin/fm-progress-lib.sh`, not the raw `state/*.meta` count.
+A deliberately parked fleet has runtime records but nothing a watcher could observe, and warning about it on every turn is noise the guard used to produce; a task that is progressing, unrecorded, or unreadable still counts, so a genuinely unsupervised live fleet alarms exactly as before.
+See [`docs/supervision-arming.md`](supervision-arming.md) for the predicate and its deliberately asymmetric fail-toward-alarming mapping.
+If nothing is progressing, it exits silently.
+If work is progressing, it requires `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`.
 That is the same identity-matched live lock and fresh beacon check used by `bin/fm-watch-arm.sh`.
 A stale beacon blocks even if a watcher pid is still live.
 A fresh leftover beacon blocks if the watcher lock is missing, dead, or identity-mismatched.

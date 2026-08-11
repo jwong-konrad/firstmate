@@ -140,6 +140,25 @@ status_is_paused_or_captain_held() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ]
 }
 
+# 0 if a TASK is waiting on firstmate rather than on itself: either it declared
+# an external-wait pause or a verified captain-held transfer (the two line-level
+# cases above), or the durable fold below still shows an open keyed decision.
+# File-level on purpose - an open needs-decision/blocked is a property of the
+# whole event stream, and a later unrelated line must not mask it.
+#
+# This is the suppression predicate for the stale path: an idle pane on such a
+# task is the EXPECTED state, not a wedge. Suppressing it loses nothing, because
+# the decision itself was already surfaced when the captain-relevant status line
+# was written (signal_reason_is_actionable) and any missed one is re-surfaced by
+# the heartbeat backstop (scan_captain_relevant_statuses). Consumers must still
+# defer to authoritative crew state: a task that appended needs-decision: but then
+# STARTED a run is working, not waiting (crew_absorb_class).
+status_task_awaits_firstmate() {  # <status-file>
+  local f=$1
+  status_is_paused_or_captain_held "$(last_status_line "$f")" && return 0
+  [ -n "$(status_open_decisions "$f")" ]
+}
+
 # --- durable keyed decisions ------------------------------------------------
 #
 # The status stream is an append-only EVENT log. Reading it last-event-wins

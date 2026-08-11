@@ -128,6 +128,12 @@ function classifyArmClose(stdout, stderr, code, signal) {
   const combined = `${stdout}\n${stderr}`;
   const reason = combined.split(/\r?\n/).find((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line));
   if (reason) return { kind: "actionable", message: reason };
+  // Conditional arming declined: nothing in this home is progressing, so there
+  // is no cycle to keep and nothing to retry. Neither a wake nor a failure - a
+  // retry here would rebuild the very busy-loop the gate removes
+  // (bin/fm-progress-lib.sh, docs/supervision-arming.md).
+  const idle = combined.split(/\r?\n/).find((line) => /^watcher: not armed\b/.test(line));
+  if (idle) return { kind: "idle", message: idle };
   const healthy = combined.split(/\r?\n/).find((line) => /^watcher: healthy\b/.test(line));
   if (healthy) {
     return {
@@ -333,6 +339,11 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     const classification = classifyArmClose(stdout, stderr, code, signal);
     settleReadiness(classification.kind === "actionable" ? "wake" : "failed");
     const predecessor = String(armChild.pid ?? "");
+    if (classification.kind === "idle") {
+      retryFailures = 0;
+      setArmStatus("idle");
+      return;
+    }
     if (classification.kind === "actionable") {
       retryFailures = 0;
       setArmStatus("wake");
