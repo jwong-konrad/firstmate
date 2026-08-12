@@ -321,6 +321,127 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+# The context-reset contract: ship and scout scaffolds must tell a compacted
+# worker that the brief and status log outrank its post-reset memory and carry
+# the write-ahead in-flight marker protocol, without disturbing the existing
+# safety clauses. Secondmate charters must NOT carry it: their status file is
+# the parent escalation channel and their keyed phases already carry
+# routed-work state.
+test_context_reset_contract_in_ship_and_scout() {
+  local home brief
+  home="$TMP_ROOT/reset-home"
+  write_registry "$home"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" reset-ship no-registry-proj >/dev/null 2>&1
+  brief="$home/data/reset-ship/brief.md"
+  assert_present "$brief" "reset-contract ship brief was not scaffolded"
+  assert_grep "# Context resets" "$brief" "ship brief missing the context-reset section"
+  assert_grep "outrank that post-reset memory" "$brief" \
+    "ship brief missing the durable-records-outrank-memory rule"
+  # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
+  assert_grep 'working [key={action-slug}]: starting {action}; verify: {how to confirm it happened}' "$brief" \
+    "ship brief missing the write-ahead marker open instruction"
+  # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
+  assert_grep 'resolved [key={action-slug}]: {confirmed outcome}' "$brief" \
+    "ship brief missing the marker close instruction"
+  assert_grep "that action MAY already have happened" "$brief" \
+    "ship brief missing the verify-before-redo resume rule"
+  assert_no_grep "answering a no-mistakes gate" "$brief" \
+    "no-mistakes ship brief marks gate responses, which are already visible in pipeline state"
+  assert_grep "Never append a marker after a state line" "$brief" \
+    "ship brief missing the state-line-is-the-last-append ordering rule"
+  assert_grep "leave that marker OPEN" "$brief" \
+    "ship brief does not let an unconfirmable action keep its marker open under the state line"
+  assert_grep "never close one falsely" "$brief" \
+    "ship brief lets the ordering rule override the confirm-before-close rule"
+  assert_grep "not progress telemetry" "$brief" \
+    "ship brief missing the sparse-reporting carve-out"
+  # The insertion must not disturb the existing safety clauses.
+  assert_grep "**Verify isolation before anything else.**" "$brief" \
+    "ship brief lost the worktree-isolation assertion"
+  assert_grep "ONLY when you are deliberately idling on a" "$brief" \
+    "ship brief lost the paused-vs-blocked distinction"
+  assert_grep "ask-user findings are not yours to answer" "$brief" \
+    "ship brief lost the ask-user escalation rule"
+  assert_grep "Never stop, restart, or update the shared" "$brief" \
+    "ship brief lost the no-mistakes daemon rule"
+
+  # No brief marks no-mistakes gate responses: they are already readable from
+  # pipeline state, and marking them would scale wake volume with gate count.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" reset-direct direct-proj >/dev/null 2>&1
+  brief="$home/data/reset-direct/brief.md"
+  assert_grep "# Context resets" "$brief" "direct-PR brief missing the context-reset section"
+  assert_no_grep "answering a no-mistakes gate" "$brief" \
+    "direct-PR brief points marker examples at a pipeline it must not run"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" reset-scout someproj --scout >/dev/null 2>&1
+  brief="$home/data/reset-scout/brief.md"
+  assert_grep "# Context resets" "$brief" "scout brief missing the context-reset section"
+  # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
+  assert_grep 'working [key={action-slug}]: starting {action}; verify: {how to confirm it happened}' "$brief" \
+    "scout brief missing the write-ahead marker open instruction"
+  assert_grep "posting or editing anything on GitHub" "$brief" \
+    "scout brief missing its kind-appropriate marker examples"
+  assert_no_grep "answering a no-mistakes gate" "$brief" \
+    "scout brief points marker examples at a pipeline scouts never run"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='reset domain' \
+    "$ROOT/bin/fm-brief.sh" reset-mate --secondmate alpha >/dev/null 2>&1
+  brief="$home/data/reset-mate/brief.md"
+  assert_present "$brief" "reset-contract secondmate charter was not scaffolded"
+  assert_no_grep "# Context resets" "$brief" \
+    "secondmate charter must not carry the crewmate context-reset section"
+  pass "fm-brief.sh: ship and scout carry the context-reset contract; charters do not"
+}
+
+# The in-flight markers must ride the existing keyed classification unchanged:
+# never captain-relevant, never a waiting-on-firstmate read (so no wedge
+# suppression), opened and closed by the status_open_activities fold, and a
+# fresh-slug close must not resolve an unrelated open decision. This pins the
+# brief contract's supervision-safety claims against bin/fm-classify-lib.sh
+# without touching the watcher.
+test_context_reset_markers_ride_existing_classification() {
+  local sdir sfile open line
+  sdir="$TMP_ROOT/reset-classify"
+  mkdir -p "$sdir"
+  sfile="$sdir/reset-task.status"
+
+  # shellcheck source=bin/fm-classify-lib.sh
+  . "$ROOT/bin/fm-classify-lib.sh"
+
+  line='working [key=push-fix]: starting push of fm/reset-task; verify: git log @{u} contains the fix commit'
+  printf '%s\n' "$line" > "$sfile"
+  [ "$(status_line_verb "$line")" = working ] \
+    || fail "a marker open must classify as an ordinary working event"
+  if status_is_captain_relevant "$line"; then
+    fail "an open in-flight marker must not be captain-relevant"
+  fi
+  if status_task_awaits_firstmate "$sfile"; then
+    fail "an open in-flight marker must not read as waiting on firstmate"
+  fi
+  open=$(status_open_activities "$sfile")
+  assert_contains "$open" "push-fix" "a marker open must appear in the keyed activity fold"
+
+  printf '%s\n' 'resolved [key=push-fix]: push confirmed on remote' >> "$sfile"
+  open=$(status_open_activities "$sfile")
+  [ -z "$open" ] || fail "a closed marker must leave no open activity (got: $open)"
+  if status_is_captain_relevant 'resolved [key=push-fix]: push confirmed on remote'; then
+    fail "a marker close must not be captain-relevant"
+  fi
+
+  # The fresh-slug instruction exists because resolved closes its key anywhere:
+  # a marker close on its own action slug must leave unrelated decisions open.
+  {
+    printf '%s\n' 'needs-decision [key=api-shape]: pick v1 or v2'
+    printf '%s\n' 'working [key=open-pr]: starting PR open; verify: gh-axi pr view succeeds'
+    printf '%s\n' 'resolved [key=open-pr]: PR 12 exists'
+  } >> "$sfile"
+  open=$(status_open_decisions "$sfile")
+  assert_contains "$open" "api-shape" \
+    "a fresh-slug marker close must leave unrelated open decisions open"
+  pass "fm-brief.sh: in-flight markers ride the existing keyed classification"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -354,4 +475,6 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_context_reset_contract_in_ship_and_scout
+test_context_reset_markers_ride_existing_classification
 test_scout_and_secondmate_scaffold

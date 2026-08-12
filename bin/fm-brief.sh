@@ -39,6 +39,16 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
+# Ship and scout scaffolds also carry a context-reset contract: the brief and
+# status log outrank a compacted conversation, and any not-safe-to-repeat action
+# outside the worktree is bracketed by write-ahead in-flight markers on the
+# existing keyed status protocol ("working [key=<slug>]: ...; verify: ..." before
+# the action, "resolved [key=<slug>]: ..." once its effect is confirmed), so a
+# post-reset worker verifies reality instead of silently redoing or skipping.
+# The markers reuse the keyed open/resolved fold owned by bin/fm-classify-lib.sh
+# and change nothing in wake triage. Secondmate charters deliberately omit the
+# section: their status file is the parent escalation channel, and their keyed
+# phases already carry routed-work state.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -106,6 +116,49 @@ shell_quote() {
 }
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
+
+# The context-reset contract for ship and scout scaffolds. The caller passes the
+# kind-appropriate example list of not-safe-to-repeat external actions. The
+# in-flight markers reuse the keyed working/resolved status vocabulary that
+# bin/fm-classify-lib.sh already folds (status_open_activities), so they classify
+# exactly like any other working/resolved event and wake triage is unchanged.
+# This body is a plain `cat <<EOF` inside a function, so the issue #166 lexer
+# hazard does not apply here - that hazard is confined to the `VAR=$(cat <<EOF
+# ... EOF)` blocks below (DOD and friends), where an unescaped apostrophe inside
+# the command substitution breaks parsing of the whole script. Apostrophes are
+# still avoided here for consistency with those blocks.
+reset_section() {  # <examples>
+cat <<EOF
+# Context resets
+Your harness may compact or replace this conversation at any moment, including mid-action,
+and the summary you resume with can confidently misstate what you finished.
+This brief and your status log outrank that post-reset memory: when they disagree with
+what you remember, re-read both top to bottom and trust them, not the summary.
+The worktree is durable evidence too: when you cannot remember whether something
+completed, determine it from reality - \`git status\`, \`git log\`, \`gh-axi pr view\` -
+never from the summary.
+Before any action that changes state outside this worktree and is not safe to repeat
+($1), append a write-ahead marker first:
+   \`echo "working [key={action-slug}]: starting {action}; verify: {how to confirm it happened}" >> $STATUS_FILE\`
+After you confirm the action took effect, close the marker:
+   \`echo "resolved [key={action-slug}]: {confirmed outcome}" >> $STATUS_FILE\`
+Never append a marker after a state line (\`done:\`, \`failed:\`, \`blocked:\`,
+\`needs-decision:\`, \`$PAUSED_VERB:\`): the state line is always the last append of the turn,
+because firstmate reads the last line to decide your state, so a \`resolved\` line landing
+after your \`done:\` hides the fact that you finished.
+When you must stop with an action you could not confirm - a push that errored ambiguously,
+say - leave that marker OPEN and append \`blocked:\` under it. An open marker is exactly the
+signal the next pass needs, so never close one falsely just to order the log.
+Use a fresh slug that names the action (push-fix, open-pr); never reuse a slug from a
+\`needs-decision:\` or \`blocked:\` line you opened, because \`resolved\` closes that key.
+After any reset, scan the status log for a \`working [key=...]\` marker with no later
+same-key close: that action MAY already have happened - run the check the marker names
+before repeating it, and never assume either way from memory.
+Markers are recovery records for unrepeatable actions only, not progress telemetry:
+routine work inside the worktree needs no marker, and the sparse-reporting bar in
+rule 4 still governs everything else.
+EOF
+}
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -224,6 +277,7 @@ EOF
 fi
 
 if [ "$KIND" = scout ]; then
+RESET_SECTION=$(reset_section "posting or editing anything on GitHub, changing an external service or dataset, anything destructive")
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
@@ -260,6 +314,8 @@ The report is the only thing that survives, so anything worth keeping must be in
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 
+$RESET_SECTION
+
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
@@ -280,6 +336,7 @@ EOF
 case "$MODE" in
   direct-PR)
     SETUP2=""
+    RESET_EXAMPLES="a push, opening or commenting on a PR, anything destructive"
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
     DOD=$(cat <<EOF
 # Definition of done
@@ -292,6 +349,7 @@ EOF
     ;;
   local-only)
     SETUP2=""
+    RESET_EXAMPLES="posting or editing anything on GitHub, changing an external service or dataset, anything destructive"
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
     DOD=$(cat <<EOF
 # Definition of done
@@ -306,6 +364,7 @@ EOF
   *)  # no-mistakes (default)
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+    RESET_EXAMPLES="a push, opening or commenting on a PR, anything destructive"
     RULE1='1. Never push to the default branch. Never merge a PR.'
     DOD=$(cat <<EOF
 # Definition of done
@@ -327,6 +386,7 @@ EOF
 )
     ;;
 esac
+RESET_SECTION=$(reset_section "$RESET_EXAMPLES")
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -369,6 +429,8 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+
+$RESET_SECTION
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
