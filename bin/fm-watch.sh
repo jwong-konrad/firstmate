@@ -22,9 +22,20 @@
 #                          AWAITING FIRSTMATE - a declared external-wait pause, a
 #                          captain-held transfer, or an open keyed
 #                          needs-decision/blocked - is absorbed instead with its own
-#                          long re-surface cadence, never as a wedge, because its
+#                          long re-surface cadence, because its
 #                          idle pane is the expected state and the decision was
-#                          already surfaced when its status line was written. Only
+#                          already surfaced when its status line was written. That
+#                          suppression covers the ROUTINE wake only: an open
+#                          decision runs its own wedge timer underneath, so a crew
+#                          steered without a resolved: line still wedge-escalates
+#                          once it sits idle past the threshold. That timer records
+#                          a positively parked/blocked reading at its first expiry
+#                          as the comparison baseline instead of escalating on a
+#                          missing one, since parked IS the healthy shape of a crew
+#                          waiting on firstmate; any other first-expiry reading
+#                          escalates at once, and every later state change escalates
+#                          with the count advancing. A declared pause
+#                          and a captain-held transfer stay indefinite. Only
 #                          when neither absorb class applies does the log's last line
 #                          decide: terminal (captain-relevant) or non-terminal (no
 #                          verb), both surfaced at once. A provably-working stale past
@@ -205,8 +216,39 @@ hash_pane() {
 # is the expected state, not a wedge - and it was the single largest measured
 # wake source. fm-classify-lib.sh owns the vocabulary; this is just the
 # state-dir-bound convenience wrapper the stale loop calls.
+#
+# The fold behind it is terminal-narrowed: a decision key whose latest event is a
+# same-key done: or failed: is a forgotten resolved: line, not a live wait, and
+# suppression stops short of a terminal pane inside a running watcher
+# (docs/supervision-arming.md).
+#
+# Memoized per (task, status-file size:mtime) for the life of this process. The
+# fold is ~3 forks per status line and the stale loop asks the question several
+# times per window per poll, so re-folding an append-only log made per-poll cost
+# grow with fleet history. The signature is fm-progress-lib.sh's own
+# fm_progress_stat_sig, the same keying the durable verdict records use, so a
+# status append invalidates the answer on the very next call; the memo is a pure
+# cache and never a source of truth. It is dropped wholesale once it grows past a
+# bound, so a long-lived watcher cannot accumulate one entry per append forever.
+_FM_AWAITS_MEMO=
+_FM_AWAITS_MEMO_MAX_BYTES=8192
+
 task_awaits_firstmate() {  # <task>
-  status_task_awaits_firstmate "$STATE/$1.status"
+  local task=$1 sig entry
+  [ -n "$task" ] || return 1
+  sig=$(fm_progress_stat_sig "$STATE/$task.status")
+  entry="|$task@$sig="
+  case "$_FM_AWAITS_MEMO" in
+    *"${entry}yes|"*) return 0 ;;
+    *"${entry}no|"*) return 1 ;;
+  esac
+  [ "${#_FM_AWAITS_MEMO}" -lt "$_FM_AWAITS_MEMO_MAX_BYTES" ] || _FM_AWAITS_MEMO=
+  if status_task_awaits_firstmate_unterminated "$STATE/$task.status"; then
+    _FM_AWAITS_MEMO="$_FM_AWAITS_MEMO${entry}yes|"
+    return 0
+  fi
+  _FM_AWAITS_MEMO="$_FM_AWAITS_MEMO${entry}no|"
+  return 1
 }
 
 # The task's reconciled current state as "<state>|<source>", refreshing its
@@ -218,7 +260,15 @@ task_awaits_firstmate() {  # <task>
 # the bare state token collapses (an active run-step versus a merely busy pane),
 # so the comparison errs toward escalating, while the free-text detail - which
 # can carry a churning counter - is excluded so it cannot manufacture a change.
+#
+# An empty task id is a window with no matching meta, not a task: reconciling it
+# would write a state/.progress- record no teardown path ever removes, so it
+# reads as a fixed unknown instead.
 crew_reconciled_state() {  # <task>
+  if [ -z "$1" ]; then
+    printf 'unknown|none'
+    return 0
+  fi
   fm_progress_reconcile "$STATE" "$1" >/dev/null
   printf '%s|%s' "$FM_PROGRESS_TOKEN" "$FM_PROGRESS_SOURCE"
 }
@@ -317,13 +367,16 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
-# escalates once STALE_ESCALATE_SECS have elapsed. Never re-reads the crew
-# state (the costly check already ran once, at classification time). Shared by
+# escalates once STALE_ESCALATE_SECS have elapsed. Re-reads the crew state
+# (crew_reconciled_state) only on the escalation branch, which the elapsed-time
+# guard above already throttles to at most one authoritative read per
+# FM_STALE_ESCALATE_SECS per pane; every earlier poll returns without paying it.
+# Shared by
 # both places a hash can be absorbed this way: the plain non-terminal path,
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).
-wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason
+wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> [mode]
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 mode=${5:-} since age n reason
   local key task state_now state_prev state_file recheck_file
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
@@ -346,6 +399,25 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       # ticking clock or a token counter, is deliberately not the comparand.
       state_now=$(crew_reconciled_state "$task")
       state_prev=$(cat "$state_file" 2>/dev/null || true)
+      # parked-baseline mode (the decision-wait timer only): a crew waiting on
+      # firstmate reconciles as positively idle, which is its HEALTHY shape, not
+      # evidence of a wedge. There is no earlier escalation to compare against on
+      # the first expiry, so record that reading as the baseline and stay quiet
+      # rather than calling a correctly-parked pane a possible wedge. Every other
+      # first-expiry reading still escalates unconditionally, and once a baseline
+      # exists the ordinary changed/unchanged rule below governs, so a crew that
+      # later moves off that reading still escalates with the count advancing.
+      if [ -z "$state_prev" ] && [ "$mode" = parked-baseline ]; then
+        case "$state_now" in
+          'parked|'*|'blocked|'*)
+            printf '%s' "$state_now" > "$state_file"
+            date +%s > "$recheck_file"
+            date +%s > "$since_file"
+            triage_log "absorbed $label (idle ${age}s, first-expiry baseline $state_now recorded, not an escalation): $win"
+            return 0
+            ;;
+        esac
+      fi
       if [ -n "$state_prev" ] && [ "$state_now" = "$state_prev" ]; then
         # Unchanged. Restart the timer and stay quiet, except for a bounded
         # recheck on the long pause cadence: a wedged crew reconciles as
@@ -361,20 +433,24 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         fm_wake_append stale "$win" "$reason" || exit 1
         date +%s > "$recheck_file"
         wake "$reason"
+      else
+        # The escalation branch is the ELSE of the recheck above, not code the
+        # recheck happens to skip past: the recheck must not be able to fall
+        # through into it and bump the count it just declined to bump.
+        printf '%s' "$state_now" > "$state_file"
+        # The escalation itself is this pane's most recent surface, so the bounded
+        # unchanged-state recheck above is measured from here, not from zero.
+        date +%s > "$recheck_file"
+        n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
+        echo "$n" > "$escalation_file"
+        reason="stale: $win (idle ${age}s, possible wedge, escalation $n, state $state_now)"
+        if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
+          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, state $state_now, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
+        fi
+        fm_wake_append stale "$win" "$reason" || exit 1
+        rm -f "$since_file"
+        wake "$reason"
       fi
-      printf '%s' "$state_now" > "$state_file"
-      # The escalation itself is this pane's most recent surface, so the bounded
-      # unchanged-state recheck above is measured from here, not from zero.
-      date +%s > "$recheck_file"
-      n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
-      echo "$n" > "$escalation_file"
-      reason="stale: $win (idle ${age}s, possible wedge, escalation $n, state $state_now)"
-      if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
-        reason="stale: $win (idle ${age}s, possible wedge, escalation $n, state $state_now, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
-      fi
-      fm_wake_append stale "$win" "$reason" || exit 1
-      rm -f "$since_file"
-      wake "$reason"
       ;;
   esac
 }
@@ -384,19 +460,28 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # task, and re-surface it once every
 # PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
 # stale poll once pause_state_class permits the bounded cadence, so it must be
-# cheap: it NEVER re-reads crew state. The re-surface age is anchored on the
+# cheap: on the external-wait path it NEVER re-reads crew state. The re-surface
+# age is anchored on the
 # status file mtime, not a per-hash marker, so a churny idle pane (a ticking
 # clock, a token counter) cannot keep resetting the cadence the way a hash-tied
 # timer would. A .paused-resurfaced-<key> throttle marker records the last
 # re-surface epoch so, once past the window, it fires once per window rather than
 # every poll. Advances the stale suppressor to <hash> and flags the key paused.
+#
+# An open decision suppresses the ROUTINE stale wake ONLY; it never disables wedge
+# detection. A crew steered by firstmate without the resolved: line its status
+# contract requires keeps that key open forever, and such a crew can still freeze.
+# So the decision-wait path keeps a wedge timer running underneath the bounded
+# cadence (.decision-since-<key>, its own file so the provably-working
+# .stale-since-<key> timer keeps its distinct meaning) and hands the escalation to
+# wedge_timer_check, the single owner of the reconciled-state-change rule. A
+# declared paused: external wait and a verified captain-held: transfer are
+# legitimately indefinite, so they keep clearing that bookkeeping as before.
 handle_paused_stale() {  # <window> <task> <hash>
   local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason wait_kind
   key=$(printf '%s' "$win" | tr ':/.' '___')
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
-  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" \
-        "$STATE/.wedge-state-$key" "$STATE/.wedge-rechecked-$key"
   statusf="$STATE/$task.status"
   # Which kind of wait this is, so the recheck names the right next action. Read
   # from the status file rather than passed in, so every call site stays unchanged.
@@ -405,6 +490,15 @@ handle_paused_stale() {  # <window> <task> <hash>
   else
     wait_kind=decision-wait
   fi
+  if [ "$wait_kind" = decision-wait ]; then
+    rm -f "$STATE/.stale-since-$key"
+    wedge_timer_check "$win" "$STATE/.decision-since-$key" \
+      "stale (awaiting firstmate)" "$STATE/.wedge-escalations-$key" parked-baseline
+  else
+    rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" \
+          "$STATE/.wedge-state-$key" "$STATE/.wedge-rechecked-$key" \
+          "$STATE/.decision-since-$key"
+  fi
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
   age=$(( $(date +%s) - mtime ))
@@ -412,15 +506,16 @@ handle_paused_stale() {  # <window> <task> <hash>
   rf_age=$(age_of "$rf")   # 999999 when no prior re-surface
   if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
     if [ "$wait_kind" = decision-wait ]; then
-      reason="stale: $win (awaiting firstmate ${age}s - a decision this task raised is still open, rechecked on a long cadence not a wedge; decide it or record why it is still held)"
+      reason="stale: $win (awaiting firstmate ${age}s - the last decision this task raised has no recorded resolution, rechecked on a long cadence not a wedge; decide it, record why it is still held, or record the resolution if it was already steered)"
     else
       reason="stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)"
     fi
     fm_wake_append stale "$win" "$reason" || exit 1
     date +%s > "$rf"
     wake "$reason"
+  else
+    triage_log "absorbed stale ($wait_kind, age ${age}s): $win"
   fi
-  triage_log "absorbed stale ($wait_kind, age ${age}s): $win"
 }
 
 clear_pause_state() {  # <window>
@@ -428,7 +523,8 @@ clear_pause_state() {  # <window>
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
-  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
+  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key" \
+        "$STATE/.decision-since-$key"
 }
 
 clear_pause_tracking() {  # <window>
@@ -438,7 +534,7 @@ clear_pause_tracking() {  # <window>
   key=${key//./_}
   clear_pause_state "$win"
   rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" \
-        "$STATE/.wedge-state-$key" "$STATE/.wedge-rechecked-$key"
+        "$STATE/.wedge-state-$key" "$STATE/.wedge-rechecked-$key" "$STATE/.decision-since-$key"
 }
 
 # Reconcile a declared pause, a captain-held status, or an open decision firstmate
@@ -1014,6 +1110,7 @@ EOF
     ewf="$STATE/.wedge-escalations-$key"
     ewsf="$STATE/.wedge-state-$key"      # reconciled state at the last escalation
     ewrf="$STATE/.wedge-rechecked-$key"  # last unchanged-state long-cadence recheck
+    edsf="$STATE/.decision-since-$key"   # wedge timer running under an open decision
     pf="$STATE/.paused-$key"   # flag: this key's stale is using the bounded pause cadence
     prev=$(cat "$hf" 2>/dev/null || true)
     if [ "$h" = "$prev" ]; then
@@ -1162,7 +1259,7 @@ EOF
         fi
       else
         # Pane busy or not yet stably stale: reset pending escalation bookkeeping.
-        rm -f "$ssf" "$ewf" "$ewsf" "$ewrf"
+        rm -f "$ssf" "$ewf" "$ewsf" "$ewrf" "$edsf"
         if [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! task_awaits_firstmate "$(window_to_task "$w" "$STATE")"; }; then
           clear_pause_tracking "$w"
         fi
@@ -1170,7 +1267,7 @@ EOF
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
-      rm -f "$ssf" "$ewf" "$ewsf" "$ewrf"
+      rm -f "$ssf" "$ewf" "$ewsf" "$ewrf" "$edsf"
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && task_awaits_firstmate "$task" && ! window_is_busy "$w" "$tail40"; then
         case "$(pause_state_class "$w" "$task")" in

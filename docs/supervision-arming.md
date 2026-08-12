@@ -26,7 +26,7 @@ It explicitly does not mean pane presence or pane idleness, which is the proxy t
 
 Three consequences follow, and all three are implemented here.
 
-1. **Arming is conditional.** `bin/fm-watch-arm.sh` declines to arm when nothing is progressing and nothing else is watchable, and says so in one line.
+1. **Arming is conditional.** `bin/fm-watch-arm.sh` declines to arm when it has read every task, found none progressing, and found nothing else watchable, and says so in one line.
 2. **A stale pane on a task awaiting firstmate is not actionable.** The watcher absorbs it on the bounded pause cadence it already applies to declared external waits, rather than surfacing it once per changed pane hash.
 3. **The guards count progressing tasks, not runtime records.** `bin/fm-turnend-guard.sh`, `bin/fm-guard.sh`, and `bin/fm-continuity-pretool-check.sh` all decide on the progressing count.
 
@@ -62,6 +62,19 @@ Any of those changing invalidates the record, so a parked worker that writes a s
 
 Invalidation is one-directional by design: it can only move a task from idle to progressing, never the reverse.
 
+### The arm gate is time-bounded
+
+The gate runs before the arm can report `started` or `attached`, and the harness adapters give that readiness at most 12000ms on the wake-restore path.
+A cache-miss reconcile can spend up to `FM_CREW_STATE_NM_TIMEOUT` on its bounded `no-mistakes` call, so reading a whole fleet of invalidated records could outlast that window, and a readiness timeout retires the arm and starts the retry loop the gate exists to remove.
+So `FM_ARM_GATE_BUDGET_SECS` (8s default) caps the total wall clock the gate spends on authoritative reconciles, and the cap holds by construction rather than by tuning.
+The gate refuses to start a reconcile unless the remaining budget can absorb a whole one, and it runs each reconcile in a child it kills at that same per-call ceiling of half the budget.
+The ceiling has to bound the reconcile itself rather than the `no-mistakes` call inside it: `fm-crew-state.sh` makes up to two separately capped `no-mistakes` calls per run, and the endpoint probe sits outside both, so lowering `FM_CREW_STATE_NM_TIMEOUT` alone would have capped a fraction of the work and left the real worst case at roughly twice the ceiling.
+With the reconcile itself bounded, the honest worst case for the whole gate is `FM_ARM_GATE_BUDGET_SECS` plus the fraction of a second it takes to reap a killed child: 8s by default, a real 4s under the adapters' window rather than an average that a slow reconcile could blow through.
+A reconcile killed at the ceiling leaves its task unevaluated and writes no verdict record, because the record is written by the parent only for a child it saw finish.
+Every task left unevaluated, whether because the remaining budget could not absorb another reconcile or because the one it started was killed, counts progressing.
+The safety property is one-directional, the same way record invalidation is: the gate may decline only when it actually evaluated every task and found none progressing, so a spent budget always arms.
+A budgeted arm says so in its printed line, so an operator can tell it apart from an arm that saw real progress, and `--force` still bypasses the gate entirely.
+
 ### Where the stale suppression stops
 
 The watcher's stale suppression covers exactly the awaiting-firstmate set: a declared external-wait pause, a verified captain-held transfer, and an open keyed `needs-decision`/`blocked` in the durable status fold.
@@ -71,6 +84,17 @@ The asymmetry is intentional.
 Arming is a one-shot decision about whether a cycle is worth starting at all, and a fleet of only finished or failed tasks has nothing to observe - so a fleet like that never reaches the stale path, because the arm declines first.
 Inside a *running* watcher, though, a `done:` line is the one captain-relevant status with a documented false-positive history: it can be a leftover from before a validation run started, and widening suppression there would re-open that hole for a case the arm gate already covers from the front.
 
+Holding that boundary takes an explicit narrowing, because the durable fold does not close a decision on a terminal line.
+`status_open_decisions` keeps a `needs-decision:`/`blocked:` key open until an explicit `resolved:` or `captain-held:` closes it, so a crew that raised a decision, was steered without the `resolved:` line its status contract requires, and then wrote `done:` would still read as awaiting firstmate and have that `done:` absorbed.
+The watcher therefore calls `status_task_awaits_firstmate_unterminated`, which drops any key whose most recent event is a same-key `done:` or `failed:`.
+That narrowing is watcher-local and opt-in: `status_open_decisions` itself is unchanged, because the fleet snapshot and the decision-hold lifecycle depend on its durable semantics.
+A declared `paused:` or `captain-held:` last line still suppresses, and a genuinely still-open decision with no later same-key terminal event still suppresses.
+
+That last case is where the boundary needs one more limit: an open decision suppresses the ROUTINE stale wake only, and never wedge detection.
+A crew that raised a decision, was steered without the `resolved:` line, resumed work, and then froze without writing any terminal line keeps its key open forever, so an unlimited suppression would deny wedge detection to exactly the population that most needs it.
+So the awaiting-firstmate absorb keeps a wedge timer running underneath its bounded cadence, on its own `state/.decision-since-<key>` file, and once the pane has been idle past `FM_STALE_ESCALATE_SECS` it escalates through the same `wedge_timer_check` path everything else uses, with the escalation count advancing under the state-change rule below.
+This applies to the open-decision class only: a declared `paused:` external wait and a verified `captain-held:` transfer are legitimately indefinite and keep clearing that bookkeeping on every absorb.
+
 ## Escalation requires a state change
 
 `wedge_timer_check` used to re-escalate an unchanged pane every `FM_STALE_ESCALATE_SECS`, incrementing the escalation count each time; 8 and 11 consecutive escalations on one pane were both observed.
@@ -78,6 +102,19 @@ The count is the urgency signal, so bumping it without new evidence is misinform
 
 An escalation now requires the task's reconciled state to differ from the state recorded at the previous escalation.
 An unchanged state still gets a bounded recheck on the long `FM_PAUSE_RESURFACE_SECS` cadence, deliberately not counted as an escalation, because a wedged crew reconciles as `working` and suppression must never fully swallow a task that reads as progressing.
+
+That rule needs a starting point, and on the decision-wait timer the missing one used to escalate.
+There is no previous escalation to compare against at the first expiry, so every crew that raised a decision and waited on the captain was called a possible wedge about four minutes in, on a reading (`parked`) the verdict mapping positively classifies as idle.
+So the decision-wait timer, and only that timer, records a positively `parked` or `blocked` first-expiry reading as the comparison baseline instead of escalating on it: that reading is the healthy shape of a crew waiting on firstmate, not evidence of a freeze.
+Any other first-expiry reading - `working`, `unknown`, `done`, `failed`, `paused`, a dead endpoint - still escalates immediately, and once a baseline exists every later state change escalates with the count advancing normally.
+A crew steered without a `resolved:` line that resumes and leaves any evidence of resuming moves off its baseline, and that move is what escalates it.
+
+The baseline has a known limitation, and it is the narrower remainder of the case the original finding named.
+A crew that was steered and then froze WITHOUT appending any status line still has `needs-decision:` as its last line, so `fm-crew-state.sh` keeps reporting `parked`, the decision-wait timer records that reading as its baseline at the first expiry and matches it at every later one, and the task therefore never wedge-escalates with advancing urgency.
+It is not silent - the bounded hourly recheck still surfaces it, and its wording now asks the operator to record the resolution if the decision was already steered - but it is surfaced on that cadence rather than escalated, and this document should not be read as promising otherwise.
+Closing that remainder needs evidence the crew never wrote, so it is left open rather than guessed at here.
+
+One accepted cost comes with the baseline: a parked decision runs both the wedge timer's unchanged-state recheck and `handle_paused_stale`'s own re-surface, so it can produce two wakes per `FM_PAUSE_RESURFACE_SECS` window that carry the same operator action.
 
 ## Every harness had to learn the third outcome
 

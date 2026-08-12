@@ -248,6 +248,13 @@ async function restoreAfterActionableClose(paths, sessionID, client, predecessor
     // An actionable line belongs to this arm's close handler.
     // Do not retire it before that handler can start the successor cycle.
     if (status === "wake") return "";
+    // The successor arm declined: nothing in this home is progressing, so there
+    // is no cycle to restore. Successful non-restoration - no retry, no backoff,
+    // and no continuity-failure line appended to the delivered wake.
+    if (status === "idle") {
+      setArmStatus("idle");
+      return "";
+    }
     failure = restorationFailure(status);
     if (!(await retireArm(armChild))) {
       setArmStatus("failed");
@@ -337,7 +344,12 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     resolveClosed();
     releaseChild();
     const classification = classifyArmClose(stdout, stderr, code, signal);
-    settleReadiness(classification.kind === "actionable" ? "wake" : "failed");
+    // Settle readiness from the classification, so a restoring caller blocked on
+    // this promise can tell a decline ("idle") apart from an unready successor.
+    let readinessStatus = "failed";
+    if (classification.kind === "actionable") readinessStatus = "wake";
+    else if (classification.kind === "idle") readinessStatus = "idle";
+    settleReadiness(readinessStatus);
     const predecessor = String(armChild.pid ?? "");
     if (classification.kind === "idle") {
       retryFailures = 0;

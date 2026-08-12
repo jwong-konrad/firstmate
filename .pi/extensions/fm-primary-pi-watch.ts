@@ -19,6 +19,12 @@ type CloseClassification = {
   message: string;
 };
 
+// Readiness is tri-state, not a boolean, because a successor arm has three
+// outcomes and only one of them is a failure. "idle" is a declined arm: the gate
+// found nothing progressing to supervise, so there is no successor to wait for
+// and non-restoration is the correct, successful result.
+type ArmReadiness = "ready" | "idle" | "failed";
+
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
@@ -41,7 +47,7 @@ let retryFailures = 0;
 let stopping = false;
 let seq = 0;
 let restoring = false;
-const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
+const armReadiness = new WeakMap<ChildProcess, Promise<ArmReadiness>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
 
 function positiveInteger(name: string, fallback: number): number {
@@ -168,11 +174,11 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  function waitForReadiness(armChild: ChildProcess): Promise<boolean> {
+  function waitForReadiness(armChild: ChildProcess): Promise<ArmReadiness> {
     const readiness = armReadiness.get(armChild);
-    if (!readiness) return Promise.resolve(false);
+    if (!readiness) return Promise.resolve("failed");
     return new Promise((resolveReady) => {
-      const timer = setTimeout(() => resolveReady(false), armReadyTimeoutMs);
+      const timer = setTimeout(() => resolveReady("failed"), armReadyTimeoutMs);
       timer.unref();
       void readiness.then((ready) => {
         clearTimeout(timer);
@@ -202,7 +208,13 @@ export default function (pi: ExtensionAPI) {
       if (stopping) return "";
       const replacement = startArm(predecessorArmPid);
       const successorChild = child;
-      if (replacement.ok && successorChild && await waitForReadiness(successorChild)) return "";
+      if (replacement.ok && successorChild) {
+        const readiness = await waitForReadiness(successorChild);
+        // A declined successor is a healthy resting state, not an unready
+        // watcher: there is nothing left to supervise, so stop here without
+        // spending a retry, a backoff, or a continuity-failure line on the wake.
+        if (readiness === "ready" || readiness === "idle") return "";
+      }
       if (replacement.ok) {
         failure = "watcher: FAILED - Pi extension could not verify a ready successor watcher";
         if (!(await retireArm(successorChild))) {
@@ -285,14 +297,14 @@ export default function (pi: ExtensionAPI) {
       resolveClosed = resolveClosedChild;
     });
     armClose.set(armChild, closed);
-    const settleReadiness = (ready: boolean): void => {
+    const settleReadiness = (ready: ArmReadiness): void => {
       if (readinessSettled) return;
       readinessSettled = true;
       resolveReadiness(ready);
     };
     const observeEstablishedArm = (): void => {
       if (/^watcher: (?:started|attached)\b/m.test(`${stdout}\n${stderr}`)) {
-        settleReadiness(true);
+        settleReadiness("ready");
       }
     };
     const releaseChild = (): void => {
@@ -310,10 +322,13 @@ export default function (pi: ExtensionAPI) {
       if (settled) return;
       settled = true;
       resolveClosed();
-      settleReadiness(false);
+      // Classify BEFORE settling readiness: a restoring caller is blocked on the
+      // readiness promise, and it must be able to tell a decline apart from an
+      // unready successor.
+      const classification = classifyClose(stdout, stderr, code, signal);
+      settleReadiness(classification.kind === "idle" ? "idle" : "failed");
       releaseChild();
       if (stopping) return;
-      const classification = classifyClose(stdout, stderr, code, signal);
       const predecessor = String(armChild.pid ?? "");
       if (classification.kind === "actionable") {
         retryFailures = 0;
@@ -339,7 +354,7 @@ export default function (pi: ExtensionAPI) {
       if (settled) return;
       settled = true;
       resolveClosed();
-      settleReadiness(false);
+      settleReadiness("failed");
       releaseChild();
       if (stopping) return;
       if (restoring) return;

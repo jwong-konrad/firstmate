@@ -34,7 +34,7 @@ Only a delivered wake opens the serviced window: a declined arm writes no ledger
 Only the ledger's newest dispositive record is read, so a re-arm that fails after a delivered wake re-closes the window immediately rather than being masked by the wake before it, while bookkeeping rows from an arm that merely attached to somebody else's watcher neither open nor close it.
 This is what the persistent Pi and OpenCode adapters get structurally from starting a verified successor before delivering the wake; Claude re-arms from the model, so it needs the window stated explicitly ([`docs/supervision-deadlock-guard.md`](supervision-deadlock-guard.md)).
 `bin/fm-turnend-guard.sh` grants no equivalent grace, so the window bounds how long firstmate may act unlocked and can never become a way to end a turn unsupervised.
-Allowing an ordinary literal teardown prevents a terminal wake from creating a recovery circle: forced or dynamically constructed teardown remains blocked, ordinary teardown itself still refuses dirty, unlanded, incomplete-scout, and unresolved-decision cases, and the turn-end guard continues to require supervision for any tasks left in flight.
+Allowing an ordinary literal teardown prevents a terminal wake from creating a recovery circle: forced or dynamically constructed teardown remains blocked, ordinary teardown itself still refuses dirty, unlanded, incomplete-scout, and unresolved-decision cases, and the turn-end guard continues to require supervision for any task still progressing.
 Codex retains its bounded foreground checkpoint protocol.
 Grok retains its tracked background-task notification protocol.
 No adapter starts a replacement with shell `&`.

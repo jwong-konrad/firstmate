@@ -246,6 +246,9 @@ exit 0
 SH
   cat > "$bin/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
+# FM_FAKE_CREW_STATE_DELAY stands in for the bounded no-mistakes call a real
+# reconcile can pay, so a test can make the gate's reconciles exceed its budget.
+[ -z "${FM_FAKE_CREW_STATE_DELAY:-}" ] || sleep "$FM_FAKE_CREW_STATE_DELAY"
 id=${1:-}
 key=$(printf '%s' "$id" | tr -c 'A-Za-z0-9' '_')
 var="FM_FAKE_CREW_STATE_$key"
@@ -398,6 +401,80 @@ test_arm_reconciles_on_a_cache_miss() {
   pass "fm-watch-arm: a cache miss reconciles authoritatively and persists the verdict"
 }
 
+# The gate runs before the arm can print started/attached, and the harness
+# adapters time watcher readiness out at 12000ms on the wake-restore path. A
+# fleet whose reconciles outlast the gate's budget must therefore ARM on the
+# tasks it never read, never decline on them: declining would rest on evidence
+# nobody gathered, and the adapter would retire the arm and start retrying.
+test_arm_gate_budget_exhaustion_arms_rather_than_declines() {
+  local home state out
+  home=$(make_arm_home arm-budget); state="$home/state"
+  seed_task "$state" alpha 'needs-decision: pick A or B'
+  seed_task "$state" beta 'needs-decision: pick C or D'
+  seed_task "$state" gamma 'needs-decision: pick E or F'
+  # No records at all, so every task is a cache miss and pays a reconcile that
+  # takes longer than the whole budget allows.
+  out=$(FM_ARM_GATE_BUDGET_SECS=1 FM_FAKE_CREW_STATE_DELAY=1 \
+    FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review' run_arm "$home")
+  case "$out" in
+    *"not armed"*) fail "a spent gate budget must arm, never decline: $out" ;;
+  esac
+  assert_contains "$out" "gate budget was spent" \
+    "a budgeted arm must say so, so the operator can tell it from an arm that saw progress"
+  assert_contains "$out" "signal: stub-wake" "a budgeted arm must still run the watcher cycle"
+  pass "fm-watch-arm: a spent reconcile budget arms and names the unevaluated tasks"
+}
+
+# The ceiling must bound the RECONCILE, not one no-mistakes call inside it:
+# fm-crew-state.sh makes up to two separately capped calls per run and probes the
+# endpoint outside both, so a per-call cap would have left the real worst case at
+# roughly twice the ceiling. A reconcile that outruns the ceiling is killed, its
+# task is left unevaluated (which counts progressing, so the gate arms), and it
+# must leave no verdict record behind.
+test_arm_gate_kills_a_reconcile_that_outruns_the_ceiling() {
+  local home state out started elapsed
+  home=$(make_arm_home arm-ceiling); state="$home/state"
+  seed_task "$state" alpha 'needs-decision: pick A or B'
+  seed_task "$state" beta 'needs-decision: pick C or D'
+  started=$(date +%s)
+  # Budget 4 gives a 2s ceiling; the stubbed reconcile wants 9s, far longer than
+  # any single capped no-mistakes call would explain.
+  out=$(FM_ARM_GATE_BUDGET_SECS=4 FM_FAKE_CREW_STATE_DELAY=9 \
+    FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review' run_arm "$home")
+  elapsed=$(( $(date +%s) - started ))
+  case "$out" in
+    *"not armed"*) fail "a killed reconcile must leave its task unevaluated and arm: $out" ;;
+  esac
+  assert_contains "$out" "gate budget was spent" \
+    "a gate that could not read every task must say so"
+  [ "$elapsed" -lt 9 ] \
+    || fail "the ceiling did not bound the reconcile itself; the gate took ${elapsed}s"
+  [ ! -f "$(fm_progress_record_path "$state" alpha)" ] \
+    || fail "a killed reconcile must not persist a verdict record"
+  pass "fm-watch-arm: a reconcile that outruns the ceiling is killed, records nothing, and arms"
+}
+
+test_arm_gate_declines_when_the_budget_is_ample() {
+  local home state out status
+  home=$(make_arm_home arm-budget-ample); state="$home/state"
+  seed_task "$state" alpha 'needs-decision: pick A or B'
+  seed_task "$state" beta 'needs-decision: pick C or D'
+  # Same fully idle fleet, same cache misses, but the budget covers every
+  # reconcile - so the gate reads them all and the decline still holds.
+  out=$(FM_ARM_GATE_BUDGET_SECS=60 \
+    FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review' run_arm "$home")
+  status=$?
+  expect_code 0 "$status" "declining to arm is a clean outcome, not a failure"
+  assert_contains "$out" "watcher: not armed - nothing to watch" \
+    "an ample budget must still decline a fully idle fleet"
+  assert_contains "$out" "2 task(s), none progressing" \
+    "the decline must report every task it judged"
+  case "$out" in
+    *"gate budget was spent"*) fail "an ample budget must not report exhaustion: $out" ;;
+  esac
+  pass "fm-watch-arm: with an ample budget every task is read and a fully idle fleet still declines"
+}
+
 test_token_verdict_mapping
 test_record_absent_reads_progressing
 test_record_roundtrip_and_invalidation
@@ -417,3 +494,6 @@ test_arm_proceeds_for_an_armed_check_poll
 test_arm_force_overrides_the_gate
 test_arm_gate_precedes_restart_teardown
 test_arm_reconciles_on_a_cache_miss
+test_arm_gate_budget_exhaustion_arms_rather_than_declines
+test_arm_gate_kills_a_reconcile_that_outruns_the_ceiling
+test_arm_gate_declines_when_the_budget_is_ample

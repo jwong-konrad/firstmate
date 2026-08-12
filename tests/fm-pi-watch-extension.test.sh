@@ -334,6 +334,68 @@ EOF
   pass "Pi extension treats a declined arm as a quiet outcome, never a retryable failure"
 }
 
+# The decline can also arrive on the RESTORATION path: an actionable wake leaves
+# the fleet with nothing progressing, so the successor arm declines. That is
+# successful non-restoration, not an unready successor - no retries, no backoff,
+# and the original wake must be delivered clean, with no continuity-failure line.
+test_pi_declined_successor_restores_quietly() {
+  local repo home plugin log out status
+  repo="$TMP_ROOT/pi-declined-successor-root"
+  home="$TMP_ROOT/pi-declined-successor-home"
+  log="$TMP_ROOT/pi-declined-successor.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: synthetic wake\n'
+  exit 0
+fi
+printf 'watcher: not armed - nothing to watch (1 task(s), none progressing: a=done)\n'
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_PI_ARM_READY_TIMEOUT_MS=2000 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let prompt = "";
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => { prompt += message; },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-declined-successor", {}, undefined, undefined, {});
+for (let i = 0; i < 500 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!prompt.includes("signal: synthetic wake")) throw new Error(`original wake was lost: ${prompt}`);
+if (prompt.includes("watcher: FAILED")) throw new Error(`a declined successor was reported as a failure: ${prompt}`);
+// Well past the configured backoff: the decline must not have started a retry.
+await new Promise((resolve) => setTimeout(resolve, 400));
+const rows = existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean)
+  : [];
+if (rows.length !== 2) throw new Error(`a declined successor was retried: ${rows.length} launches`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "a declined successor must end restoration cleanly"
+  [ -z "$out" ] || fail "Pi declined-successor test printed output: $out"
+  pass "Pi extension ends restoration cleanly when the successor arm declines"
+}
+
 test_pi_hung_successor_falls_back_to_typed_wake() {
   local repo home plugin log out status
   repo="$TMP_ROOT/pi-hung-successor-root"
@@ -1673,6 +1735,71 @@ EOF
   pass "OpenCode plugin treats a declined arm as a quiet outcome, never a retryable failure"
 }
 
+# The OpenCode sibling of the Pi restoration case above: a declined successor
+# ends restoration successfully, delivering the original wake with no retries and
+# no continuity-failure line.
+test_opencode_declined_successor_restores_quietly() {
+  local plugin repo home log out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-declined-successor-root"
+  home="$TMP_ROOT/opencode-declined-successor-home"
+  log="$TMP_ROOT/opencode-declined-successor.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: synthetic wake\n'
+  exit 0
+fi
+printf 'watcher: not armed - nothing to watch (1 task(s), none progressing: task=done)\n'
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let prompt = "";
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      prompt += request.body.parts.map((part) => part.text).join("\n");
+    },
+  },
+};
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+for (let i = 0; i < 500 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!prompt.includes("signal: synthetic wake")) throw new Error(`original wake was lost: ${prompt}`);
+if (prompt.includes("watcher: FAILED")) throw new Error(`a declined successor was reported as a failure: ${prompt}`);
+// Well past the configured backoff: the decline must not have started a retry.
+await new Promise((resolve) => setTimeout(resolve, 400));
+const rows = existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean)
+  : [];
+if (rows.length !== 2) throw new Error(`a declined successor was retried: ${rows.length} launches`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode must end restoration cleanly on a declined successor"
+  [ -z "$out" ] || fail "OpenCode declined-successor test printed output: $out"
+  pass "OpenCode plugin ends restoration cleanly when the successor arm declines"
+}
+
 test_opencode_established_empty_close_honors_retry_limit() {
   local plugin repo home log out status
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
@@ -1947,6 +2074,7 @@ test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
 test_pi_actionable_close_starts_single_successor_before_delivery
 test_pi_declined_arm_is_quiet_and_never_retries
+test_pi_declined_successor_restores_quietly
 test_pi_hung_successor_falls_back_to_typed_wake
 test_pi_unretired_successor_falls_back_without_retry
 test_pi_late_unretired_close_resumes_supervision
@@ -1969,6 +2097,7 @@ test_opencode_unretired_successor_falls_back_without_retry
 test_opencode_late_unretired_close_resumes_supervision
 test_opencode_empty_close_retries_instead_of_disappearing
 test_opencode_declined_arm_is_quiet_and_never_retries
+test_opencode_declined_successor_restores_quietly
 test_opencode_established_empty_close_honors_retry_limit
 test_opencode_actionable_close_rechecks_session_lock
 test_opencode_watch_arm_coordinates_with_turnend_guard
