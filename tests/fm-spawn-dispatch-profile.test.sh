@@ -98,6 +98,17 @@ $1
 EOF
 }
 
+# Every launch is wrapped in the clean-environment runner (bin/fm-env-clean.sh,
+# tests/fm-spawn-env-allowlist.test.sh). These tests pin the command tail the
+# wrapper hands the harness, so they carry its exact prefix rather than assert
+# around it.
+# run_spawn exports GROK_HOME, which fm-spawn injects so the agent reads hooks
+# from the same home it installed them into.
+env_clean_prefix() {  # <home> <task-id>
+  printf "'%s/bin/fm-env-clean.sh' --allow-file '%s/config/spawn-env-allow' 'GOTMPDIR=/tmp/fm-%s/gotmp' 'GROK_HOME=%s/grok-home'" \
+    "$ROOT" "$1" "$2" "$1"
+}
+
 assert_meta_profile() {
   local meta=$1 harness=$2 model=$3 effort=$4
   assert_grep "harness=$harness" "$meta" "meta missing harness=$harness"
@@ -118,7 +129,7 @@ test_no_profile_keeps_claude_launch_unchanged() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="FM_MANAGED=1 CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
+  expected="$(env_clean_prefix "$HOME_DIR" "$id") FM_MANAGED=1 CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and keeps the claude launch byte-identical"
 }
@@ -191,7 +202,7 @@ test_active_dispatch_profile_allows_positional_harness() {
 }
 
 test_active_dispatch_profile_allows_raw_launch_command() {
-  local rec id out status launch
+  local rec id out status launch expected
   id=profile-raw-z15
   rec=$(make_spawn_case profile-raw claude "$id")
   read_case_record "$rec"
@@ -204,7 +215,8 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "FM_MANAGED=1 custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  expected="$(env_clean_prefix "$HOME_DIR" "$id") FM_MANAGED=1 custom-agent --flag"
+  [ "$launch" = "$expected" ] || fail "raw launch command changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 
