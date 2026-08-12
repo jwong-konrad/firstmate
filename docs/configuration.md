@@ -256,6 +256,19 @@ Ship tasks are decoupled and keep today's unsandboxed posture until `sandbox-tru
   But no new spawn, relaunch, or resume of any task may carry the override while `state/.afk` exists, and firstmate must not extend, repeat, or renew the override for that task without a fresh explicit captain instruction after the captain returns.
 - Absence: when the override is not currently granted and work needs to reach outside the boundary, firstmate escalates to the captain rather than widening the allowlist or dropping the sandbox.
 
+## Worker launch environment (config/spawn-env-allow)
+
+A spawned worker does not inherit the captain's shell environment.
+`bin/fm-spawn.sh` wraps every launch in `bin/fm-env-clean.sh`, which runs in the worker's own pane and starts the agent with a deny-by-default environment: allowlisted names that are actually set there, plus the explicit assignments firstmate passes it.
+This closed a real leak - on 2026-07-31 an exported `LINEAR_API_KEY` reached a worker and its pipeline wrote the value into a public PR description.
+[`worker-environment.md`](worker-environment.md) owns the incident record, the verification evidence, and the residual risks; `bin/fm-env-clean.sh`'s header owns the built-in allowlist and the exact mechanics.
+
+`config/spawn-env-allow` is this home's optional widening of that allowlist: one environment variable NAME per line, `#` comments and blank lines ignored, LOCAL and gitignored.
+Absent means the built-in allowlist alone, which is the normal state.
+Only exact names are accepted - a wildcard is refused, and so is a credential-shaped name, because a credential a worker genuinely needs is a per-project value that belongs in `fm-spawn.sh`'s scoped `SPAWN_ENV_INJECT` seam rather than a home-wide name list.
+Either refusal stops the spawn before a window, worktree, or task record exists.
+Unlike the items in `FM_INHERITABLE_CONFIG`, this file is deliberately not inherited into secondmate homes: widening an environment boundary should be a deliberate per-home act, not a sync side effect.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.

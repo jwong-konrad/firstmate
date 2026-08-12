@@ -59,7 +59,13 @@
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters.
+#   new adapters. It must be argv-style: a program plus arguments, with optional
+#   leading NAME=VALUE assignments. A shell operator (; && || | & > < or a newline)
+#   refuses the spawn before anything is created, because a split line would run
+#   its tail outside the clean-environment wrapper. That check is a deliberately
+#   blunt substring scan - it cannot tell a quoted character from an operator, and
+#   refuses either way. Command substitution is allowed: the pane shell evaluates
+#   it and only its output becomes an argument, exactly as in the templates.
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
@@ -77,6 +83,17 @@
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
+#   Worker environment: every launch is wrapped in bin/fm-env-clean.sh, so the agent
+#   starts with a deny-by-default environment instead of the captain's whole login
+#   shell (which is how a secret reached a public PR body on 2026-07-31). The pane
+#   keeps its own environment; only what the agent process inherits is restricted.
+#   This home may widen the allowed NAMEs in config/spawn-env-allow; an invalid or
+#   credential-shaped entry there refuses the spawn before anything is created.
+#   Variables firstmate deliberately hands the worker travel in SPAWN_ENV_INJECT
+#   (see the injection seam near the launch send), NOT as `export` lines typed into
+#   the pane - a pane export does not survive the clean environment.
+#   docs/worker-environment.md owns the incident record, the verification evidence,
+#   and the residual risks this does not cover.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
@@ -124,7 +141,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,96p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -205,6 +222,23 @@ case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
 esac
+
+# Worker environment boundary. bin/fm-env-clean.sh is what keeps the captain's
+# shell secrets and ssh-agent out of the agent process; docs/worker-environment.md
+# owns why and what it does not cover. Resolve and VALIDATE it here, before a
+# window, worktree, or metadata exists, so a missing wrapper or a bad
+# config/spawn-env-allow is a clean refusal rather than a spawn that reports
+# success and then dies on the launch line inside the pane.
+# Resolved from SCRIPT_DIR, not FM_ROOT: the wrapper must be the copy that ships
+# with THIS fm-spawn, exactly like the sourced libraries above. FM_ROOT follows
+# FM_ROOT_OVERRIDE, which selects an operational home, not a code location.
+ENV_CLEAN="$SCRIPT_DIR/fm-env-clean.sh"
+ENV_ALLOW_FILE="$CONFIG/spawn-env-allow"
+if [ ! -x "$ENV_CLEAN" ]; then
+  echo "error: $ENV_CLEAN is missing or not executable; refusing to launch a worker with the captain's full environment" >&2
+  exit 1
+fi
+"$ENV_CLEAN" --allow-file "$ENV_ALLOW_FILE" --print-allowed >/dev/null || exit 1
 
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
 # FM_BACKEND env, else config/backend, else runtime auto-detection, else
@@ -465,6 +499,29 @@ launch_template() {
 
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
+    # A control operator would split the line the pane shell types, so only its
+    # head would run inside the clean-environment wrapper and the tail would run
+    # outside it with the pane's full environment. This is a deliberately blunt
+    # substring check: it cannot tell a quoted '>' from a redirection, and it errs
+    # toward refusing, because the unsafe direction is a boundary escape while a
+    # false positive costs one rewrite into argv form. Command substitution is NOT
+    # refused - the pane shell evaluates it and only its output becomes an argv
+    # element, which is how the generated templates' "$(cat ...)" already works.
+    # Refusing here keeps it before a window, worktree, or task record exists.
+    case "$ARG3" in
+      *$'\n'*)
+        echo "error: raw launch command contains a newline, which the pane shell would run as a second command outside the clean-environment wrapper - pass an argv-style command instead (program plus arguments, optional leading NAME=VALUE assignments)" >&2
+        exit 1
+        ;;
+    esac
+    for raw_op in ';' '&&' '||' '|' '&' '>' '<'; do
+      case "$ARG3" in
+        *"$raw_op"*)
+          echo "error: raw launch command contains the shell operator '$raw_op'; the tail of a split line would run outside the clean-environment wrapper, and this check cannot tell a quoted character from an operator, so it refuses either way - pass an argv-style command instead (program plus arguments, optional leading NAME=VALUE assignments; command substitution is fine)" >&2
+          exit 1
+          ;;
+      esac
+    done
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
@@ -1164,6 +1221,15 @@ fi
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
 TASK_TMP="/tmp/fm-$ID"
 mkdir -p "$TASK_TMP/gotmp"
+# Every variable firstmate deliberately hands the worker process, as NAME=VALUE
+# entries passed to bin/fm-env-clean.sh at launch. This is the ONLY delivery path
+# that survives the clean environment; see the injection seam below.
+SPAWN_ENV_INJECT=("GOTMPDIR=$TASK_TMP/gotmp")
+# GROK_HOME travels by injection rather than by allowlisting, so the agent reads
+# hooks from the SAME home the GROK_HOOKS_DIR install below computes from it; the
+# pane's own value could differ. Unset means both sides already agree on
+# $HOME/.grok, and HOME is allowlisted, so there is nothing to hand over.
+[ -z "${GROK_HOME:-}" ] || SPAWN_ENV_INJECT+=("GROK_HOME=$GROK_HOME")
 
 # Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
 # agent finishes a turn. Worktree-resident hooks are kept out of git's view so
@@ -1350,9 +1416,32 @@ if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
 fi
-# Export GOTMPDIR into the crewmate's pane shell so the agent and every child
-# process (go build, go test, ...) inherit it. Sent before the launch command so
-# the env is set when the agent starts; the brief sleep lets the export land.
+# ---- Per-project / per-task environment injection seam ----------------------
+# Append "NAME=VALUE" entries to SPAWN_ENV_INJECT here to hand them to the worker
+# process. This is the named passthrough through the clean-environment boundary,
+# and it is the seam task fmpatch-spawn-env-a1 builds on for config/project-env.
+#
+# Deliver it HERE, not by sending `export NAME=VALUE` into the pane: the pane
+# shell's exports do not cross bin/fm-env-clean.sh's env -i, so a pane export
+# would silently never reach the agent - the mysterious-mid-task-failure shape
+# this boundary is specifically meant not to create.
+# -----------------------------------------------------------------------------
+
+# Wrap the whole launch in the clean-environment runner. It executes IN the pane,
+# so PATH, TERM, and the multiplexer's own ids stay pane-authoritative and the
+# harness resolves exactly as it did before; only non-allowed names are dropped.
+# The wrapper parses leading NAME=VALUE arguments like `env` does, so the harness
+# templates' own env prefixes above (and the secondmate FM_* prefixes) keep working
+# unchanged and simply become explicit assignments.
+ENV_CLEAN_PREFIX="$(shell_quote "$ENV_CLEAN") --allow-file $(shell_quote "$ENV_ALLOW_FILE")"
+for env_kv in "${SPAWN_ENV_INJECT[@]+"${SPAWN_ENV_INJECT[@]}"}"; do
+  ENV_CLEAN_PREFIX="$ENV_CLEAN_PREFIX $(shell_quote "$env_kv")"
+done
+LAUNCH="$ENV_CLEAN_PREFIX $LAUNCH"
+
+# GOTMPDIR also goes into the PANE SHELL's own environment, so a go build the
+# captain types in that pane later shares the task's temp root. The agent gets it
+# from SPAWN_ENV_INJECT above, not from this export. The brief sleep lets it land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
