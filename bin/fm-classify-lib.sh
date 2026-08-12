@@ -306,6 +306,10 @@ status_task_awaits_firstmate_unterminated() {  # <status-file>
 # key closes the phase, because it has moved to a terminal or separately tracked
 # state.
 # A bare legacy event uses the default key, preserving one-phase behavior.
+# Crewmate ship and scout briefs reuse this same keyed vocabulary as write-ahead
+# in-flight markers around not-safe-to-repeat external actions (bin/fm-brief.sh
+# owns that contract); marker lines classify exactly like any other
+# working/resolved event, and their primary reader is the post-reset worker itself.
 # This fold is evidence about whether a parent event was explicitly superseded.
 # It is never authoritative current crew state, and consumers must not let an open
 # phase outrank a structured home snapshot or fm-crew-state result.
