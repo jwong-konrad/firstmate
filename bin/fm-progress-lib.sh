@@ -98,7 +98,9 @@ fm_progress_record_write() {  # <state-dir> <id> <verdict> <state-token> <detail
 }
 
 # Drop a task's verdict so it counts progressing again. Called wherever firstmate
-# deliberately restarts work on a task (a steer), and by teardown-style cleanup.
+# deliberately restarts work on a task (a steer, in bin/fm-send.sh). Teardown does
+# not call this: it removes state/.progress-<id> alongside the task's other state
+# files in bin/fm-teardown.sh, because by then the whole task is going away.
 fm_progress_record_invalidate() {  # <state-dir> <id>
   rm -f "$(fm_progress_record_path "$1" "$2")" 2>/dev/null || true
   return 0
@@ -150,19 +152,28 @@ fm_progress_token_verdict() {  # <state-token>
 # `unknown` reading idle rather than indeterminate. Mirrors exactly the four
 # absences bin/fm-crew-state.sh itself reports as unknown/none: missing metadata,
 # a torn-down worktree, no recorded backend target, and an unreadable target.
-# Only ever called on the reconcile path, so the bounded capture is never paid by
+# Only ever called on the reconcile path, so the bounded probe is never paid by
 # a hook.
+#
+# This is the ONE path that can turn an indeterminate reading into `idle`, so the
+# endpoint probe is fm_backend_target_exists - the purpose-built existence
+# predicate, which for tmux is the same `display-message -p` read that
+# fm-crew-state.sh's pane_readable performs. No expected-label argument is
+# passed: a label mismatch is a naming disagreement, not an absence. When the
+# predicate is not in scope at all, the reading stays indeterminate (return 1),
+# because a missing probe is not evidence of a dead endpoint.
 fm_progress_endpoint_gone() {  # <state-dir> <id>
   local state=$1 id=$2 meta worktree backend target
   meta="$state/$id.meta"
   [ -f "$meta" ] || return 0
   command -v fm_backend_target_of_meta >/dev/null 2>&1 || return 1
+  command -v fm_backend_target_exists >/dev/null 2>&1 || return 1
   worktree=$(fm_meta_get "$meta" worktree)
   [ -z "$worktree" ] || [ -d "$worktree" ] || return 0
   target=$(fm_backend_target_of_meta "$meta")
   [ -n "$target" ] || return 0
   backend=$(fm_backend_of_meta "$meta")
-  fm_backend_capture "$backend" "$target" 1 "fm-$id" >/dev/null 2>&1 || return 0
+  fm_backend_target_exists "$backend" "$target" >/dev/null 2>&1 || return 0
   return 1
 }
 
@@ -173,7 +184,11 @@ fm_progress_endpoint_gone() {  # <state-dir> <id>
 #
 # Expensive by design (see the header). Callers that can tolerate a stale answer
 # should call fm_progress_verdict_cached first and reconcile only on a miss.
-fm_progress_reconcile() {  # <state-dir> <id>
+# The reading half of the reconcile: everything except persisting the record.
+# Split out so a caller that runs the reconcile under its own wall-clock bound
+# (the arm gate) can persist the verdict itself, once, from a call it saw
+# complete - a killed reconcile must never leave a record behind.
+fm_progress_reconcile_read() {  # <state-dir> <id>
   local state=$1 id=$2 line token source detail verdict
   FM_PROGRESS_TOKEN=unknown
   FM_PROGRESS_DETAIL=''
@@ -210,8 +225,13 @@ fm_progress_reconcile() {  # <state-dir> <id>
   FM_PROGRESS_TOKEN=$token
   # shellcheck disable=SC2034 # Read by callers after sourcing.
   FM_PROGRESS_DETAIL=$detail
-  fm_progress_record_write "$state" "$id" "$verdict" "$token" "$detail"
   printf '%s' "$verdict"
+}
+
+fm_progress_reconcile() {  # <state-dir> <id>
+  fm_progress_reconcile_read "$1" "$2" >/dev/null
+  fm_progress_record_write "$1" "$2" "$FM_PROGRESS_VERDICT" "$FM_PROGRESS_TOKEN" "$FM_PROGRESS_DETAIL"
+  printf '%s' "$FM_PROGRESS_VERDICT"
 }
 
 # Cheap fleet count over cached records. Populates:

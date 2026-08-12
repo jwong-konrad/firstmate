@@ -191,6 +191,115 @@ EOF
   pass "classifier primitives: keyed decisions and activity phases, captain relevance, window-to-task, and overrides"
 }
 
+# Keys whose LATEST decision-relevant event is a done: or failed:, parsed
+# independently of bin/fm-classify-lib.sh so this oracle cannot drift along with
+# the folds it judges.
+terminally_closed_keys() {  # <status-file>
+  awk '
+    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    {
+      raw = $0
+      bare = raw
+      gsub(/[[:space:]]/, "", bare)
+      if (bare == "") next
+      ci = index(raw, ":")
+      prefix = (ci > 0) ? substr(raw, 1, ci - 1) : raw
+      key = "default"
+      ki = index(prefix, "[key=")
+      if (ki > 0) {
+        rest = substr(prefix, ki + 5)
+        ce = index(rest, "]")
+        if (ce > 0) {
+          slug = substr(rest, 1, ce - 1)
+          if (slug ~ /^[A-Za-z0-9._-]+$/) key = slug; else next
+        }
+      }
+      verb = trim((ki > 0) ? substr(prefix, 1, ki - 1) : prefix)
+      if (verb == "needs-decision" || verb == "blocked") last[key] = "open"
+      else if (verb == "done" || verb == "failed") last[key] = "terminal"
+    }
+    END { for (k in last) if (last[k] == "terminal") print k }
+  ' "$1"
+}
+
+# The durable fold minus every terminally-closed key: what the narrowed fold must
+# print, derived from status_open_decisions' own output rather than reimplementing
+# it.
+expected_unterminated() {  # <status-file> <durable-fold-output>
+  local f=$1 durable=$2 closed line key
+  closed=$(terminally_closed_keys "$f")
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    key=${line%%$'\t'*}
+    printf '%s\n' "$closed" | grep -qxF "$key" && continue
+    printf '%s\n' "$line"
+  done <<EOF
+$durable
+EOF
+}
+
+# bin/fm-classify-lib.sh deliberately keeps two copies of the decision fold: the
+# durable status_open_decisions the fleet snapshot and the decision-hold lifecycle
+# read, and the watcher-local status_open_decisions_unterminated that additionally
+# closes a key on a same-key done:/failed:. The captain fenced the durable one
+# against edits, so the copies cannot be collapsed into one owner - this test is
+# what keeps them in lockstep instead. It folds both over a generated corpus and
+# asserts the ONLY difference is the same-key terminal close, so any drift in
+# either verb table fails here rather than needing a hand review.
+test_decision_folds_differ_only_on_same_key_terminal() {
+  local dir state f verbs a ka b kb ta tb s cases=0 diffs=0 durable narrowed expected
+  dir=$(make_case decision-fold-differential); state="$dir/state"
+  f="$state/corpus.status"
+  verbs="needs-decision blocked done failed resolved captain-held working"
+  for a in $verbs; do
+    for ka in none a b; do
+      if [ "$ka" = none ]; then ta="$a"; else ta="$a [key=$ka]"; fi
+      for b in $verbs; do
+        for kb in none a b; do
+          if [ "$kb" = none ]; then tb="$b"; else tb="$b [key=$kb]"; fi
+          printf '%s: one\n%s: two\n' "$ta" "$tb" > "$f"
+          durable=$(status_open_decisions "$f")
+          narrowed=$(status_open_decisions_unterminated "$f")
+          expected=$(expected_unterminated "$f" "$durable")
+          cases=$((cases + 1))
+          [ "$narrowed" = "$expected" ] \
+            || fail "narrowed fold diverged beyond the same-key terminal close on [$ta / $tb]: got [$narrowed] want [$expected]"
+          [ "$narrowed" = "$durable" ] || diffs=$((diffs + 1))
+        done
+      done
+    done
+  done
+  # Longer streams, where a reopen after a terminal event and a key closed while
+  # another stays open are only reachable past two lines.
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    printf '%b' "$s" > "$f"
+    durable=$(status_open_decisions "$f")
+    narrowed=$(status_open_decisions_unterminated "$f")
+    expected=$(expected_unterminated "$f" "$durable")
+    cases=$((cases + 1))
+    [ "$narrowed" = "$expected" ] \
+      || fail "narrowed fold diverged on multi-line stream [$s]: got [$narrowed] want [$expected]"
+    [ "$narrowed" = "$durable" ] || diffs=$((diffs + 1))
+  done <<'EOF'
+needs-decision: a\ndone: x\nneeds-decision: b\n
+needs-decision [key=a]: x\nneeds-decision [key=b]: y\ndone [key=a]: z\n
+needs-decision: a\nresolved: r\nneeds-decision: b\ndone: d\n
+blocked [key=q]: b\nworking: w\nfailed [key=q]: f\nneeds-decision [key=q]: again\n
+needs-decision: a\ndone: d\nresolved: r\n
+needs-decision [key=api]: a\ndone: unrelated finish\n
+\n\nneeds-decision: a\n\ndone [key=other]: z\n
+needs-decision [key=]: malformed\ndone: d\n
+EOF
+  [ "$cases" -ge 440 ] || fail "the differential corpus shrank to $cases streams"
+  # If the narrowed fold ever became a plain copy of the durable one, every stream
+  # would agree and the equality assertions above would all pass vacuously. The two
+  # open verbs, three keys, and two terminal verbs give twelve two-line streams that
+  # must differ, before any of the multi-line cases below.
+  [ "$diffs" -ge 12 ] || fail "only $diffs of $cases streams exercised the narrowing; the corpus no longer covers it"
+  pass "the durable and narrowed decision folds agree on $cases streams except on the same-key done:/failed: close"
+}
+
 # crew_is_provably_working: the absorb-only-when-provably-working predicate. It is
 # benign (absorb) ONLY when fm-crew-state.sh reports the crew as working from an
 # actively-running pipeline step (source run-step) or a busy pane (source pane);
@@ -727,6 +836,153 @@ test_decision_wait_stale_absorbed_then_resurfaced() {
   pass "a stale pane awaiting firstmate's own decision is absorbed, then rechecked on the bounded cadence, never wedge-escalated"
 }
 
+# The limit of that suppression: it covers the ROUTINE stale wake only, never
+# wedge detection. A crew that raised a decision, was steered by firstmate without
+# the resolved: line its status contract requires, resumed, and then FROZE with no
+# terminal line keeps that key open forever. Suppressing it indefinitely would
+# make the one population that most needs wedge detection the one population that
+# cannot get it. So an open decision runs its own wedge timer underneath the
+# bounded cadence and escalates through the normal wedge_timer_check path, whose
+# reconciled-state-change rule still governs how the count advances.
+test_open_decision_still_wedge_escalates() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid statusf n
+  dir=$(make_case decision-wedge); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-frozen"
+  printf 'frozen after resuming' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/frozen.meta"
+  statusf="$state/frozen.status"
+  # The open key is never terminated: steered offline, resumed, then froze.
+  printf 'needs-decision [key=q1]: keep the retry loop or fail fast\nworking: steered offline, retry loop kept\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-frozen_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "frozen after resuming")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # The last status line is working:, so the reconciled reading is working - not
+  # the positively-parked shape a crew waiting on firstmate has.
+  export FM_FAKE_CREW_STATE='state: working · source: status-log · keep the retry loop or fail fast'
+
+  # Phase A: the routine wake is still suppressed, but the wedge timer now runs
+  # underneath it rather than being cleared on every absorb.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=300 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited before the wedge threshold on an open decision: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "an open decision under the wedge threshold printed a wake: $(cat "$out")"
+  [ -e "$state/.decision-since-$key" ] \
+    || fail "an open decision must keep a wedge timer running underneath the bounded cadence"
+  reap "$pid"
+
+  # Phase B: the pane has now been idle past the wedge threshold. It escalates as
+  # a wedge, with the count advancing, despite the still-open decision key.
+  echo $(( $(date +%s) - 400 )) > "$state/.decision-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=300 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 \
+    || fail "a frozen crew with an open decision key never wedge-escalated: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null \
+    || fail "the escalation was not surfaced as a possible wedge: $(cat "$out")"
+  grep -F "escalation 1" "$out" >/dev/null \
+    || fail "the wedge escalation count did not start advancing: $(cat "$out")"
+  [ "$(cat "$state/.wedge-escalations-$key")" = 1 ] \
+    || fail "the escalation count was not persisted: $(cat "$state/.wedge-escalations-$key" 2>/dev/null)"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the wedge escalation failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null \
+    || fail "the wedge escalation was not queued"
+
+  # Phase C: the count keeps advancing under the SAME rule the wedge path already
+  # enforces - the next escalation lands because the reconciled state changed.
+  export FM_FAKE_CREW_STATE='state: blocked · source: run-step · frozen mid-run'
+  echo $(( $(date +%s) - 400 )) > "$state/.decision-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=300 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "the second wedge escalation never surfaced: $(cat "$out")"
+  n=$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)
+  [ "$n" = 2 ] || fail "the escalation count must advance on a changed reconciled state, got $n"
+  unset FM_FAKE_CREW_STATE
+  pass "an open decision suppresses the routine stale wake but never wedge detection"
+}
+
+# The counterweight: the decision-path wedge timer must not turn a HEALTHY wait
+# into a wedge wake. A crew parked on a decision firstmate owes it reconciles as
+# positively idle, which is exactly what waiting is supposed to look like, so the
+# first expiry records that reading as the comparison baseline instead of
+# escalating on a missing one. A reading that is NOT that healthy shape still
+# escalates, which is what keeps the suppression hole closed.
+test_decision_wedge_takes_a_parked_baseline_before_escalating() {
+  local dir state fakebin out capture_file window key pane_hash sig pid statusf
+  dir=$(make_case decision-wedge-baseline); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-waiting"
+  printf 'idle, waiting on firstmate' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/waiting.meta"
+  statusf="$state/waiting.status"
+  printf 'needs-decision [key=q1]: keep the retry loop or fail fast\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-waiting_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle, waiting on firstmate")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  : > "$state/.paused-$key"
+  echo $(( $(date +%s) - 400 )) > "$state/.decision-since-$key"
+  export FM_FAKE_CREW_STATE='state: parked · source: status-log · keep the retry loop or fail fast'
+
+  # Phase A: past the wedge threshold, but the reading is the healthy parked
+  # shape - so the timer records a baseline and stays silent.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=300 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a healthy parked decision-wait was escalated as a wedge: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a healthy parked decision-wait printed a wake: $(cat "$out")"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "the baseline reading must not bump the escalation count"
+  [ "$(cat "$state/.wedge-state-$key" 2>/dev/null)" = "parked|status-log" ] \
+    || fail "the first expiry must record the parked reading as the baseline, got $(cat "$state/.wedge-state-$key" 2>/dev/null)"
+  reap "$pid"
+
+  # Phase B: the crew moves off that reading. That IS new evidence, so it
+  # escalates as a wedge with the count advancing.
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · agent gone'
+  echo $(( $(date +%s) - 400 )) > "$state/.decision-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=300 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 \
+    || fail "a decision-wait that left its parked baseline never escalated: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null \
+    || fail "the escalation off the baseline was not surfaced as a possible wedge: $(cat "$out")"
+  [ "$(cat "$state/.wedge-escalations-$key")" = 1 ] \
+    || fail "the escalation count must advance once the baseline is left"
+  unset FM_FAKE_CREW_STATE
+  pass "a healthy parked decision-wait records a baseline instead of escalating, and escalates once it leaves it"
+}
+
 # The disconfirming case for the rule above: a crew that raised a decision and
 # then STARTED a run is not waiting on firstmate at all, so run-step precedence
 # must override the log and keep the wedge timer running.
@@ -759,6 +1015,44 @@ test_decision_wait_yields_to_an_active_run() {
   reap "$pid"
   unset FM_FAKE_CREW_STATE
   pass "an active run overrides a stale needs-decision line and keeps the wedge timer"
+}
+
+# The other disconfirming case: a crew raised needs-decision, was steered without
+# the resolved: line its status contract requires, and then finished. The durable
+# fold still shows that key open, but stale suppression stops short of a terminal
+# pane inside a running watcher, so the done: line must SURFACE rather than be
+# absorbed on the bounded awaiting-firstmate cadence.
+test_terminal_status_closes_a_forgotten_decision_key() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid statusf
+  dir=$(make_case decision-then-done); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-finished"
+  printf 'idle after finishing' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/finished.meta"
+  statusf="$state/finished.status"
+  printf 'needs-decision: keep the retry loop or fail fast\nworking: steered offline, retry loop kept\ndone: PR ready in branch\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-finished_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle after finishing")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: parked · source: status-log · done: PR ready in branch'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 \
+    || fail "a done: pane under a forgotten decision key was absorbed instead of surfaced: $(cat "$out")"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the terminal pane did not print a stale wake: $(cat "$out")"
+  [ ! -e "$state/.paused-$key" ] \
+    || fail "a done: pane must not be filed under the bounded awaiting-firstmate cadence"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the terminal surface failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null \
+    || fail "the terminal-pane surface was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a later done: closes a forgotten decision key, so the terminal pane surfaces instead of being absorbed"
 }
 
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
@@ -1493,6 +1787,7 @@ test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
+test_decision_folds_differ_only_on_same_key_terminal
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
@@ -1511,7 +1806,10 @@ test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_decision_wait_stale_absorbed_then_resurfaced
+test_open_decision_still_wedge_escalates
+test_decision_wedge_takes_a_parked_baseline_before_escalating
 test_decision_wait_yields_to_an_active_run
+test_terminal_status_closes_a_forgotten_decision_key
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed

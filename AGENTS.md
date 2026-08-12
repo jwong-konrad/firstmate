@@ -108,7 +108,7 @@ state/               volatile runtime signals; gitignored
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
   .progress-<id>     durable progressing-or-idle verdict for a task; written by the arm gate and the watcher, read cheaply by the guards, and treated as progressing when absent or stale (bin/fm-progress-lib.sh, docs/supervision-arming.md)
-  .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .wedge-state-* .wedge-rechecked-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
+  .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .wedge-state-* .wedge-rechecked-* .decision-since-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch

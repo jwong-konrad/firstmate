@@ -140,25 +140,6 @@ status_is_paused_or_captain_held() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ]
 }
 
-# 0 if a TASK is waiting on firstmate rather than on itself: either it declared
-# an external-wait pause or a verified captain-held transfer (the two line-level
-# cases above), or the durable fold below still shows an open keyed decision.
-# File-level on purpose - an open needs-decision/blocked is a property of the
-# whole event stream, and a later unrelated line must not mask it.
-#
-# This is the suppression predicate for the stale path: an idle pane on such a
-# task is the EXPECTED state, not a wedge. Suppressing it loses nothing, because
-# the decision itself was already surfaced when the captain-relevant status line
-# was written (signal_reason_is_actionable) and any missed one is re-surfaced by
-# the heartbeat backstop (scan_captain_relevant_statuses). Consumers must still
-# defer to authoritative crew state: a task that appended needs-decision: but then
-# STARTED a run is working, not waiting (crew_absorb_class).
-status_task_awaits_firstmate() {  # <status-file>
-  local f=$1
-  status_is_paused_or_captain_held "$(last_status_line "$f")" && return 0
-  [ -n "$(status_open_decisions "$f")" ]
-}
-
 # --- durable keyed decisions ------------------------------------------------
 #
 # The status stream is an append-only EVENT log. Reading it last-event-wins
@@ -250,6 +231,73 @@ status_open_decisions() {  # <status-file>
     esac
   done < "$f"
   printf '%s' "$open"
+}
+
+# Watcher-local narrowing of the open-decision fold, for STALE SUPPRESSION only.
+# Prints the same "<key>\t<verb>\t<summary>" lines as status_open_decisions, minus
+# any key whose most recent decision-relevant event is a same-key done: or failed:.
+#
+# status_open_decisions is the durable contract the fleet snapshot and the
+# decision-hold lifecycle read, and it deliberately keeps a decision open until an
+# explicit resolved:/captain-held: closes it, so it is not changed here. But a
+# crew that raised needs-decision:, was steered without the resolved: line its
+# status contract requires, and then finished must not have that done: line
+# absorbed as a decision-wait: done: is the one captain-relevant status with a
+# documented false-positive history, and docs/supervision-arming.md records that
+# stale suppression stops short of it. This helper is the narrowing that keeps
+# that boundary true, and it is opt-in: only bin/fm-watch.sh's suppression
+# predicate calls it.
+#
+# Same shape and same single pass as status_open_decisions, with done and failed
+# added to its closing verbs; it reuses the same line parsers and the same
+# open-set drop, so the key grammar has exactly one owner. A single pass matters
+# here: the watcher evaluates this for every recorded window on every poll.
+status_open_decisions_unterminated() {  # <status-file>
+  local f=$1 line verb key note resolve held open='' stripped
+  [ -f "$f" ] || return 0
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  while IFS= read -r line || [ -n "$line" ]; do
+    stripped=${line//[[:space:]]/}
+    [ -n "$stripped" ] || continue
+    verb=$(status_line_verb "$line")
+    key=$(_fm_decision_key "$line") || continue
+    case "$verb" in
+      needs-decision|blocked)
+        note=$(status_line_note "$line")
+        open=$(_fm_decision_drop "$open" "$key")
+        [ -n "$open" ] && open="${open}"$'\n'
+        open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
+        ;;
+      "$resolve"|"$held"|done|failed)
+        open=$(_fm_decision_drop "$open" "$key")
+        [ -n "$open" ] && open="${open}"$'\n'
+        ;;
+    esac
+  done < "$f"
+  printf '%s' "$open"
+}
+
+# 0 if a TASK is waiting on firstmate rather than on itself: either it declared an
+# external-wait pause or a verified captain-held transfer (the two line-level cases
+# above), or the terminal-narrowed fold still shows an open keyed decision.
+# File-level on purpose - an open needs-decision/blocked is a property of the whole
+# event stream, and a later unrelated line must not mask it.
+#
+# This is the suppression predicate for the stale path, and the sole consumer of
+# the narrowed fold: an idle pane on such a task is the EXPECTED state, not a
+# wedge. Suppressing it loses nothing, because the decision itself was already
+# surfaced when the captain-relevant status line was written
+# (signal_reason_is_actionable) and any missed one is re-surfaced by the heartbeat
+# backstop (scan_captain_relevant_statuses). Consumers must still defer to
+# authoritative crew state: a task that appended needs-decision: but then STARTED a
+# run is working, not waiting (crew_absorb_class). A declared paused:/captain-held:
+# last line still suppresses, and a genuinely still-open needs-decision:/blocked:
+# with no later same-key terminal event still suppresses.
+status_task_awaits_firstmate_unterminated() {  # <status-file>
+  local f=$1
+  status_is_paused_or_captain_held "$(last_status_line "$f")" && return 0
+  [ -n "$(status_open_decisions_unterminated "$f")" ]
 }
 
 # Fold material routed-work phases in the same keyed event stream.

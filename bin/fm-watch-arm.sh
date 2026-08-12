@@ -59,6 +59,34 @@
 # gate for a deliberate arm (a flag, not an env prefix, because
 # bin/fm-arm-pretool-check.sh denies an env-prefixed arm as a wrapper).
 #
+# The gate is TIME-BOUNDED. Each cache-miss reconcile shells bin/fm-crew-state.sh,
+# which allows up to FM_CREW_STATE_NM_TIMEOUT for its bounded no-mistakes call, so
+# a fleet of stale records could otherwise hold the arm past the readiness window
+# the harness adapters allow it (12000ms in .pi/extensions/fm-primary-pi-watch.ts
+# and .opencode/plugins/fm-primary-watch-arm.js on the wake-restore path) - and a
+# readiness timeout there retires the arm and starts the exponential retry loop
+# this whole gate exists to prevent. So FM_ARM_GATE_BUDGET_SECS caps the total
+# wall clock spent on authoritative reconciles, and the cap holds by construction
+# rather than by tuning. Two rules give it that: the gate refuses to START a
+# reconcile unless the REMAINING budget can absorb a whole one, and each reconcile
+# runs in a child killed at that same per-call ceiling. The ceiling bounds the
+# reconcile ITSELF, not one no-mistakes call inside it: fm-crew-state.sh makes up
+# to two capped no-mistakes calls per run, and the endpoint probe sits outside
+# them, so capping FM_CREW_STATE_NM_TIMEOUT alone would have bounded a fraction of
+# the work and left the real worst case at roughly twice the ceiling. The last
+# reconcile the gate starts therefore cannot outlive the budget, and the whole
+# gate is bounded by FM_ARM_GATE_BUDGET_SECS plus the fraction of a second it
+# takes to reap a killed child - 8s by default, a real 4s of headroom under the
+# adapters' 12000ms window, not a hoped-for average. A reconcile killed at the
+# ceiling leaves its task unevaluated and writes no record, and every unevaluated
+# task counts progressing. Cached verdict reads cost nothing and are never
+# budgeted.
+#
+# THE SAFETY PROPERTY: the gate may DECLINE only when it actually evaluated every
+# task and found none progressing. A spent budget always errs toward arming, and
+# says so in the printed line so the operator can tell a budgeted arm from an
+# arm that saw real progress.
+#
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
 # state/.watch.lock) and own a fresh cycle, or attach if a verified live peer
 # wins the singleton while the duplicate child stands down. It
@@ -351,10 +379,67 @@ done
 # current watcher, so a declined restart never leaves the home with the old cycle
 # killed and no replacement. Short-circuits on the first progressing task, so the
 # common case pays at most one reconcile; a fully idle fleet is exactly the case
-# where reading every task is worth it.
+# where reading every task is worth it - up to the reconcile budget (see the
+# header), past which the remaining tasks go unevaluated and the gate arms.
+FM_ARM_GATE_BUDGET_SECS=${FM_ARM_GATE_BUDGET_SECS:-8}
+case "$FM_ARM_GATE_BUDGET_SECS" in ''|*[!0-9]*) FM_ARM_GATE_BUDGET_SECS=8 ;; esac
+
+# Wall-clock ceiling for ONE gate reconcile, derived from the budget so the two
+# can never drift apart: half the budget, floored at one second.
+arm_gate_call_ceiling() {
+  local half=$(( FM_ARM_GATE_BUDGET_SECS / 2 ))
+  [ "$half" -ge 1 ] || half=1
+  printf '%s' "$half"
+}
+
+# One reconcile bounded by that ceiling as a WHOLE. Bounding it through
+# FM_CREW_STATE_NM_TIMEOUT would only cap one `no-mistakes` invocation, and
+# bin/fm-crew-state.sh makes up to two per run (an `axi status` plus a CI-log or
+# runs scan) with the endpoint probe outside them entirely, so the ceiling has to
+# wrap the reconcile itself. The reading runs in a child this function can kill;
+# the durable record is written HERE, by the parent, only for a child seen to
+# finish, so a killed reconcile can never leave a half-formed verdict behind.
+# Returns 1 when the ceiling was hit without a reading, and the caller then
+# treats the task as unevaluated, which counts progressing.
+arm_gate_reconcile() {  # <id> <ceiling>
+  local id=$1 ceiling=$2 out child waited limit line
+  out="$STATE/.arm-gate-reconcile.$ARM_PID"
+  rm -f "$out" 2>/dev/null || true
+  (
+    FM_CREW_STATE_NM_TIMEOUT=$ceiling
+    export FM_CREW_STATE_NM_TIMEOUT
+    fm_progress_reconcile_read "$STATE" "$id" >/dev/null
+    printf '%s\t%s\t%s\n' "$FM_PROGRESS_VERDICT" "$FM_PROGRESS_TOKEN" "$FM_PROGRESS_DETAIL" > "$out"
+  ) >/dev/null 2>&1 &
+  child=$!
+  waited=0
+  limit=$(( ceiling * 10 ))
+  while [ "$waited" -lt "$limit" ] && fm_pid_alive "$child"; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if fm_pid_alive "$child"; then
+    kill -TERM "$child" 2>/dev/null || true
+    sleep 0.2
+    kill -KILL "$child" 2>/dev/null || true
+  fi
+  wait "$child" 2>/dev/null || true
+  line=$(cat "$out" 2>/dev/null || true)
+  rm -f "$out" 2>/dev/null || true
+  [ -n "$line" ] || return 1
+  IFS=$(printf '\t') read -r FM_PROGRESS_VERDICT FM_PROGRESS_TOKEN FM_PROGRESS_DETAIL <<EOF
+$line
+EOF
+  case "$FM_PROGRESS_VERDICT" in progressing|idle) ;; *) return 1 ;; esac
+  fm_progress_record_write "$STATE" "$id" "$FM_PROGRESS_VERDICT" "$FM_PROGRESS_TOKEN" "$FM_PROGRESS_DETAIL"
+  return 0
+}
+
 arm_gate_allows() {
-  local meta id summary='' tasks=0
+  local meta id summary='' tasks=0 unevaluated=0 started ceiling
   [ "$force" -eq 1 ] && return 0
+  started=$(date +%s)
+  ceiling=$(arm_gate_call_ceiling)
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     id=${meta##*/}
@@ -363,11 +448,27 @@ arm_gate_allows() {
     # Reconcile only on a cache miss; the reconcile itself refreshes the record.
     # Called without a command substitution so its FM_PROGRESS_* results survive.
     if ! fm_progress_verdict_cached "$STATE" "$id"; then
-      fm_progress_reconcile "$STATE" "$id" >/dev/null
+      # Checked BEFORE each reconcile, never in the middle of one, and against
+      # the call's OWN worst case rather than the bare budget: a call is started
+      # only when the remaining budget can pay for all of it. A task left
+      # unevaluated has NOT been judged idle, so it counts progressing.
+      if [ "$(( $(date +%s) - started + ceiling ))" -gt "$FM_ARM_GATE_BUDGET_SECS" ]; then
+        unevaluated=$((unevaluated + 1))
+        continue
+      fi
+      if ! arm_gate_reconcile "$id" "$ceiling"; then
+        unevaluated=$((unevaluated + 1))
+        continue
+      fi
     fi
     [ "$FM_PROGRESS_VERDICT" = progressing ] && return 0
     summary="$summary $id=$FM_PROGRESS_TOKEN"
   done
+  # A spent budget always arms: declining would rest on tasks nobody read.
+  if [ "$unevaluated" -gt 0 ]; then
+    echo "watcher: arming without a full read - the ${FM_ARM_GATE_BUDGET_SECS}s gate budget was spent with $unevaluated of $tasks task(s) unevaluated"
+    return 0
+  fi
   # No progressing task. A merge poll, the X-mode relay, or a pending secondmate
   # reply still needs a live cycle even with a fully idle fleet.
   fm_progress_has_pollable_work "$STATE" && return 0
