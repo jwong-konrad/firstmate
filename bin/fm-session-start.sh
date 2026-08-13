@@ -359,14 +359,18 @@ for meta in "$STATE"/*.meta; do
     # shell on 2026-08-13. fm_backend_agent_liveness (bin/fm-backend.sh) owns
     # the classification; a backend with no verified classifier reports the
     # agent line as inconclusive rather than implying a live agent.
+    # BOTH branches read that one owner, including the endpoint-absent branch: a
+    # failed presence check does not prove the endpoint is gone (an unreachable
+    # backend CLI fails the same way), so asserting the classifier's most
+    # confident negative verdict from a probe that never ran would make the two
+    # lines disagree about what an unreadable backend means.
+    liveness=$(fm_backend_agent_liveness "$backend" "${target:-$window}" 2>/dev/null) || liveness=unknown
     if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
       printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
-      liveness=$(fm_backend_agent_liveness "$backend" "${target:-$window}" 2>/dev/null) || liveness=unknown
-      printf 'agent: %s - %s\n' "$liveness" "$(fm_backend_agent_liveness_phrase "$liveness")"
     else
       printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
-      printf 'agent: no-endpoint - %s\n' "$(fm_backend_agent_liveness_phrase no-endpoint)"
     fi
+    printf 'agent: %s - %s\n' "$liveness" "$(fm_backend_agent_liveness_phrase "$liveness")"
   else
     printf 'endpoint: unknown (no window recorded)\n'
   fi
