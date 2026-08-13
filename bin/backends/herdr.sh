@@ -882,8 +882,17 @@ fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace>
 #              change as "the pane exists"). The caller must fail safe toward
 #              refusal here, never toward closing - this is the conservative
 #              backstop the husk check depends on.
+# Local named `agent_status`, never `status`: zsh makes `$status` a read-only
+# special variable, so `local status` ABORTS the declaration there and every
+# later assignment silently keeps the old value - which collapsed this
+# classifier to a permanent `unknown` verdict whenever it was sourced into an
+# interactive zsh for ad-hoc diagnosis (reproduced 2026-08-13; see
+# docs/herdr-backend.md "Diagnosing the liveness probe by hand"). The scripts
+# themselves always run under their bash shebang, so production was never
+# affected - only hand diagnosis, which is exactly when a misleading `unknown`
+# costs the most.
 fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
-  local session=$1 pane_id=$2 out code pid status
+  local session=$1 pane_id=$2 out code pid agent_status
   # 2>&1, not 2>/dev/null: verified empirically that real herdr 0.7.1 writes
   # an error response's JSON body to STDERR (success bodies go to stdout), so
   # discarding stderr here would blind this function to exactly the
@@ -909,8 +918,8 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
     [ "$code" = "agent_not_found" ] && printf 'no-agent' || printf 'unknown'
     return 0
   fi
-  status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
-  case "$status" in
+  agent_status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
+  case "$agent_status" in
     working|idle|done|blocked) printf 'live' ;;
     *) printf 'unknown' ;;
   esac
@@ -941,10 +950,28 @@ fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
 # exactly like the husk check itself. Callers must never treat `unknown` as a
 # confirmed-dead signal.
 fm_backend_herdr_agent_alive() {  # <target>
+  case "$(fm_backend_herdr_agent_liveness "$1")" in
+    alive) printf 'alive' ;;
+    shell|no-endpoint) printf 'dead' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# fm_backend_herdr_agent_liveness: the FINE-GRAINED classifier behind
+# fm_backend_herdr_agent_alive above (bin/fm-backend.sh's
+# fm_backend_agent_liveness owns the shared vocabulary). It needs no new probe
+# at all: fm_backend_herdr_pane_agent_state ALREADY distinguishes the two
+# shapes that function collapses, so this wrapper only stops discarding the
+# distinction - `no-agent` (pane alive, nothing registered in it: the bare
+# shell an exited agent leaves behind) becomes `shell`, and `dead`
+# (pane_not_found) becomes `no-endpoint`. `unknown` still stays `unknown`,
+# fail-safe toward refusal exactly as the husk check requires.
+fm_backend_herdr_agent_liveness() {  # <target>
   local target=$1
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   case "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" in
-    dead|no-agent) printf 'dead' ;;
+    no-agent) printf 'shell' ;;
+    dead) printf 'no-endpoint' ;;
     live) printf 'alive' ;;
     *) printf 'unknown' ;;
   esac

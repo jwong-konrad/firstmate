@@ -109,11 +109,15 @@ A second case matters for a harness that shells out to subcommands while it runs
 Verified the same session: a persisting parent process running a child command (`bash -c 'echo start; sleep 30; echo end'`, where the parent bash stays alive waiting on its own child) reports the PARENT's own name (`bash`) throughout, not the child's (`sleep`) - so a harness that survives while it shells out stays correctly classified as alive.
 (A single-simple-command `bash -c "sleep 30"` is a different, unrelated case: bash execs directly into `sleep`, replacing itself, so the reported name changes because the process itself became `sleep` - not because tmux "saw through" to a child.)
 
-The classifier (`fm_backend_tmux_agent_alive`) maps the observed name to `alive`, `dead`, or `unknown`:
+The classifier (`fm_backend_tmux_agent_liveness`) maps the observed name to `alive`, `shell`, `no-endpoint`, or `unknown`:
 
 - `alive` - the name contains `claude`, `codex`, `opencode`, or `grok`. All four were confirmed to run as their own literal process name (`ps -ef`, 2026-07-07): `claude` and `codex` and `opencode` are each a native compiled binary (`file` reports Mach-O), so their `comm` is their own binary name with no interpreter wrapper to hide behind.
-- `dead` - the name is a bare shell (`zsh`, `bash`, `sh`, `dash`, `ash`, `ksh`, `mksh`, `tcsh`, `csh`, `fish`).
-- `unknown` - anything else, including an unreadable pane.
+- `shell` - the name is a bare shell (`zsh`, `bash`, `sh`, `dash`, `ash`, `ksh`, `mksh`, `tcsh`, `csh`, `fish`), so the pane exists but its agent has exited.
+- `no-endpoint` - tmux reported no command name AND `#{pane_id}` does not resolve either, so the pane itself is gone.
+- `unknown` - anything else, including a pane that exists but whose command tmux would not report.
+
+`fm_backend_tmux_agent_alive` remains available as the coarse `alive`/`dead`/`unknown` projection of that classifier, where `dead` merges `shell` and `no-endpoint`; `bin/fm-backend.sh`'s `fm_backend_agent_liveness` owns why the finer split exists.
+The extra `#{pane_id}` probe that separates `no-endpoint` from `unknown` runs only when the command read came back empty, so the ordinary `alive`/`shell` path still costs exactly one tmux round trip.
 
 ### Known gap: `pi` cannot be confidently classified
 

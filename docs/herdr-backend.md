@@ -621,6 +621,60 @@ Rather than add a second herdr classifier, `fm_backend_herdr_agent_alive` (`bin/
 No new empirical verification was needed for the mapping itself - `fm_backend_herdr_pane_agent_state`'s four states are already verified above (both at the unit level and, for `no-agent`, against the real binary via the respawn-idempotency e2e test); this wrapper only renames them for the generic `fm_backend_agent_alive` dispatcher (`bin/fm-backend.sh`) that also serves the tmux adapter (`docs/tmux-backend.md` "Agent liveness probe").
 Unlike tmux's probe, herdr's has no equivalent "which harness is running under a generic interpreter name" ambiguity: the classification comes from herdr's own registered-agent state, not a process name, so herdr correctly resolves every verified harness including `pi` (the one tmux cannot confidently classify - see `docs/tmux-backend.md` "Known gap").
 
+## Bare-shell endpoints are a distinct liveness state (2026-08-13)
+
+An exited agent leaves its pane alive as a bare shell sitting in the task's worktree.
+Until this change every liveness read firstmate had collapsed that shape into something else, so nothing could name it: `fm_backend_target_exists` reported the pane as alive because the pane genuinely exists, and `fm_backend_agent_alive` merged it with a structurally-gone pane under one `dead` verdict.
+
+**Incident.** Task `restore-reverted-learnings-r9` was paused and its agent had exited some time earlier.
+A steer was sent through `bin/fm-send.sh`; it exited 0 with no warning, the text was typed into the pane, and zsh answered `zsh: parse error near 'do'`.
+The instruction was lost and firstmate had no idea it had been lost.
+A human peeking at the pane is the only reason it was caught.
+This failure mode had bitten before and was already recorded in the archived `panes-and-steering.md` bare-shell entry (2026-07-16/21); landing this retires that entry as a live hazard.
+
+**Mechanism, reproduced rather than assumed.** Two independent defects compounded:
+
+1. `fm_backend_herdr_send_text_submit` reads a non-idle pre-Enter baseline (a bare-shell pane has no registered agent, so its `agent get` read yields no live status and the baseline is not `idle`), then falls back to `fm_backend_herdr_composer_state`.
+   That correctly returns `unknown`: the bare-composer shape matches only the agent prompt glyphs (`FM_BACKEND_HERDR_BARE_PROMPT_RE`, `^[❯›]`), so a shell prompt row matches nothing, no composer row is found, and the verdict is `unknown`.
+   That deliberate narrowness enforces the same safety rule `bin/fm-composer-lib.sh` owns fleet-wide - a bare shell prompt is never read as a ready composer - so the adapter did report an inconclusive submit.
+2. `bin/fm-send.sh` then discarded it. Its verdict branch handled `pending` and `send-failed` and let every other value, `unknown` included, fall through to exit 0 under the documented "an unreadable pane is assumed sent" leniency.
+
+The signal was present the whole time and the caller optimistically ignored it, which is why the fix is at the caller: an inconclusive submit is now resolved by re-probing agent liveness, and a confirmed bare shell is a hard error.
+`fm_backend_agent_liveness` (`bin/fm-backend.sh`) owns the four-state vocabulary that makes the state nameable - `alive`, `shell`, `no-endpoint`, `unknown` - and herdr needed no new probe for it: `fm_backend_herdr_pane_agent_state` already distinguished `no-agent` from `dead`, so `fm_backend_herdr_agent_liveness` only stops collapsing them.
+
+**Verification boundary, and a known open gap.** The `shell` verdict for herdr rests on `agent get` reporting `agent_not_found` for a pane holding no agent.
+That reading is verified against the real binary for the *restored-layout* shape (`tests/fm-backend-herdr-respawn-idem-e2e.test.sh`, and the "Respawn idempotency" section above), and independently corroborated by the away-mode fixture finding at "Composer-emptiness safety" below, where a real pane running a non-agent bash script read `agent_not_found` continuously.
+
+It is **not** verified for the specific shape in this incident: an auto-detected harness that exits inside an otherwise untouched pane on a still-running server.
+Worse, there is direct evidence it may differ.
+An archived fleet learning (2026-08-04) records that `herdr tab list` shows `agent_status: unknown` - not a missing agent - for a tab whose agent has died and left a bare shell.
+`tab list` and `agent get` are different surfaces and the restore path is known to produce `agent_status` unknown *and* `agent get` -> `agent_not_found` together, so that observation does not settle what `agent get` returns here.
+But if `agent get` returns a record whose `agent_status` is `unknown`, `fm_backend_herdr_pane_agent_state` classifies it `unknown` rather than `no-agent`, `fm_backend_herdr_agent_liveness` reports `unknown` rather than `shell`, and **the refusal does not fire on the very shape it was written for**.
+
+What that means for the change as landed, stated plainly rather than assumed away:
+
+- If `agent get` reports `agent_not_found`, a bare-shell steer is now REFUSED before anything is typed.
+- If it instead reports `agent_status: unknown`, the refusal does not fire, and the protection reduces to the post-submit path: fm-send emits a loud unconfirmed-submission warning on stderr instead of the silent exit 0 it used to. Better than the incident, but not the guarantee.
+
+Closing the gap needs one empirical reading against the real binary - start a real agent in a pane, exit it, and record what `pane get` and `agent get` each return - which requires starting and killing an agent and therefore belongs in an isolated `fm-lab-*` session under `bin/fm-herdr-lab.sh`.
+That was outside the unguarded brief that landed this change and is deliberately left as recorded future work rather than guessed at: a speculative bare-shell detector built on an assumed pane shape could refuse legitimate steers, which is a worse failure than the warning it would replace.
+The behavior is covered at the unit level with a canned-response fake (`tests/fm-send-liveness.test.sh`), the same standing as the `dead`/`pane_not_found` branch documented above.
+
+### Diagnosing the liveness probe by hand
+
+While the incident was being diagnosed, `fm_backend_agent_alive` printed `unknown` for the dead task *and* for a genuinely live one, which looked like a broken probe.
+It was not: the probe was being sourced into an interactive **zsh**, where `$status` is a read-only special variable, so `local status` aborted the declaration and every later assignment silently kept the old value - collapsing `fm_backend_herdr_pane_agent_state` to a permanent `unknown`.
+Reproduced 2026-08-13:
+
+```sh
+$ zsh -c 'f(){ local status; status=x; echo "got:$status"; }; f'
+f: read-only variable: status
+```
+
+The scripts always run under their own bash shebang, so production was never affected - only hand diagnosis, which is exactly when a misleading verdict is most expensive.
+The local is now named `agent_status`, and `tests/fm-send-liveness.test.sh` pins the classifier against a zsh source so the landmine cannot come back.
+Other `local status` declarations remain elsewhere in `bin/`; they are the same latent hazard for hand diagnosis and were left alone as out of scope rather than swept blind.
+
 ## End-to-end verification (spawn -> steer -> peek -> done -> merge -> teardown)
 
 Beyond the fake-CLI unit tests (`tests/fm-backend-herdr.test.sh`) and the real-CLI smoke tests (`tests/fm-backend-herdr-smoke.test.sh` and `tests/fm-backend-autodetect-smoke.test.sh`), the full firstmate lifecycle was driven end to end against a real `claude` crewmate through this branch's own scripts, in a scratch `FM_HOME`, a scratch `local-only` git project, and an isolated `HERDR_SESSION`:

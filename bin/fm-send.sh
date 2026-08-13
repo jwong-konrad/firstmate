@@ -15,6 +15,13 @@
 # submit or reports an inconclusive send. If a swallowed Enter is positively
 # confirmed, fm-send exits NON-ZERO so the caller knows the steer did not land
 # instead of silently leaving an unsubmitted instruction.
+#
+# A text send also refuses an endpoint whose AGENT is not running, before typing
+# anything: a pane whose agent exited is a live shell that would EXECUTE the
+# instruction instead of receiving it. An inconclusive submit no longer exits 0
+# silently either - see the liveness preflight below for the whole contract and
+# the incident behind it. Tune the confirm-before-refusing grace with
+# FM_SEND_LIVENESS_GRACE (default 1.5, 0 disables).
 # Submission dispatches through the target's recorded backend; the tmux adapter
 # shares its composer/submit core with the away-mode daemon via bin/fm-tmux-lib.sh.
 # Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
@@ -228,11 +235,50 @@ fi
 # unknown and treated as non-codex (the safe default that keeps the fast path).
 # The target's BACKEND comes from selector meta, from matching an explicit target
 # back to recorded meta, or from strict explicit-target shape validation.
-# Do not add a separate passive liveness preflight here. Active send paths own
-# backend readiness: herdr, for example, must route through its session-aware
-# target_ready path before sending, while zellij verifies pane labels in its
-# send implementation. A failed backend send is still surfaced below as a hard
-# error with the attempted resolution attached.
+# Do not add a separate passive ENDPOINT-READINESS preflight here. Active send
+# paths own backend readiness: herdr, for example, must route through its
+# session-aware target_ready path before sending, while zellij verifies pane
+# labels in its send implementation. A failed backend send is still surfaced
+# below as a hard error with the attempted resolution attached.
+#
+# AGENT liveness is a different question, and no send path answers it: a pane
+# whose agent has exited is perfectly "ready" - it is a live shell sitting in
+# the task's worktree, and it accepts and EXECUTES whatever is typed into it.
+# On 2026-08-13 a steer to such an endpoint exited 0 with no warning while zsh
+# answered `parse error near 'do'`, and the instruction was lost silently; only
+# a human peeking at the pane caught it. So a liveness preflight IS required,
+# scoped to that question alone, and it refuses on the same principle this
+# header already states for unresolved targets: a "successful" send that lands
+# nowhere is worse than a loud failure.
+#
+# Scope, and the two ways this must not overreach:
+#   - TEXT only, never the --key path. Text typed at a shell prompt is executed
+#     by it; a bare Enter/Escape/C-c is a harmless no-op there. Meanwhile --key
+#     Enter is exactly what accepts a harness trust dialog moments after a
+#     spawn, before herdr has detected the new agent, so gating it on agent
+#     liveness would refuse a legitimate key during normal startup.
+#   - A confirmed-dead verdict is re-probed once after a short grace before it
+#     refuses, because herdr AUTO-DETECTS a built-in harness rather than being
+#     told about it at launch: a just-spawned agent reads agent_not_found (hence
+#     `shell`) for a beat. A genuinely exited agent is still a shell after the
+#     grace; a racing spawn is not. Paid only on the would-refuse path, so the
+#     healthy send stays one probe.
+FM_SEND_LIVENESS_GRACE=${FM_SEND_LIVENESS_GRACE:-1.5}
+fm_send_agent_liveness() {
+  local verdict
+  verdict=$(fm_backend_agent_liveness "$TARGET_BACKEND" "$T" 2>/dev/null) || verdict=unknown
+  case "$verdict" in
+    shell|no-endpoint)
+      [ "$FM_SEND_LIVENESS_GRACE" = 0 ] || sleep "$FM_SEND_LIVENESS_GRACE"
+      verdict=$(fm_backend_agent_liveness "$TARGET_BACKEND" "$T" 2>/dev/null) || verdict=unknown
+      ;;
+  esac
+  printf '%s' "$verdict"
+}
+fm_send_liveness_refuse() {  # <verdict> <what-did-not-happen>
+  printf 'error: refusing to send to %s - %s (tried %s). Nothing was %s. The task'"'"'s local copy is untouched, but this endpoint cannot receive instructions until a worker is running in it again.\n' \
+    "$T" "$(fm_backend_agent_liveness_phrase "$1")" "$RESOLUTION_TRIED" "$2" >&2
+}
 
 if [ "${1:-}" = "--key" ]; then
   if ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$2" "$EXPECTED_LABEL"; then
@@ -240,6 +286,20 @@ if [ "${1:-}" = "--key" ]; then
     exit 1
   fi
 else
+  # Liveness preflight: refuse BEFORE typing anything, and before any durable
+  # pending-reply record is created, so a refusal leaves no trace to reconcile.
+  # An inconclusive verdict proceeds - it is never treated as confirmed-alive,
+  # but it is also not grounds to block a send that would otherwise work
+  # (zellij/orca/cmux have no verified classifier and always read inconclusive).
+  # The post-submit check below is what stops an unconfirmed delivery being
+  # reported as a success.
+  PREFLIGHT_LIVENESS=$(fm_send_agent_liveness)
+  case "$PREFLIGHT_LIVENESS" in
+    shell|no-endpoint)
+      fm_send_liveness_refuse "$PREFLIGHT_LIVENESS" typed
+      exit 1
+      ;;
+  esac
   MESSAGE=$*
   if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
     # Reuse an existing correlation id for recovery resends; otherwise create a
@@ -306,6 +366,40 @@ else
       fi
       echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
       exit 1
+      ;;
+    unknown)
+      # The backend could not confirm the submit. This branch used to fall
+      # straight through to success on the "an unreadable pane is assumed sent"
+      # leniency, which is precisely how the 2026-08-13 steer into a dead shell
+      # exited 0. herdr DID report the submit as `unknown` for that pane: with
+      # no registered agent its pre-Enter baseline is not idle, so it falls back
+      # to fm_backend_herdr_composer_state, whose bare-composer shape matches
+      # only the agent prompt glyphs (^[❯›]) - a shell prompt row deliberately
+      # matches nothing, so no composer row is found and the verdict is
+      # `unknown`. That narrowness is the same safety rule bin/fm-composer-lib.sh
+      # owns fleet-wide: a bare shell prompt is never read as a ready composer.
+      # The signal was there; fm-send discarded it.
+      #
+      # An inconclusive submit is now resolved rather than assumed: re-probe the
+      # endpoint's agent liveness. A confirmed bare shell means the text was
+      # executed by that shell and the instruction is gone, which is a hard
+      # error. Anything still inconclusive keeps the original leniency - the
+      # text most likely landed - but says so on stderr instead of silently
+      # exiting 0, so an unconfirmed steer is never mistaken for a delivered one.
+      POST_LIVENESS=$(fm_send_agent_liveness)
+      case "$POST_LIVENESS" in
+        shell|no-endpoint)
+          if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+            fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+          fi
+          fm_send_liveness_refuse "$POST_LIVENESS" delivered
+          exit 1
+          ;;
+        *)
+          printf 'warning: text was sent to %s but its submission could not be confirmed (%s). Verify the worker picked it up before assuming it landed.\n' \
+            "$T" "$(fm_backend_agent_liveness_phrase "$POST_LIVENESS")" >&2
+          ;;
+      esac
       ;;
   esac
   # Delivery confirmed. Mark the pending expectation delivered without resolving

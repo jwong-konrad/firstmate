@@ -694,34 +694,84 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   esac
 }
 
-# fm_backend_agent_alive: CONFIDENT liveness of a live harness-agent PROCESS
-# under <target>, distinct from fm_backend_target_exists's pane-PRESENCE-only
-# check above. A secondmate agent that has exited leaves its backend endpoint
-# alive as a bare shell; fm_backend_target_exists reports that shell as
-# "alive" because the pane itself still exists, which is exactly the gap
-# bin/fm-bootstrap.sh's session-start secondmate-liveness sweep exists to
-# close (AGENTS.md "Session start"). Prints one of:
-#   alive   - a real agent process is confirmed running.
-#   dead    - CONFIDENTLY not an agent: a bare shell (tmux) or a
-#             structurally-gone/no-agent-registered pane (herdr).
-#   unknown - anything ambiguous, unreadable, or unverified for this backend.
-# Scoped to today's --secondmate-spawn-capable backends with an empirically
-# verified classifier: tmux (docs/tmux-backend.md "Agent liveness probe") and
-# herdr (docs/herdr-backend.md "Agent liveness probe reuses the husk
-# classifier"). zellij, orca, and cmux report unknown until independently
-# verified - future work, not a functional gap for the two backends
-# --secondmate spawns actually support today plus tmux's reference path.
+# fm_backend_agent_alive: the COARSE alive|dead|unknown projection of
+# fm_backend_agent_liveness below, which owns the classification contract. It
+# answers "is a real harness-agent PROCESS running under <target>", distinct
+# from fm_backend_target_exists's pane-PRESENCE-only check above - an exited
+# agent leaves its endpoint alive as a bare shell that presence check reports as
+# "alive", the gap bin/fm-bootstrap.sh's session-start secondmate-liveness sweep
+# exists to close (AGENTS.md "Session start").
+# `dead` here means "confidently not a live agent" and merges the owner's
+# `shell` and `no-endpoint` verdicts, which is all a caller that only gates on
+# confirmed-dead needs; a caller that must tell a bare shell apart from a gone
+# endpoint calls fm_backend_agent_liveness directly.
 # Callers must treat unknown exactly like an unreadable target: NEVER license
 # an action from it alone - the secondmate-liveness sweep gates a respawn on
 # `dead` only, precisely so a momentary read glitch can never duplicate a
 # live supervisor.
 fm_backend_agent_alive() {  # <backend> <target>
+  case "$(fm_backend_agent_liveness "$1" "$2")" in
+    alive) printf 'alive' ;;
+    shell|no-endpoint) printf 'dead' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# fm_backend_agent_liveness: the ONE owner of endpoint liveness classification,
+# and the finer-grained function fm_backend_agent_alive above projects down
+# from. It exists because the coarse alive/dead pair conflates the two ways an
+# endpoint can be "not a live agent", and those two need OPPOSITE handling:
+#   alive       - a real agent process is confirmed running under <target>.
+#   shell       - the endpoint EXISTS but holds no agent: the bare shell an
+#                 exited agent leaves behind, still sitting in the task's
+#                 worktree. This is the dangerous state, because every
+#                 presence-only check reads it as a healthy endpoint while text
+#                 sent to it is executed by that shell and lost.
+#   no-endpoint - the endpoint itself is gone (closed pane / reaped window).
+#                 There is nothing to send to, and nothing to mistake for an
+#                 agent.
+#   unknown     - inconclusive: unreadable, unparseable, or a backend with no
+#                 verified classifier. NEVER a licence to act. In particular it
+#                 must never be reported or treated as `alive`: reporting an
+#                 inconclusive read optimistically is what let a steer land in a
+#                 dead shell unnoticed on 2026-08-13 (see bin/fm-send.sh's
+#                 liveness preflight and docs/herdr-backend.md "Bare-shell
+#                 endpoints are a distinct liveness state").
+#
+# The `shell` verdict is deliberately NOT derived by re-reading composer glyphs
+# here: bin/fm-composer-lib.sh remains the single fleet-wide owner of the
+# empty-composer-versus-dead-shell GLYPH decision, and each verified backend
+# already answers this question from a stronger primitive than a rendered row -
+# herdr from its own registered-agent state, tmux from the pane's foreground
+# process name. Adding a glyph reading here would be a competing second owner
+# of a decision those primitives already settle.
+#
+# Scoped to the backends with an empirically verified classifier: tmux
+# (docs/tmux-backend.md "Agent liveness probe") and herdr (docs/herdr-backend.md
+# "Agent liveness probe reuses the husk classifier"). zellij, orca, and cmux
+# report unknown until independently verified, so callers must keep working when
+# the classification is simply unavailable.
+fm_backend_agent_liveness() {  # <backend> <target> -> alive|shell|no-endpoint|unknown
   local backend=$1 target=$2
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
-    tmux) fm_backend_tmux_agent_alive "$target" ;;
-    herdr) fm_backend_herdr_agent_alive "$target" ;;
+    tmux) fm_backend_tmux_agent_liveness "$target" ;;
+    herdr) fm_backend_herdr_agent_liveness "$target" ;;
     *) printf 'unknown' ;;
+  esac
+}
+
+# fm_backend_agent_liveness_phrase: the shared human-readable rendering of a
+# fm_backend_agent_liveness verdict, so the reading surfaces (bin/fm-send.sh's
+# refusal, bin/fm-crew-state.sh's detail, bin/fm-session-start.sh's endpoint
+# line) describe the same verdict the same way instead of each inventing wording
+# that drifts.
+fm_backend_agent_liveness_phrase() {  # <verdict>
+  case "$1" in
+    alive) printf 'agent running' ;;
+    shell) printf 'no agent: bare shell left behind by an exited agent' ;;
+    no-endpoint) printf 'endpoint gone' ;;
+    *) printf 'agent liveness inconclusive' ;;
   esac
 }
 

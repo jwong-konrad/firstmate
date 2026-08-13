@@ -45,7 +45,9 @@
 #      `resolved` never become current state or detail.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
-#      than trusting a stale status log.
+#      than trusting a stale status log, and an endpoint that still EXISTS but
+#      holds no agent - the bare shell an exited agent leaves - reports
+#      unknown · endpoint rather than passing as healthy.
 #
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
 # of state; exit 2 only on a usage error (no id).
@@ -602,6 +604,26 @@ fi
 # unknown rather than trusting a possibly-stale status log as the current state.
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
 pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"
+
+# The endpoint is readable, but readable is not the same as staffed: an exited
+# agent leaves a bare shell sitting in the task's worktree, and every check
+# above this line - pane_readable included - reads that shell as a healthy
+# endpoint. Report it as its own diagnosable state so a supervisor relaunches
+# the worker instead of steering text into a shell that would execute it
+# (bin/fm-backend.sh's fm_backend_agent_liveness owns the classification).
+#
+# Placed in the no-run fallback ONLY, deliberately: the run-step path above
+# stays authoritative regardless of endpoint liveness, so a crew that finished
+# its pipeline and then exited still reports `done` from its run step rather
+# than being masked by its now-empty pane. And only a CONFIDENT verdict speaks
+# here - an inconclusive read (every backend without a verified classifier)
+# falls through to the existing busy/status-log sources untouched.
+CREW_AGENT_LIVENESS=$(fm_backend_agent_liveness "$TASK_BACKEND" "$BACKEND_TARGET" 2>/dev/null) || CREW_AGENT_LIVENESS=unknown
+case "$CREW_AGENT_LIVENESS" in
+  shell|no-endpoint)
+    emit unknown endpoint "$(fm_backend_agent_liveness_phrase "$CREW_AGENT_LIVENESS"): $BACKEND_TARGET"
+    ;;
+esac
 
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # signature is not meaningful for them; read their state from the status log only.
