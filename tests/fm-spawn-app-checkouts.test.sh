@@ -328,6 +328,47 @@ test_project_clone_in_this_home_is_never_pulled() {
   pass "an app-checkouts entry pointing at a project clone in this home is never pulled"
 }
 
+test_rejected_timeout_value_is_named_not_silently_replaced() {
+  local rec id app tip out status
+  id=appco-badtimeout-x16
+  rec=$(make_case appco-badtimeout "$id")
+  read_case "$rec"
+  IFS='|' read -r app tip <<EOF
+$(make_stale_app_checkout "$CASE_DIR/appsrc")
+EOF
+  printf 'project %s\n' "$app" > "$HOME_DIR/config/app-checkouts"
+
+  # 0 reads as "no bound" and 45s as a duration, and neither is what they get.
+  out=$(FM_APP_PULL_TIMEOUT=0 run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "a rejected FM_APP_PULL_TIMEOUT must not refuse the spawn"
+  assert_contains "$out" "FM_APP_PULL_TIMEOUT must be a positive whole number" \
+    "the rejected timeout value was substituted silently"
+  assert_contains "$out" "using 45" "the substituted default was not named"
+  [ "$(checkout_head "$app")" = "$tip" ] || fail \
+    "a rejected FM_APP_PULL_TIMEOUT should fall back to the default bound, not skip the pull"
+  pass "a rejected FM_APP_PULL_TIMEOUT is named rather than silently replaced"
+}
+
+test_valid_timeout_value_is_silent() {
+  local rec id app tip out status
+  id=appco-goodtimeout-x17
+  rec=$(make_case appco-goodtimeout "$id")
+  read_case "$rec"
+  IFS='|' read -r app tip <<EOF
+$(make_stale_app_checkout "$CASE_DIR/appsrc")
+EOF
+  printf 'project %s\n' "$app" > "$HOME_DIR/config/app-checkouts"
+
+  out=$(FM_APP_PULL_TIMEOUT=30 run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "a valid FM_APP_PULL_TIMEOUT should spawn cleanly"
+  assert_not_contains "$out" "FM_APP_PULL_TIMEOUT must be" "a valid timeout value was rejected"
+  [ "$(checkout_head "$app")" = "$tip" ] || fail \
+    "the bounded pull did not fast-forward the checkout under an explicit timeout"
+  pass "an explicit FM_APP_PULL_TIMEOUT bounds the pull without complaint"
+}
+
 test_refused_spawn_mutates_nothing() {
   local rec id app tip before out status
   id=appco-refused-x15
@@ -437,6 +478,8 @@ test_non_git_path_warns_and_spawns
 test_key_with_no_path_warns_and_spawns
 test_failed_pull_warns_and_spawns
 test_project_clone_in_this_home_is_never_pulled
+test_rejected_timeout_value_is_named_not_silently_replaced
+test_valid_timeout_value_is_silent
 test_refused_spawn_mutates_nothing
 test_path_inside_this_home_is_never_pulled
 test_firstmate_repo_root_is_never_pulled

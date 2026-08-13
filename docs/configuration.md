@@ -292,7 +292,9 @@ The whole path is fail-open - a missing file, an unlisted project, a relative or
 `FM_NO_CHECKOUT_PULL=1` skips it entirely, and a `--secondmate` spawn never runs it.
 A path firstmate itself owns is refused rather than pulled, and the refusal is reported rather than silent: this home's `projects/` clones belong to `bin/fm-fleet-sync.sh` (AGENTS.md rule 1), and the firstmate home and repo belong to the self-update path.
 Naming one of those directories itself is refused exactly like naming something inside it, because a spawn's app-source pull is for genuine external app source only.
-The pull is also time-bounded (`FM_APP_PULL_TIMEOUT`, 45s by default), so a remote that stalls without prompting degrades to the same warning as a failed pull instead of blocking the spawn.
+The pull is also time-bounded (`FM_APP_PULL_TIMEOUT`, 45 seconds by default), so a remote that stalls without prompting degrades to the same warning as a failed pull instead of blocking the spawn.
+A value that is not a positive whole number of seconds is rejected with a warning naming it, and the default is used, so `FM_APP_PULL_TIMEOUT=0` does not quietly mean either "no bound" or 45.
+When the host has none of `timeout`, `gtimeout`, or `perl` to bound the pull with, the refresh is skipped and says so rather than being reported as a slow remote, because running the pull unbounded is never the fallback.
 The refresh takes the same lock name the captain's scheduled dispatchers take for a checkout, so a scheduled refresh and a spawn never double-pull one checkout; a lock already held skips the pull and reports the lock path, and is never reaped, because removing a lock this process does not own is the race the lock exists to prevent.
 
 ## Toolchain
