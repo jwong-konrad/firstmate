@@ -113,8 +113,11 @@ The classifier (`fm_backend_tmux_agent_liveness`) maps the observed name to `ali
 
 - `alive` - the name contains `claude`, `codex`, `opencode`, or `grok`. All four were confirmed to run as their own literal process name (`ps -ef`, 2026-07-07): `claude` and `codex` and `opencode` are each a native compiled binary (`file` reports Mach-O), so their `comm` is their own binary name with no interpreter wrapper to hide behind.
 - `shell` - the name is a bare shell (`zsh`, `bash`, `sh`, `dash`, `ash`, `ksh`, `mksh`, `tcsh`, `csh`, `fish`), so the pane exists but its agent has exited.
-- `no-endpoint` - tmux reported no command name AND `#{pane_id}` does not resolve either, so the pane itself is gone.
-- `unknown` - anything else, including a pane that exists but whose command tmux would not report.
+- `no-endpoint` - tmux reported no command name, `#{pane_id}` does not resolve either, AND `tmux list-panes -a` still enumerates panes, so tmux answers about other panes but not this one: the pane itself is gone.
+- `unknown` - anything else, including a pane that exists but whose command tmux would not report, and a tmux CLI that cannot answer at all (no server on this socket, a different `TMUX_TMPDIR`, a missing binary, a transient error).
+
+The reachability requirement on `no-endpoint` is deliberate: `fm_backend_tmux_agent_alive` projects `no-endpoint` to `dead`, and `dead` is what licenses `bin/fm-bootstrap.sh`'s session-start sweep to kill an endpoint and respawn a secondmate into it.
+An unreachable tmux is not evidence the worker is gone, so it stays `unknown` and the sweep skips the crew as inconclusive rather than duplicating a live supervisor.
 
 `fm_backend_tmux_agent_alive` remains available as the coarse `alive`/`dead`/`unknown` projection of that classifier, where `dead` merges `shell` and `no-endpoint`; `bin/fm-backend.sh`'s `fm_backend_agent_liveness` owns why the finer split exists.
 The extra `#{pane_id}` probe that separates `no-endpoint` from `unknown` runs only when the command read came back empty, so the ordinary `alive`/`shell` path still costs exactly one tmux round trip.

@@ -40,6 +40,13 @@ make_stubs() {  # <dir> -> echoes fakebin dir
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+# FM_FAKE_TMUX_UNREACHABLE models a tmux CLI that cannot answer at all: no server
+# on this socket, a different TMUX_TMPDIR, a missing binary, a transient error.
+if [ -n "${FM_FAKE_TMUX_UNREACHABLE:-}" ]; then
+  case "${1:-}" in
+    display-message|list-panes|list-sessions|capture-pane) exit 1 ;;
+  esac
+fi
 case "${1:-}" in
   send-keys)
     shift
@@ -67,11 +74,15 @@ case "${1:-}" in
     printf '%%1\n'; exit 0 ;;
   capture-pane)
     printf '\xe2\x94\x82 \xe2\x94\x82\n'; exit 0 ;;
+  list-panes)
+    # A reachable server enumerating its panes: the positive evidence the
+    # classifier requires before it may call a target's pane gone.
+    printf '%%1\n'; exit 0 ;;
 esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  # Keep the grace re-probe instant instead of really sleeping 1.5s.
+  # Keep the confirm-before-refusing re-probes instant instead of really waiting.
   cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -161,6 +172,29 @@ test_gone_endpoint_is_distinct_from_bare_shell() {
     || fail "an existing pane with no reported command must be unknown, got '$out'"
 
   pass "liveness: a gone endpoint is reported apart from a bare shell, and neither is guessed"
+}
+
+test_unreachable_tmux_is_inconclusive_never_dead() {
+  local fb out
+  fb="$TMP_ROOT/unreachable/fakebin"; mkdir -p "$TMP_ROOT/unreachable"
+  make_stubs "$TMP_ROOT/unreachable" >/dev/null
+
+  # A tmux that cannot answer says NOTHING about the worker. Reporting it as a
+  # gone endpoint would project to `dead`, and `dead` is what licenses
+  # bin/fm-bootstrap.sh's session-start sweep to kill an endpoint and respawn a
+  # secondmate into it - so an unreachable CLI would kill and duplicate every
+  # LIVE secondmate whose panes are on a socket this process cannot see.
+  out=$(PATH="$fb:$PATH" FM_FAKE_PANE_COMMAND='' FM_FAKE_TMUX_UNREACHABLE=1 bash -c \
+    '. "$0/bin/fm-backend.sh"; fm_backend_agent_liveness tmux sess:win' "$ROOT")
+  [ "$out" = unknown ] \
+    || fail "an unreachable tmux must read unknown, not a confident verdict, got '$out'"
+
+  out=$(PATH="$fb:$PATH" FM_FAKE_PANE_COMMAND='' FM_FAKE_TMUX_UNREACHABLE=1 bash -c \
+    '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive tmux sess:win' "$ROOT")
+  [ "$out" != dead ] \
+    || fail "an unreachable tmux must never project to dead (it licenses kill-and-respawn)"
+
+  pass "liveness: an unreachable tmux CLI stays inconclusive rather than reading dead"
 }
 
 test_herdr_maps_no_agent_to_shell_and_gone_pane_to_no_endpoint() {
@@ -324,6 +358,7 @@ test_bare_shell_refusal_precedes_any_pending_reply_record() {
 
 test_bare_shell_is_classified_as_dead_agent_not_alive
 test_gone_endpoint_is_distinct_from_bare_shell
+test_unreachable_tmux_is_inconclusive_never_dead
 test_herdr_maps_no_agent_to_shell_and_gone_pane_to_no_endpoint
 test_pane_agent_state_survives_a_zsh_shell
 test_send_refuses_a_bare_shell_and_types_nothing

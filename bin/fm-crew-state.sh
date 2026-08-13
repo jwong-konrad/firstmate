@@ -16,7 +16,11 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|endpoint|status-log|none> · <detail>
+#
+# `endpoint` is a live agent-liveness read (bin/fm-backend.sh's
+# fm_backend_agent_liveness), reported only for a confident not-a-live-agent
+# verdict on a crew with no attributed run - see the no-run fallback below.
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.

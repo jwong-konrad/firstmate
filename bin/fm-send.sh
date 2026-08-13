@@ -20,8 +20,9 @@
 # anything: a pane whose agent exited is a live shell that would EXECUTE the
 # instruction instead of receiving it. An inconclusive submit no longer exits 0
 # silently either - see the liveness preflight below for the whole contract and
-# the incident behind it. Tune the confirm-before-refusing grace with
-# FM_SEND_LIVENESS_GRACE (default 1.5, 0 disables).
+# the incident behind it. The confirm-before-refusing re-probe budget is derived
+# from FM_SEND_RETRIES / FM_SEND_SLEEP below; FM_SEND_LIVENESS_GRACE and
+# FM_SEND_LIVENESS_ATTEMPTS override its interval and count.
 # Submission dispatches through the target's recorded backend; the tmux adapter
 # shares its composer/submit core with the away-mode daemon via bin/fm-tmux-lib.sh.
 # Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
@@ -257,27 +258,60 @@ fi
 #     Enter is exactly what accepts a harness trust dialog moments after a
 #     spawn, before herdr has detected the new agent, so gating it on agent
 #     liveness would refuse a legitimate key during normal startup.
-#   - A confirmed-dead verdict is re-probed once after a short grace before it
-#     refuses, because herdr AUTO-DETECTS a built-in harness rather than being
-#     told about it at launch: a just-spawned agent reads agent_not_found (hence
-#     `shell`) for a beat. A genuinely exited agent is still a shell after the
-#     grace; a racing spawn is not. Paid only on the would-refuse path, so the
-#     healthy send stays one probe.
-FM_SEND_LIVENESS_GRACE=${FM_SEND_LIVENESS_GRACE:-1.5}
+#   - A confirmed-dead verdict is RE-PROBED before it refuses, because herdr
+#     AUTO-DETECTS a built-in harness rather than being told about it at launch:
+#     a just-spawned agent reads agent_not_found (hence `shell`) for a beat. A
+#     genuinely exited agent is still a shell after the budget; a racing spawn is
+#     not. Paid only on the would-refuse path, so the healthy send stays one
+#     probe.
+#     The budget is DERIVED, not guessed: it is the same
+#     FM_SEND_RETRIES x FM_SEND_SLEEP window this script's verified submit
+#     already allows this very endpoint to catch up in (see the header above and
+#     docs/configuration.md) - the one endpoint-latency allowance in this repo
+#     that was tuned against real harnesses - so an operator who widens the
+#     submit budget for a slow machine widens this with it. It is re-probed each
+#     interval rather than slept out in one block, so a detection that lands
+#     early costs one interval instead of the whole budget.
+#     FM_SEND_LIVENESS_GRACE overrides the per-probe interval (0 = re-probe with
+#     no wait); FM_SEND_LIVENESS_ATTEMPTS overrides the re-probe count (0 = take
+#     the first verdict as final).
+FM_SEND_LIVENESS_GRACE=${FM_SEND_LIVENESS_GRACE:-${FM_SEND_SLEEP:-0.4}}
+FM_SEND_LIVENESS_ATTEMPTS=${FM_SEND_LIVENESS_ATTEMPTS:-${FM_SEND_RETRIES:-3}}
 fm_send_agent_liveness() {
-  local verdict
+  local verdict attempt=0
   verdict=$(fm_backend_agent_liveness "$TARGET_BACKEND" "$T" 2>/dev/null) || verdict=unknown
-  case "$verdict" in
-    shell|no-endpoint)
-      [ "$FM_SEND_LIVENESS_GRACE" = 0 ] || sleep "$FM_SEND_LIVENESS_GRACE"
-      verdict=$(fm_backend_agent_liveness "$TARGET_BACKEND" "$T" 2>/dev/null) || verdict=unknown
-      ;;
-  esac
+  while [ "$attempt" -lt "$FM_SEND_LIVENESS_ATTEMPTS" ]; do
+    case "$verdict" in
+      shell|no-endpoint) ;;
+      *) break ;;
+    esac
+    [ "$FM_SEND_LIVENESS_GRACE" = 0 ] || sleep "$FM_SEND_LIVENESS_GRACE"
+    verdict=$(fm_backend_agent_liveness "$TARGET_BACKEND" "$T" 2>/dev/null) || verdict=unknown
+    attempt=$((attempt + 1))
+  done
   printf '%s' "$verdict"
 }
 fm_send_liveness_refuse() {  # <verdict> <what-did-not-happen>
   printf 'error: refusing to send to %s - %s (tried %s). Nothing was %s. The task'"'"'s local copy is untouched, but this endpoint cannot receive instructions until a worker is running in it again.\n' \
     "$T" "$(fm_backend_agent_liveness_phrase "$1")" "$RESOLUTION_TRIED" "$2" >&2
+}
+# The POST-submit counterpart, which must not reuse the refusal above: by the
+# time this fires the text has already been typed and Enter sent, so telling the
+# operator nothing was delivered would be wrong in the reassuring direction and
+# would hide the state a human has to inspect. On a `shell` verdict the
+# instruction text was handed to that shell, which EXECUTES what is typed at it,
+# so the pane and the task's worktree both need eyes before anything is resent.
+fm_send_post_submit_refuse() {  # <verdict>
+  case "$1" in
+    shell)
+      printf 'error: text was already typed into %s and Enter sent, but the submit was unconfirmed and the endpoint reads as %s (tried %s). Treat the text as EXECUTED BY THAT SHELL rather than delivered: the instruction is lost, and whatever it contained ran as shell commands in the task'"'"'s worktree. Inspect that pane and the worktree for side effects, relaunch a worker in it, then resend.\n' \
+        "$T" "$(fm_backend_agent_liveness_phrase "$1")" "$RESOLUTION_TRIED" >&2
+      ;;
+    *)
+      printf 'error: text was already typed into %s and Enter sent, but the submit was unconfirmed and the endpoint reads as %s (tried %s). Nothing there can have received it, so treat the instruction as lost; inspect the endpoint and respawn a worker before resending.\n' \
+        "$T" "$(fm_backend_agent_liveness_phrase "$1")" "$RESOLUTION_TRIED" >&2
+      ;;
+  esac
 }
 
 if [ "${1:-}" = "--key" ]; then
@@ -392,7 +426,7 @@ else
           if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
             fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
           fi
-          fm_send_liveness_refuse "$POST_LIVENESS" delivered
+          fm_send_post_submit_refuse "$POST_LIVENESS"
           exit 1
           ;;
         *)

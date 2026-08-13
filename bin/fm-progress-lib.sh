@@ -254,8 +254,9 @@ fm_progress_token_verdict() {  # <state-token>
 # when bin/fm-crew-state.sh read it. The EVIDENCE rule (header rule two), and the
 # half of the age bound that has to cover the fallback rather than the record.
 #
-# `run-step` and `pane` are live probes: crew-state queried the pipeline or the
-# endpoint at reading time, so the reading is as current as the reading is.
+# `run-step`, `pane`, and `endpoint` are live probes: crew-state queried the
+# pipeline, the endpoint's busy signature, or the endpoint's agent liveness at
+# reading time, so the reading is as current as the reading is.
 # `status-log` is not - it is crew-state's last resort, a stored artifact whose
 # newest line can be arbitrarily old, and the status contract makes old normal
 # (a worker appends only supervisor-actionable events, so a task that resumed
@@ -269,7 +270,9 @@ fm_progress_token_verdict() {  # <state-token>
 # state at all. It is demoted to indeterminate, which resolves the way every
 # indeterminate reading resolves - idle only if the endpoint is provably gone,
 # otherwise progressing. `source: none` never reaches here: crew-state pairs it
-# with `unknown`, which is already indeterminate.
+# with `unknown`, which is already indeterminate. `source: endpoint` - crew-state's
+# confident no-live-agent read - is paired with `unknown` the same way, so it too
+# resolves as indeterminate rather than through this rule.
 #
 # One known exception, accepted rather than fixed here: bin/fm-crew-state.sh
 # emits `done` labelled `status-log` from a reading that is actually live and
