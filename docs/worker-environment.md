@@ -3,7 +3,7 @@
 How much of the captain's environment a spawned worker inherits, why it is now deny-by-default, and what this control does *not* cover.
 
 `bin/fm-env-clean.sh`'s header and `--help` own the exact mechanics and the built-in allowlist.
-[`configuration.md`](configuration.md) owns the `config/spawn-env-allow` schema.
+[`configuration.md`](configuration.md) owns the `config/spawn-env-allow` and `config/project-env` schemas.
 This file is the incident record, the verification evidence, and the honest statement of residual risk.
 
 ## The incident, 2026-07-31

@@ -179,7 +179,7 @@ Ship tasks are decoupled and keep today's unsandboxed posture pending `sandbox-t
 `docs/configuration.md` owns the exact settings and the captain-present override that can lift the boundary for one supervised task; section 1 rule 6 owns the override's non-negotiable safety boundary.
 
 Every spawn launches the worker with a deny-by-default environment, so it holds neither the captain's exported secrets nor their SSH agent; a worker reporting a variable as unset is expected, not a fault.
-A worker that genuinely needs one gets it through `config/spawn-env-allow` for a non-secret name or `fm-spawn`'s scoped injection seam for a per-project value, never by widening inheritance; `docs/configuration.md` owns both, and `docs/worker-environment.md` owns the evidence and the residual risks.
+A worker that genuinely needs one gets it through `config/spawn-env-allow` for a non-secret name or `config/project-env`, delivered through `fm-spawn`'s scoped injection seam, for a per-project value, never by widening inheritance; `docs/configuration.md` owns both, and `docs/worker-environment.md` owns the evidence and the residual risks.
 
 ## 5. Recovery
 
