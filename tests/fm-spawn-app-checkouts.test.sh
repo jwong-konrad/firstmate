@@ -13,8 +13,10 @@
 #   2. Every failure mode is FAIL-OPEN - the spawn still happens.
 #   3. The lock name matches the scheduled dispatcher's byte for byte, or the two
 #      paths can double-pull one checkout while each believes it holds the lock.
-#   4. A project clone in this home is never pulled, because fm-fleet-sync.sh is
-#      the one owner of refreshing those (AGENTS.md rule 1).
+#   4. Nothing firstmate itself owns is ever pulled - a project clone in this home
+#      belongs to fm-fleet-sync.sh (AGENTS.md rule 1), and the firstmate home and
+#      repo belong to the self-update path. A spawn refreshes external app source
+#      only, and a refused spawn must not have pulled anything first.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -102,7 +104,7 @@ EOF
 run_spawn() {  # <home> <wt> <fakebin> <spawn args...>
   local home=$1 wt=$2 fakebin=$3
   shift 3
-  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+  FM_ROOT_OVERRIDE="${FM_TEST_ROOT_OVERRIDE:-}" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
@@ -326,6 +328,104 @@ test_project_clone_in_this_home_is_never_pulled() {
   pass "an app-checkouts entry pointing at a project clone in this home is never pulled"
 }
 
+test_refused_spawn_mutates_nothing() {
+  local rec id app tip before out status
+  id=appco-refused-x15
+  rec=$(make_case appco-refused "$id")
+  read_case "$rec"
+  IFS='|' read -r app tip <<EOF
+$(make_stale_app_checkout "$CASE_DIR/appsrc")
+EOF
+  before=$(checkout_head "$app")
+  printf 'project %s\n' "$app" > "$HOME_DIR/config/app-checkouts"
+  # A malformed config/project-env entry refuses this spawn. The refusal is
+  # side-effect-free by design, so it must not first have advanced an external
+  # checkout on the captain's disk.
+  printf 'project 9BAD=value\n' > "$HOME_DIR/config/project-env"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a malformed config/project-env entry should refuse the spawn"
+  assert_contains "$out" "not a valid environment variable name" "the refusal was not reported"
+  [ "$(checkout_head "$app")" = "$before" ] || fail \
+    "a refused spawn had already fast-forwarded the app-source checkout"
+  [ "$before" != "$tip" ] || fail "fixture checkout was already at the origin tip"
+  pass "a spawn refused for a malformed config/project-env entry pulls nothing first"
+}
+
+test_path_inside_this_home_is_never_pulled() {
+  local rec id inside before out status
+  id=appco-inhome-x12
+  rec=$(make_case appco-inhome "$id")
+  read_case "$rec"
+  # Not under projects/, but still firstmate's own tree - a secondmate home or a
+  # live worker worktree lands here. A spawn refreshes external app source only.
+  inside="$HOME_DIR/data/appsrc"
+  IFS='|' read -r inside _ <<EOF
+$(make_stale_app_checkout "$HOME_DIR/data/appsrc")
+EOF
+  before=$(checkout_head "$inside")
+  printf 'project %s\n' "$inside" > "$HOME_DIR/config/app-checkouts"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "the spawn should continue after refusing a path inside this home"
+  [ "$(checkout_head "$inside")" = "$before" ] || fail \
+    "fm-spawn pulled a checkout inside the firstmate home"
+  assert_contains "$out" "inside this firstmate home or repo" "the refusal was not reported"
+  pass "an app-checkouts entry inside the firstmate home is never pulled"
+}
+
+test_firstmate_repo_root_is_never_pulled() {
+  local rec id fakeroot before out status
+  id=appco-fmroot-x13
+  rec=$(make_case appco-fmroot "$id")
+  read_case "$rec"
+  # Naming FM_ROOT itself, not something under it: exact match must refuse too.
+  # Pulling it would fast-forward bin/*.sh under the running captain, which is the
+  # self-update path's job, never a spawn's. A stand-in FM_ROOT keeps the real
+  # repo out of it; the bin symlink is what makes it usable as one.
+  IFS='|' read -r fakeroot _ <<EOF
+$(make_stale_app_checkout "$CASE_DIR/fakeroot")
+EOF
+  ln -s "$ROOT/bin" "$fakeroot/bin"
+  before=$(checkout_head "$fakeroot")
+  printf 'project %s\n' "$fakeroot" > "$HOME_DIR/config/app-checkouts"
+
+  out=$(FM_TEST_ROOT_OVERRIDE="$fakeroot" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "the spawn should continue after refusing to pull the firstmate repo"
+  [ "$(checkout_head "$fakeroot")" = "$before" ] || fail \
+    "fm-spawn fast-forwarded the firstmate repo root under the running captain"
+  assert_contains "$out" "inside this firstmate home or repo" "the refusal was not reported"
+  pass "an app-checkouts entry naming the firstmate repo root is never pulled"
+}
+
+test_whitespace_path_is_named_not_misdiagnosed() {
+  local rec id app tip before out status
+  id=appco-space-x14
+  rec=$(make_case appco-space "$id")
+  read_case "$rec"
+  IFS='|' read -r app tip <<EOF
+$(make_stale_app_checkout "$CASE_DIR/App Source")
+EOF
+  before=$(checkout_head "$app")
+  printf 'project %s\n' "$app" > "$HOME_DIR/config/app-checkouts"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "a whitespace-bearing path must not refuse the spawn"
+  [ "$(checkout_head "$app")" = "$before" ] || fail \
+    "fm-spawn pulled something for a path it could not parse"
+  [ "$before" != "$tip" ] || fail "fixture checkout was already at the origin tip"
+  assert_contains "$out" "cannot contain whitespace" \
+    "a whitespace-bearing path was not reported as the format limitation it is"
+  assert_not_contains "$out" "does not exist" \
+    "a real configured path was misdiagnosed as a path that does not exist"
+  assert_contains "$out" "spawned $id" "the spawn did not continue after the warning"
+  pass "a config/app-checkouts path containing whitespace is named rather than truncated and misdiagnosed"
+}
+
 test_configured_checkout_is_pulled
 test_kill_switch_skips_the_pull
 test_held_lock_skips_the_pull_and_names_it
@@ -337,3 +437,7 @@ test_non_git_path_warns_and_spawns
 test_key_with_no_path_warns_and_spawns
 test_failed_pull_warns_and_spawns
 test_project_clone_in_this_home_is_never_pulled
+test_refused_spawn_mutates_nothing
+test_path_inside_this_home_is_never_pulled
+test_firstmate_repo_root_is_never_pulled
+test_whitespace_path_is_named_not_misdiagnosed

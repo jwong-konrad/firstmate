@@ -882,15 +882,55 @@ project_config_fields() {  # <file> <key>
 # source one commit stale is a far smaller problem than a refused spawn. The pull
 # is --ff-only, so it can only advance a checkout: it never merges, rebases,
 # stashes, or discards, and it aborts on divergence or local changes.
+
+# True when <path> IS <boundary> or lives inside it, both compared in resolved
+# form. A boundary that does not exist contains nothing.
+path_within_dir() {  # <boundary> <resolved-path>
+  local boundary_real
+  boundary_real=$(cd "$1" 2>/dev/null && pwd -P) || return 1
+  [ "$2" = "$boundary_real" ] || path_is_ancestor_of "$boundary_real" "$2"
+}
+
+FM_APP_PULL_TIMEOUT=${FM_APP_PULL_TIMEOUT:-45}
+case "$FM_APP_PULL_TIMEOUT" in ''|*[!0-9]*|0) FM_APP_PULL_TIMEOUT=45 ;; esac
+
+# A bounded ff-pull. An unreachable remote, a dead network, or a hung proxy would
+# otherwise block the spawn forever, which defeats the fail-open design far worse
+# than a stale checkout does: the spawn never happens at all. Exit 124 is the
+# timeout, including when no bounding tool exists, so an unbounded pull is never
+# the fallback.
+app_pull_bounded() {  # <checkout>
+  if command -v timeout >/dev/null 2>&1; then
+    GIT_TERMINAL_PROMPT=0 timeout "$FM_APP_PULL_TIMEOUT" git -C "$1" pull --ff-only --quiet 2>&1
+  elif command -v gtimeout >/dev/null 2>&1; then
+    GIT_TERMINAL_PROMPT=0 gtimeout "$FM_APP_PULL_TIMEOUT" git -C "$1" pull --ff-only --quiet 2>&1
+  elif command -v perl >/dev/null 2>&1; then
+    GIT_TERMINAL_PROMPT=0 perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' \
+      "$FM_APP_PULL_TIMEOUT" git -C "$1" pull --ff-only --quiet 2>&1
+  else
+    return 124
+  fi
+}
+
 spawn_app_checkout_pull() {  # <project-key>
   if [ "${FM_NO_CHECKOUT_PULL:-0}" = 1 ]; then
     return 0
   fi
-  local key=$1 fields checkout checkout_real projects_real hash lock err
+  local key=$1 fields checkout checkout_rest checkout_real hash lock err pull_status
   fields=$(project_config_fields "$CONFIG/app-checkouts" "$key") || return 0
   checkout=${fields%%[[:space:]]*}
   if [ -z "$checkout" ]; then
     echo "warning: config/app-checkouts names $key with no checkout path (skipping app-source refresh)" >&2
+    return 0
+  fi
+  # The format is whitespace-separated, so a path containing whitespace arrives
+  # here already truncated at its first space. Say that, rather than letting the
+  # truncated head be reported as a path that does not exist - a real config
+  # misdiagnosed as a typo is the harder bug to find.
+  checkout_rest=${fields#"$checkout"}
+  checkout_rest=${checkout_rest#"${checkout_rest%%[![:space:]]*}"}
+  if [ -n "$checkout_rest" ]; then
+    echo "warning: config/app-checkouts path for $key has trailing text after '$checkout': the format is whitespace-separated, so a checkout path cannot contain whitespace (skipping app-source refresh)" >&2
     return 0
   fi
   # A relative path would resolve against whatever cwd fm-spawn was called from,
@@ -906,16 +946,20 @@ spawn_app_checkout_pull() {  # <project-key>
     echo "warning: config/app-checkouts path for $key does not exist: $checkout (skipping app-source refresh)" >&2
     return 0
   fi
-  # Never a project clone in this home. Those are firstmate's read-only project
-  # copies and fm-fleet-sync.sh is their one refresh owner (AGENTS.md rule 1); a
-  # hand-maintained map makes that mistake easy to write and invisible afterwards.
-  if projects_real=$(cd "$PROJECTS" 2>/dev/null && pwd -P); then
-    case "$checkout_real/" in
-      "$projects_real"/*)
-        echo "warning: config/app-checkouts path for $key is a project clone in this home: $checkout (refusing to pull it; fm-fleet-sync.sh owns project clones)" >&2
-        return 0
-        ;;
-    esac
+  # Never a checkout firstmate itself owns; a hand-maintained map makes that
+  # mistake easy to write and invisible afterwards. The boundary already exists
+  # elsewhere in the system: fast-forwarding the firstmate repo belongs to the
+  # self-update path, and refreshing this home's project clones belongs to
+  # fm-fleet-sync.sh (AGENTS.md rule 1). Neither belongs to a spawn - a spawn's
+  # app-source pull is for genuine external app source only. Naming a boundary
+  # directly is refused exactly like naming something inside it.
+  if path_within_dir "$PROJECTS" "$checkout_real"; then
+    echo "warning: config/app-checkouts path for $key is a project clone in this home: $checkout (refusing to pull it; fm-fleet-sync.sh owns project clones)" >&2
+    return 0
+  fi
+  if path_within_dir "$FM_HOME" "$checkout_real" || path_within_dir "$FM_ROOT" "$checkout_real"; then
+    echo "warning: config/app-checkouts path for $key is inside this firstmate home or repo: $checkout (refusing to pull it; the self-update path owns the firstmate repo and a spawn refreshes external app source only)" >&2
+    return 0
   fi
   if ! git -C "$checkout_real" rev-parse --git-dir >/dev/null 2>&1; then
     echo "warning: config/app-checkouts path for $key is not a git checkout: $checkout (skipping app-source refresh)" >&2
@@ -930,8 +974,13 @@ spawn_app_checkout_pull() {  # <project-key>
   lock="/tmp/qa-recon-checkout-${hash:-$key}.lock"
   if mkdir "$lock" 2>/dev/null; then
     # GIT_TERMINAL_PROMPT=0 so a checkout whose remote wants interactive
-    # credentials fails fast instead of wedging the spawn on a prompt.
-    if ! err=$(GIT_TERMINAL_PROMPT=0 git -C "$checkout_real" pull --ff-only --quiet 2>&1); then
+    # credentials fails fast instead of wedging the spawn on a prompt, and the
+    # bound above so a remote that stalls without prompting cannot either.
+    pull_status=0
+    err=$(app_pull_bounded "$checkout_real") || pull_status=$?
+    if [ "$pull_status" = 124 ]; then
+      echo "warning: app-source ff-pull timed out after ${FM_APP_PULL_TIMEOUT}s for $checkout (spawn continues)" >&2
+    elif [ "$pull_status" != 0 ]; then
       echo "warning: app-source ff-pull failed for $checkout (spawn continues): $(first_line "$err")" >&2
     fi
     rmdir "$lock" 2>/dev/null || true
@@ -942,7 +991,6 @@ spawn_app_checkout_pull() {  # <project-key>
   fi
   return 0
 }
-[ "$KIND" = secondmate ] || spawn_app_checkout_pull "$PROJ_NAME"
 
 # --- Per-project worker environment (config/project-env) ---------------------
 # Optional per-project environment, parsed HERE - before a window, worktree, or
@@ -985,6 +1033,11 @@ if [ "$KIND" != secondmate ] && project_env_fields=$(project_config_fields "$CON
     PROJECT_ENV_INJECT+=("$env_entry")
   done
 fi
+
+# After the project-env validation above, never before it: a spawn about to be
+# refused for a malformed entry must not first have mutated an external checkout.
+# Nothing in the pull depends on those entries.
+[ "$KIND" = secondmate ] || spawn_app_checkout_pull "$PROJ_NAME"
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.

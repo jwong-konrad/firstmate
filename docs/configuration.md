@@ -286,10 +286,13 @@ The worker cannot refresh that checkout itself, correctly: the project-write bou
 So `bin/fm-spawn.sh` fast-forward-pulls it as the captain, at spawn, when `config/app-checkouts` maps the project to it.
 
 The file is LOCAL and gitignored, one line per project, `<project> <absolute checkout path>`, with the same comment and first-match rules as `config/project-env` above.
+The format is whitespace-separated there too, so a checkout path cannot contain whitespace; a line with trailing text after the path says so and skips the refresh, rather than reporting the truncated head as a path that does not exist.
 The pull is `--ff-only`, so it can only advance a checkout: it never merges, rebases, stashes, or discards, and it aborts and leaves local work intact on divergence or local changes.
 The whole path is fail-open - a missing file, an unlisted project, a relative or absent path, a directory that is not a git checkout, and a failed pull each warn at most and the spawn continues, because app source one commit stale is a much smaller problem than a refused spawn.
 `FM_NO_CHECKOUT_PULL=1` skips it entirely, and a `--secondmate` spawn never runs it.
-A path inside this home's `projects/` is refused rather than pulled, since those are firstmate's read-only project clones and `bin/fm-fleet-sync.sh` is the one owner of refreshing them.
+A path firstmate itself owns is refused rather than pulled, and the refusal is reported rather than silent: this home's `projects/` clones belong to `bin/fm-fleet-sync.sh` (AGENTS.md rule 1), and the firstmate home and repo belong to the self-update path.
+Naming one of those directories itself is refused exactly like naming something inside it, because a spawn's app-source pull is for genuine external app source only.
+The pull is also time-bounded (`FM_APP_PULL_TIMEOUT`, 45s by default), so a remote that stalls without prompting degrades to the same warning as a failed pull instead of blocking the spawn.
 The refresh takes the same lock name the captain's scheduled dispatchers take for a checkout, so a scheduled refresh and a spawn never double-pull one checkout; a lock already held skips the pull and reports the lock path, and is never reaped, because removing a lock this process does not own is the race the lock exists to prevent.
 
 ## Toolchain
