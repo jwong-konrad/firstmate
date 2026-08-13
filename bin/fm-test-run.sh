@@ -158,9 +158,9 @@ family_for_basename() {
       printf '%s\n' live-harness-optin
       ;;
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
-    fm-send-strict.test.sh|fm-spawn-batch.test.sh|fm-spawn-collision-guard.test.sh|\
-    fm-spawn-dispatch-profile.test.sh|fm-spawn-env-allowlist.test.sh|\
-    fm-spawn-worktree-settle.test.sh)
+    fm-send-strict.test.sh|fm-spawn-app-checkouts.test.sh|fm-spawn-batch.test.sh|\
+    fm-spawn-collision-guard.test.sh|fm-spawn-dispatch-profile.test.sh|\
+    fm-spawn-env-allowlist.test.sh|fm-spawn-worktree-settle.test.sh)
       printf '%s\n' backend-dispatch
       ;;
     fm-pr-check-security.test.sh|fm-pr-merge.test.sh|fm-review-diff.test.sh|\

@@ -18,3 +18,5 @@ config/cmux-socket-password
 config/wedge-alarm
 config/herdr-presentation-spaces
 config/spawn-env-allow
+config/app-checkouts
+config/project-env
