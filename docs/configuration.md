@@ -256,7 +256,7 @@ Ship tasks are decoupled and keep today's unsandboxed posture until `sandbox-tru
   But no new spawn, relaunch, or resume of any task may carry the override while `state/.afk` exists, and firstmate must not extend, repeat, or renew the override for that task without a fresh explicit captain instruction after the captain returns.
 - Absence: when the override is not currently granted and work needs to reach outside the boundary, firstmate escalates to the captain rather than widening the allowlist or dropping the sandbox.
 
-## Worker launch environment (config/spawn-env-allow)
+## Worker launch environment (config/spawn-env-allow, config/project-env)
 
 A spawned worker does not inherit the captain's shell environment.
 `bin/fm-spawn.sh` wraps every launch in `bin/fm-env-clean.sh`, which runs in the worker's own pane and starts the agent with a deny-by-default environment: allowlisted names that are actually set there, plus the explicit assignments firstmate passes it.
@@ -268,6 +268,34 @@ Absent means the built-in allowlist alone, which is the normal state.
 Only exact names are accepted - a wildcard is refused, and so is a credential-shaped name, because a credential a worker genuinely needs is a per-project value that belongs in `fm-spawn.sh`'s scoped `SPAWN_ENV_INJECT` seam rather than a home-wide name list.
 Either refusal stops the spawn before a window, worktree, or task record exists.
 Unlike the items in `FM_INHERITABLE_CONFIG`, this file is deliberately not inherited into secondmate homes: widening an environment boundary should be a deliberate per-home act, not a sync side effect.
+
+`config/project-env` is the other half of that seam: optional per-project environment for the workers this home spawns, LOCAL and gitignored.
+One line per project, `<project> KEY=VALUE [KEY=VALUE ...]`, keyed by the `projects/<name>` clone basename, with full-line `#` comments only and the first matching line winning.
+An inline `#` is not a comment, because a value may legitimately contain one; values are whitespace-separated, so a value cannot itself contain whitespace.
+Absent, or present with no line for the spawned project, is the normal state and changes nothing.
+Its entries reach the agent through `SPAWN_ENV_INJECT` rather than as an `export` typed into the pane, which is the only delivery that survives the clean environment.
+This is where a genuine per-project credential belongs, and the reason it works here when `config/spawn-env-allow` would refuse the same name: injection is scoped to one project's spawns, while the allowlist is home-wide.
+A malformed entry on the spawned project's own line - not a `NAME=VALUE` assignment, or a name that is not a valid environment variable name - refuses the spawn before a window, worktree, or task record exists, for the same reason a bad `spawn-env-allow` entry does: `bin/fm-env-clean.sh` parses leading assignments the way `env` does, so a malformed entry would be taken as the command and the pane would report a spawned task and then die on the launch line.
+Only the spawned project's line is validated; another project's bad line is that project's spawn to refuse.
+It never applies to a `--secondmate` spawn, because a secondmate is a firstmate home rather than a project, and it is deliberately not inherited into secondmate homes for the same reason `config/spawn-env-allow` is not.
+
+## App-source refresh at spawn (config/app-checkouts)
+
+A worker sometimes reads a checkout that is not its project clone - the application source its project exercises, held elsewhere on the captain's disk and read through an absolute path.
+The worker cannot refresh that checkout itself, correctly: the project-write boundary stops it, and concurrent workers pulling one checkout would race.
+So `bin/fm-spawn.sh` fast-forward-pulls it as the captain, at spawn, when `config/app-checkouts` maps the project to it.
+
+The file is LOCAL and gitignored, one line per project, `<project> <absolute checkout path>`, with the same comment and first-match rules as `config/project-env` above.
+The format is whitespace-separated there too, so a checkout path cannot contain whitespace; a line with trailing text after the path says so and skips the refresh, rather than reporting the truncated head as a path that does not exist.
+The pull is `--ff-only`, so it can only advance a checkout: it never merges, rebases, stashes, or discards, and it aborts and leaves local work intact on divergence or local changes.
+The whole path is fail-open - a missing file, an unlisted project, a relative or absent path, a directory that is not a git checkout, and a failed pull each warn at most and the spawn continues, because app source one commit stale is a much smaller problem than a refused spawn.
+`FM_NO_CHECKOUT_PULL=1` skips it entirely, and a `--secondmate` spawn never runs it.
+A path firstmate itself owns is refused rather than pulled, and the refusal is reported rather than silent: this home's `projects/` clones belong to `bin/fm-fleet-sync.sh` (AGENTS.md rule 1), and the firstmate home and repo belong to the self-update path.
+Naming one of those directories itself is refused exactly like naming something inside it, because a spawn's app-source pull is for genuine external app source only.
+The pull is also time-bounded (`FM_APP_PULL_TIMEOUT`, 45 seconds by default), so a remote that stalls without prompting degrades to the same warning as a failed pull instead of blocking the spawn.
+A value that is not a positive whole number of seconds is rejected with a warning naming it, and the default is used, so `FM_APP_PULL_TIMEOUT=0` does not quietly mean either "no bound" or 45.
+When the host has none of `timeout`, `gtimeout`, or `perl` to bound the pull with, the refresh is skipped and says so rather than being reported as a slow remote, because running the pull unbounded is never the fallback.
+The refresh takes the same lock name the captain's scheduled dispatchers take for a checkout, so a scheduled refresh and a spawn never double-pull one checkout; a lock already held skips the pull and reports the lock path, and is never reaped, because removing a lock this process does not own is the race the lock exists to prevent.
 
 ## Toolchain
 
@@ -457,6 +485,8 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalati
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort clone refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count)
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
+FM_NO_CHECKOUT_PULL=0   # set to 1 to skip the spawn-time app-source ff-pull entirely (config/app-checkouts section above)
+FM_APP_PULL_TIMEOUT=45  # seconds allowed for that ff-pull; a non-positive or non-numeric value warns and uses 45
 FM_STALE_WORKTREE_LOCK_AGE_SECS=30       # min mtime age before fm-teardown.sh treats a leftover worktree git index.lock as provably stale
 FM_TREEHOUSE_RETURN_LOCK_RETRIES=3        # retries after a treehouse return fails on a transient signature (git index.lock, or the empty-stderr git-reset race)
 FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=1 # seconds fm-teardown.sh waits before each retry after either signature

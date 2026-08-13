@@ -92,8 +92,29 @@
 #   Variables firstmate deliberately hands the worker travel in SPAWN_ENV_INJECT
 #   (see the injection seam near the launch send), NOT as `export` lines typed into
 #   the pane - a pane export does not survive the clean environment.
+#   config/project-env in this home declares OPTIONAL per-project worker environment:
+#   "<project> KEY=VALUE [KEY=VALUE ...]", keyed by the projects/<name> clone
+#   basename, full-line '#' comments only, first matching line wins. Values are
+#   whitespace-separated, so a value cannot itself contain whitespace. Its entries
+#   travel through SPAWN_ENV_INJECT like every other injection, and a malformed
+#   entry for the spawned project refuses the spawn before anything is created,
+#   exactly like a bad config/spawn-env-allow name. Never applies to --secondmate.
 #   docs/worker-environment.md owns the incident record, the verification evidence,
 #   and the residual risks this does not cover.
+#   App-source refresh: when config/app-checkouts maps this project's name to an
+#   absolute checkout outside this home ("<project> <absolute path>", same comment
+#   and first-match rules), the spawn fast-forward-pulls that checkout first, so a
+#   worker reading app source it is not allowed to pull itself still gets a fresh
+#   copy. Advance-only (never merges, rebases, stashes, or discards) and FAIL-OPEN:
+#   every problem warns and the spawn continues, because stale app source is a much
+#   smaller problem than a refused spawn. Kill switch FM_NO_CHECKOUT_PULL=1; never
+#   applies to --secondmate. The pull is time-bounded by FM_APP_PULL_TIMEOUT
+#   (default 45 seconds), so a stalled remote warns like any other failed pull
+#   instead of blocking the spawn. A path that IS or is inside this home's
+#   projects/, this firstmate home, or the firstmate repo is refused by name
+#   rather than pulled: refreshing project clones belongs to bin/fm-fleet-sync.sh
+#   and fast-forwarding the firstmate repo belongs to the self-update path, so a
+#   spawn refreshes genuine external app source only.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
@@ -141,7 +162,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,96p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,117p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -824,6 +845,223 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
+# The project key both per-project config lookups below are keyed by, and the same
+# name the delivery-mode read further down passes to fm-project-mode.sh: the
+# basename of the projects/<name> clone. A secondmate spawn has no project key at
+# all - its PROJ_ABS is a firstmate home, not a project.
+PROJ_NAME=
+[ "$KIND" = secondmate ] || PROJ_NAME=$(basename "$PROJ_ABS")
+
+# Read one record for <key> out of a per-project config file, echoing the fields
+# after the key. Full-line '#' comments and blank lines are skipped; an inline '#'
+# is NOT a comment, because a value may legitimately contain one. The first
+# matching line wins, so a duplicated key is not an error. Returns 1 when the file
+# is absent or holds no line for <key> - both ordinary states, not failures.
+project_config_fields() {  # <file> <key>
+  local file=$1 key=$2 line trimmed first rest
+  [ -n "$key" ] || return 1
+  [ -f "$file" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    trimmed=${line#"${line%%[![:space:]]*}"}
+    case "$trimmed" in ''|'#'*) continue ;; esac
+    first=${trimmed%%[[:space:]]*}
+    [ "$first" = "$key" ] || continue
+    rest=${trimmed#"$first"}
+    rest=${rest#"${rest%%[![:space:]]*}"}
+    rest=${rest%"${rest##*[![:space:]]}"}
+    printf '%s\n' "$rest"
+    return 0
+  done < "$file"
+  return 1
+}
+
+# --- App-source refresh at spawn (config/app-checkouts) ----------------------
+# A worker reads its project's APP SOURCE - a checkout outside this home, e.g. the
+# deployed application a QA project exercises - READ-ONLY through an absolute path,
+# and the project-write boundary correctly stops the worker from pulling that
+# checkout itself. So freshness has to come from a step that runs as the captain,
+# at spawn time. The scheduled recon dispatcher already does this for scheduled
+# work; doing it here means both dispatch paths hand a worker fresh app source.
+#
+# FAIL-OPEN throughout: every problem warns and the spawn continues, because app
+# source one commit stale is a far smaller problem than a refused spawn. The pull
+# is --ff-only, so it can only advance a checkout: it never merges, rebases,
+# stashes, or discards, and it aborts on divergence or local changes.
+
+# True when <path> IS <boundary> or lives inside it, both compared in resolved
+# form. A boundary that does not exist contains nothing.
+path_within_dir() {  # <boundary> <resolved-path>
+  local boundary_real
+  boundary_real=$(cd "$1" 2>/dev/null && pwd -P) || return 1
+  [ "$2" = "$boundary_real" ] || path_is_ancestor_of "$boundary_real" "$2"
+}
+
+case "${FM_APP_PULL_TIMEOUT:-45}" in
+  ''|*[!0-9]*|0)
+    echo "warning: FM_APP_PULL_TIMEOUT must be a positive whole number of seconds; ignoring '${FM_APP_PULL_TIMEOUT:-}' and using 45" >&2
+    FM_APP_PULL_TIMEOUT=45
+    ;;
+  *) FM_APP_PULL_TIMEOUT=${FM_APP_PULL_TIMEOUT:-45} ;;
+esac
+
+# A bounded ff-pull. An unreachable remote, a dead network, or a hung proxy would
+# otherwise block the spawn forever, which defeats the fail-open design far worse
+# than a stale checkout does: the spawn never happens at all. Exit 124 is the
+# timeout and 125 means no bounding tool existed, so an unbounded pull is never
+# the fallback and the two causes stay distinguishable to whoever reads the
+# warning.
+#
+# The perl branch is the PRIMARY bounding path here, not an exotic fallback:
+# stock macOS ships neither timeout nor gtimeout. So it is hardened past the
+# repo's existing run_timed idiom (bin/fm-fleet-snapshot.sh, bin/fm-bearings-
+# snapshot.sh) rather than copied from it - do not "fix" this copy back toward
+# that one. `or exit 127` stops an unresolvable git from falling through into the
+# parent's alarm/waitpid code, and a signal death maps to 128+signal instead of
+# `$? >> 8`'s 0, because a git killed by SIGKILL or SIGPIPE reported as a
+# successful pull is exactly the silently-wrong-config class this change exists
+# to eliminate.
+app_pull_bounded() {  # <checkout>
+  if command -v timeout >/dev/null 2>&1; then
+    GIT_TERMINAL_PROMPT=0 timeout "$FM_APP_PULL_TIMEOUT" git -C "$1" pull --ff-only --quiet 2>&1
+  elif command -v gtimeout >/dev/null 2>&1; then
+    GIT_TERMINAL_PROMPT=0 gtimeout "$FM_APP_PULL_TIMEOUT" git -C "$1" pull --ff-only --quiet 2>&1
+  elif command -v perl >/dev/null 2>&1; then
+    GIT_TERMINAL_PROMPT=0 perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV or exit 127 } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; my $st = $?; exit(($st & 127) ? 128 + ($st & 127) : ($st >> 8))' \
+      "$FM_APP_PULL_TIMEOUT" git -C "$1" pull --ff-only --quiet 2>&1
+  else
+    return 125
+  fi
+}
+
+spawn_app_checkout_pull() {  # <project-key>
+  if [ "${FM_NO_CHECKOUT_PULL:-0}" = 1 ]; then
+    return 0
+  fi
+  local key=$1 fields checkout checkout_rest checkout_real hash lock err pull_status
+  fields=$(project_config_fields "$CONFIG/app-checkouts" "$key") || return 0
+  checkout=${fields%%[[:space:]]*}
+  if [ -z "$checkout" ]; then
+    echo "warning: config/app-checkouts names $key with no checkout path (skipping app-source refresh)" >&2
+    return 0
+  fi
+  # The format is whitespace-separated, so a path containing whitespace arrives
+  # here already truncated at its first space. Say that, rather than letting the
+  # truncated head be reported as a path that does not exist - a real config
+  # misdiagnosed as a typo is the harder bug to find.
+  checkout_rest=${fields#"$checkout"}
+  checkout_rest=${checkout_rest#"${checkout_rest%%[![:space:]]*}"}
+  if [ -n "$checkout_rest" ]; then
+    echo "warning: config/app-checkouts path for $key has trailing text after '$checkout': the format is whitespace-separated, so a checkout path cannot contain whitespace (skipping app-source refresh)" >&2
+    return 0
+  fi
+  # A relative path would resolve against whatever cwd fm-spawn was called from,
+  # so it can silently name a different directory on every spawn.
+  case "$checkout" in
+    /*) ;;
+    *)
+      echo "warning: config/app-checkouts path for $key is not absolute: $checkout (skipping app-source refresh)" >&2
+      return 0
+      ;;
+  esac
+  if ! checkout_real=$(cd "$checkout" 2>/dev/null && pwd -P); then
+    echo "warning: config/app-checkouts path for $key does not exist: $checkout (skipping app-source refresh)" >&2
+    return 0
+  fi
+  # Never a checkout firstmate itself owns; a hand-maintained map makes that
+  # mistake easy to write and invisible afterwards. The boundary already exists
+  # elsewhere in the system: fast-forwarding the firstmate repo belongs to the
+  # self-update path, and refreshing this home's project clones belongs to
+  # fm-fleet-sync.sh (AGENTS.md rule 1). Neither belongs to a spawn - a spawn's
+  # app-source pull is for genuine external app source only. Naming a boundary
+  # directly is refused exactly like naming something inside it.
+  if path_within_dir "$PROJECTS" "$checkout_real"; then
+    echo "warning: config/app-checkouts path for $key is a project clone in this home: $checkout (refusing to pull it; fm-fleet-sync.sh owns project clones)" >&2
+    return 0
+  fi
+  if path_within_dir "$FM_HOME" "$checkout_real" || path_within_dir "$FM_ROOT" "$checkout_real"; then
+    echo "warning: config/app-checkouts path for $key is inside this firstmate home or repo: $checkout (refusing to pull it; the self-update path owns the firstmate repo and a spawn refreshes external app source only)" >&2
+    return 0
+  fi
+  if ! git -C "$checkout_real" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "warning: config/app-checkouts path for $key is not a git checkout: $checkout (skipping app-source refresh)" >&2
+    return 0
+  fi
+  # The same lock NAME the scheduled recon dispatcher takes, so the two paths never
+  # double-pull one checkout. The hash has to be computed the way it computes it -
+  # `echo "$checkout" | shasum`, so WITH the trailing newline in the hashed input,
+  # over the raw configured path rather than its resolved form - or the two lock
+  # names simply differ and the interlock silently protects nothing.
+  hash=$(printf '%s\n' "$checkout" | shasum 2>/dev/null | cut -c1-12) || hash=
+  lock="/tmp/qa-recon-checkout-${hash:-$key}.lock"
+  if mkdir "$lock" 2>/dev/null; then
+    # GIT_TERMINAL_PROMPT=0 so a checkout whose remote wants interactive
+    # credentials fails fast instead of wedging the spawn on a prompt, and the
+    # bound above so a remote that stalls without prompting cannot either.
+    pull_status=0
+    err=$(app_pull_bounded "$checkout_real") || pull_status=$?
+    if [ "$pull_status" = 124 ]; then
+      echo "warning: app-source ff-pull timed out after ${FM_APP_PULL_TIMEOUT}s for $checkout (spawn continues)" >&2
+    elif [ "$pull_status" = 125 ]; then
+      echo "warning: no bounding tool (timeout, gtimeout, or perl) available, so the app-source refresh for $checkout was skipped rather than run unbounded (spawn continues)" >&2
+    elif [ "$pull_status" != 0 ]; then
+      echo "warning: app-source ff-pull failed for $checkout (spawn continues): $(first_line "$err")" >&2
+    fi
+    rmdir "$lock" 2>/dev/null || true
+  else
+    # Not reaped: removing a lock this process does not own is exactly the race
+    # the lock prevents. The path is named so a leftover one is diagnosable.
+    echo "info: app-source refresh lock held for $checkout; skipping pull ($lock)" >&2
+  fi
+  return 0
+}
+
+# --- Per-project worker environment (config/project-env) ---------------------
+# Optional per-project environment, parsed HERE - before a window, worktree, or
+# task record exists - so a malformed entry is a clean refusal, exactly like a bad
+# config/spawn-env-allow name. It has to refuse rather than skip: an entry whose
+# NAME is not a valid environment variable name would be handed to
+# bin/fm-env-clean.sh, which parses leading NAME=VALUE arguments the way `env`
+# does and would therefore take the malformed entry as the COMMAND - so the spawn
+# would report success and then die on the launch line inside the pane. Only the
+# spawned project's own line is validated; another project's bad line is that
+# project's spawn to refuse.
+#
+# DELIVERY happens at the injection seam below, as SPAWN_ENV_INJECT entries, never
+# as an `export` typed into the pane - a pane export does not cross the
+# clean-environment boundary (docs/worker-environment.md).
+#
+# Skipped for a secondmate spawn: a secondmate is a firstmate home, not a project,
+# and its own crewmate spawns consult its own home's config.
+PROJECT_ENV_INJECT=()
+if [ "$KIND" != secondmate ] && project_env_fields=$(project_config_fields "$CONFIG/project-env" "$PROJ_NAME"); then
+  # read -a, not an unquoted expansion: the format is whitespace-separated, but a
+  # value holding a glob character must not be expanded against the filesystem.
+  project_env_entries=()
+  read -r -a project_env_entries <<< "$project_env_fields"
+  for env_entry in "${project_env_entries[@]+"${project_env_entries[@]}"}"; do
+    case "$env_entry" in
+      *=*) ;;
+      *)
+        echo "error: config/project-env: $PROJ_NAME: '$env_entry' is not a NAME=VALUE assignment" >&2
+        exit 1
+        ;;
+    esac
+    env_name=${env_entry%%=*}
+    case "$env_name" in
+      ''|[!A-Za-z_]*|*[!A-Za-z0-9_]*)
+        echo "error: config/project-env: $PROJ_NAME: '$env_name' is not a valid environment variable name (letters, digits, underscore)" >&2
+        exit 1
+        ;;
+    esac
+    PROJECT_ENV_INJECT+=("$env_entry")
+  done
+fi
+
+# After the project-env validation above, never before it: a spawn about to be
+# refused for a malformed entry must not first have mutated an external checkout.
+# Nothing in the pull depends on those entries.
+[ "$KIND" = secondmate ] || spawn_app_checkout_pull "$PROJ_NAME"
+
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
 # Every backend's own current-path read (tmux's pane_current_path, herdr's
@@ -1344,7 +1582,7 @@ if [ "$KIND" = secondmate ]; then
   YOLO=off
   SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
 else
-  PROJ_NAME=$(basename "$PROJ_ABS")
+  # PROJ_NAME was resolved with the per-project config lookups above.
   read -r MODE YOLO <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
 EOF
@@ -1418,14 +1656,18 @@ if [ "$KIND" = secondmate ]; then
 fi
 # ---- Per-project / per-task environment injection seam ----------------------
 # Append "NAME=VALUE" entries to SPAWN_ENV_INJECT here to hand them to the worker
-# process. This is the named passthrough through the clean-environment boundary,
-# and it is the seam task fmpatch-spawn-env-a1 builds on for config/project-env.
+# process. This is the named passthrough through the clean-environment boundary.
 #
 # Deliver it HERE, not by sending `export NAME=VALUE` into the pane: the pane
 # shell's exports do not cross bin/fm-env-clean.sh's env -i, so a pane export
 # would silently never reach the agent - the mysterious-mid-task-failure shape
 # this boundary is specifically meant not to create.
+#
+# config/project-env arrives through this seam, from the entries validated far
+# above, before any window or worktree existed. Empty for a secondmate spawn and
+# for a project with no line in that file.
 # -----------------------------------------------------------------------------
+SPAWN_ENV_INJECT+=("${PROJECT_ENV_INJECT[@]+"${PROJECT_ENV_INJECT[@]}"}")
 
 # Wrap the whole launch in the clean-environment runner. It executes IN the pane,
 # so PATH, TERM, and the multiplexer's own ids stay pane-authoritative and the

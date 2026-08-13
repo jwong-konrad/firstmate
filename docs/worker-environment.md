@@ -3,7 +3,7 @@
 How much of the captain's environment a spawned worker inherits, why it is now deny-by-default, and what this control does *not* cover.
 
 `bin/fm-env-clean.sh`'s header and `--help` own the exact mechanics and the built-in allowlist.
-[`configuration.md`](configuration.md) owns the `config/spawn-env-allow` schema.
+[`configuration.md`](configuration.md) owns the `config/spawn-env-allow` and `config/project-env` schemas.
 This file is the incident record, the verification evidence, and the honest statement of residual risk.
 
 ## The incident, 2026-07-31
@@ -66,7 +66,8 @@ There are two ways in, and they are deliberately different sizes:
 | Need | Mechanism | Scope |
 | --- | --- | --- |
 | A non-secret name this whole home should keep | `config/spawn-env-allow` | every worker this home spawns |
-| A value for one project or one task | `SPAWN_ENV_INJECT` in `bin/fm-spawn.sh` | that spawn only |
+| A value for one project | `config/project-env`, delivered through `SPAWN_ENV_INJECT` | that project's spawns only |
+| A value for one task | `SPAWN_ENV_INJECT` in `bin/fm-spawn.sh` | that spawn only |
 
 `config/spawn-env-allow` takes exact names only.
 Wildcards are refused, because a wildcard is a blanket passthrough wearing an allowlist's clothes.
@@ -76,13 +77,18 @@ Both refusals happen at spawn time, before a window, worktree, or task record ex
 `config/spawn-env-allow` is deliberately **not** inherited into secondmate homes, unlike `config/crew-harness` and the rest of `FM_INHERITABLE_CONFIG`.
 Widening an environment boundary should be a per-home act the captain performs deliberately, not something that propagates as a side effect of a sync.
 
-### For per-project environment (task `fmpatch-spawn-env-a1`)
+### Per-project environment (`config/project-env`), landed 2026-08-13
 
-Per-project environment from `config/project-env` belongs in `SPAWN_ENV_INJECT`, at the marked injection seam in `bin/fm-spawn.sh`: append `"NAME=VALUE"` entries and they are passed to the wrapper as explicit assignments.
+`config/project-env` is read at spawn and delivered through `SPAWN_ENV_INJECT`, at the marked injection seam in `bin/fm-spawn.sh`.
+[`configuration.md`](configuration.md) owns its schema, its refusal behavior, and why it is not inherited into secondmate homes.
 
-It must **not** be delivered by sending `export NAME=VALUE` into the pane, which is what the draft patch at `projects/claude-qa/scripts/firstmate-patches/0002-fm-spawn-project-env-injection.patch` does.
-A pane export does not cross `env -i`, so it would silently never reach the agent - exactly the mysterious-mid-task-failure shape this boundary exists to avoid.
-The seam is a few lines above where that patch currently inserts.
+The delivery mechanism is the load-bearing part, and it is worth recording why the obvious implementation is wrong.
+A draft patch (`projects/claude-qa/scripts/firstmate-patches/0002-fm-spawn-project-env-injection.patch`, written before this boundary existed) delivered it by sending `export NAME=VALUE` into the pane, alongside the `GOTMPDIR` export that is still there.
+A pane export does not cross `env -i`, so that would have set the variable in the pane and silently never reached the agent - exactly the mysterious-mid-task-failure shape this boundary exists to avoid, and indistinguishable from working code on inspection.
+The `GOTMPDIR` pane export next to the seam is not a counterexample: the agent gets `GOTMPDIR` from `SPAWN_ENV_INJECT`, and the export exists only so a command the captain later types in that pane shares the task's temp root.
+
+`tests/fm-spawn-env-allowlist.test.sh` pins the mechanism, not just the outcome: it asserts the variable is present in the launched agent's own dumped environment, and separately asserts the launch line does **not** carry it as a pane `export`.
+Verified this way rather than by reading the code, because reading the code is what makes a pane export look correct.
 
 ## Verification, 2026-08-12
 
@@ -129,6 +135,37 @@ $ bin/fm-env-clean.sh printenv | wc -l      # after: what the wrapper hands the 
 
 That pair was measured in a worker pane with no multiplexer ids set, so the newly allowlisted `TMUX`/`HERDR_*`/`ZELLIJ*`/`CMUX_*` group adds nothing to this particular count; in a pane on the captain's herdr fleet the `after` figure is higher by however many of those ids are set there.
 The `gh auth status`, `gh-axi repo view`, `git ls-remote` over the SSH remote, and `git credential fill` checks quoted above were re-run under the wrapper on the same date and still produce that output.
+
+## Verification, 2026-08-13: per-project environment
+
+Run on macOS 25.6.0 (`darwin`) against a fixture home whose `config/project-env` held one line, `polaris      PW_MCP_AUTH_APP=polaris`, with a fixture project clone named `polaris`.
+The fixture directory is abbreviated below as `<d>` and this repo as `<repo>`; nothing else is edited.
+
+The launch line `fm-spawn` composed carries the value as an explicit assignment to the wrapper, next to `GOTMPDIR`:
+
+```
+$ cat launch.log
+'<repo>/bin/fm-env-clean.sh' --allow-file '<d>/home/config/spawn-env-allow' 'GOTMPDIR=/tmp/fm-demo-x1/gotmp' 'PW_MCP_AUTH_APP=polaris' FM_MANAGED=1 CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions "$(cat '<d>/home/data/demo-x1/brief.md')"
+```
+
+Running that exact line the way the pane's login shell would, in a shell also carrying `LINEAR_API_KEY`, and dumping the launched process's own environment:
+
+```
+$ env LINEAR_API_KEY=leaked PATH=<fixture-bin>:$PATH bash -c "$(cat launch.log)"
+$ grep -E 'PW_MCP_AUTH_APP|LINEAR_API_KEY' agent-env.txt
+PW_MCP_AUTH_APP=polaris
+```
+
+The per-project value reached the agent process and the launching shell's secret did not, so widening the seam did not widen the boundary.
+And the value is not delivered as a pane export, which is the failure mode this replaced:
+
+```
+$ grep -c 'export PW_MCP_AUTH_APP' launch.log
+0
+```
+
+`PW_MCP_AUTH_APP` is also a useful case rather than an arbitrary one: it contains `AUTH`, so `config/spawn-env-allow` refuses it by name.
+The injection seam is the only path by which it can legitimately reach a worker, which is exactly the split the table above describes.
 
 ## Residual risks this does not close
 

@@ -248,10 +248,9 @@ test_allow_file_widens_by_exact_name() {
 
 test_injection_seam_reaches_the_agent() {
   local out
-  # The seam fm-spawn uses (and the one fmpatch-spawn-env-a1 builds on) is an
-  # explicit NAME=VALUE argument, not a pane export. Pin that it crosses the
-  # boundary and that a set-but-empty assignment keeps that exact shape, which is
-  # what the secondmate FM_*_OVERRIDE= prefixes rely on.
+  # The seam fm-spawn uses is an explicit NAME=VALUE argument, not a pane export.
+  # Pin that it crosses the boundary and that a set-but-empty assignment keeps that
+  # exact shape, which is what the secondmate FM_*_OVERRIDE= prefixes rely on.
   out=$("$ENV_CLEAN" PW_MCP_AUTH_APP=polaris FM_ROOT_OVERRIDE= FM_HOME=/tmp/home printenv)
   assert_contains "$out" 'PW_MCP_AUTH_APP=polaris' \
     "an explicit injection did not reach the launched process"
@@ -260,6 +259,176 @@ test_injection_seam_reaches_the_agent() {
   assert_contains "$out" 'FM_HOME=/tmp/home' \
     "the secondmate FM_HOME assignment did not reach the launched process"
   pass "explicit NAME=VALUE injections cross the boundary, including set-but-empty ones"
+}
+
+# --- per-project environment (config/project-env) ----------------------------
+#
+# Every other case in this file runs with no config/project-env at all, so the
+# absent-file state - the normal one - is covered throughout rather than here.
+
+# A minimal home that passes validate_firstmate_home_for_spawn, so the
+# secondmate-skip case can be asserted without the full secondmate lifecycle
+# fixture that tests/fm-secondmate-*.test.sh own.
+make_secondmate_home() {  # <dir> <id>
+  local dir=$1 id=$2
+  mkdir -p "$dir/bin" "$dir/data" "$dir/state"
+  printf '# firstmate\n' > "$dir/AGENTS.md"
+  printf '%s\n' "$id" > "$dir/.fm-secondmate-home"
+  printf 'charter for %s\n' "$id" > "$dir/data/charter.md"
+}
+
+test_project_env_reaches_the_agent() {
+  local rec id launch
+  id=env-project-env-x11
+  rec=$(make_env_case env-project-env "$id")
+  read_env_case "$rec"
+  # Keyed by the projects/<name> clone basename, which make_env_case names
+  # "project". PW_MCP_AUTH_APP is the motivating real entry, and it is
+  # credential-shaped: config/spawn-env-allow would refuse it by name, so the
+  # injection seam is the only path by which it can legitimately reach a worker.
+  printf '# per-project worker environment\nproject      PW_MCP_AUTH_APP=polaris FM_TEST_PROJECT_ENV=on\n' \
+    > "$HOME_DIR/config/project-env"
+
+  run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" >/dev/null 2>&1
+  launch=$(cat "$LAUNCH_LOG")
+  run_captured_launch "$launch" "$FAKEBIN_DIR"
+  assert_present "$AGENT_ENV" "the config/project-env launch did not start the agent at all"
+  assert_grep 'PW_MCP_AUTH_APP=polaris' "$AGENT_ENV" \
+    "config/project-env did not reach the agent process"
+  assert_grep 'FM_TEST_PROJECT_ENV=on' "$AGENT_ENV" \
+    "the second config/project-env entry on the line did not reach the agent process"
+  # The mechanism matters as much as the result. Delivering this as a pane
+  # `export` would satisfy an inspection of fm-spawn and still never reach the
+  # agent, because a pane export does not cross env -i.
+  assert_not_contains "$launch" 'export PW_MCP_AUTH_APP' \
+    "project-env was typed into the pane as an export instead of injected at the seam"
+  pass "config/project-env reaches the agent process through the injection seam"
+}
+
+test_project_env_ignores_other_projects() {
+  local rec id out status launch
+  id=env-project-env-other-x12
+  rec=$(make_env_case env-project-env-other "$id")
+  read_env_case "$rec"
+  printf 'someotherproject PW_MCP_AUTH_APP=polaris\n' > "$HOME_DIR/config/project-env"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "a config/project-env with no line for this project should spawn"
+  assert_not_contains "$out" 'warning' "an unrelated project-env line produced a warning"
+  launch=$(cat "$LAUNCH_LOG")
+  run_captured_launch "$launch" "$FAKEBIN_DIR"
+  assert_no_grep 'PW_MCP_AUTH_APP' "$AGENT_ENV" \
+    "another project's config/project-env entry reached this project's worker"
+  pass "a project with no config/project-env line is unaffected"
+}
+
+test_project_env_skipped_for_secondmate() {
+  local rec id sub launch
+  id=env-project-env-sub-x13
+  rec=$(make_env_case env-project-env-sub "$id")
+  read_env_case "$rec"
+  sub="$CASE_DIR/subhome"
+  make_secondmate_home "$sub" "$id"
+  # Keyed by the secondmate home's own basename, which is the only key a
+  # secondmate spawn could ever match if the project-env path ran for it.
+  printf 'subhome PW_MCP_AUTH_APP=polaris\n' > "$HOME_DIR/config/project-env"
+
+  run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sub" claude --secondmate >/dev/null 2>&1
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" 'FM_HOME=' "the secondmate launch line was not captured"
+  assert_not_contains "$launch" 'PW_MCP_AUTH_APP' \
+    "config/project-env was injected into a secondmate spawn"
+  pass "a secondmate spawn is unaffected by config/project-env"
+}
+
+test_project_env_invalid_name_refuses_spawn() {
+  local rec id out status
+  id=env-project-env-badname-x14
+  rec=$(make_env_case env-project-env-badname "$id")
+  read_env_case "$rec"
+  # bin/fm-env-clean.sh parses leading NAME=VALUE arguments the way `env` does, so
+  # an entry that is not a valid assignment would be taken as the COMMAND: the
+  # spawn would report success and then die on the launch line inside the pane.
+  printf 'project 9NOPE=x\n' > "$HOME_DIR/config/project-env"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "an invalid config/project-env name should refuse the spawn"
+  assert_contains "$out" "not a valid environment variable name" \
+    "the refusal did not explain the invalid entry"
+  assert_contains "$out" "9NOPE" "the refusal did not name the offending entry"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "the spawn was refused but still wrote task metadata"
+  pass "an invalid config/project-env name refuses the spawn before anything is created"
+}
+
+test_project_env_non_assignment_refuses_spawn() {
+  local rec id out status
+  id=env-project-env-noassign-x15
+  rec=$(make_env_case env-project-env-noassign "$id")
+  read_env_case "$rec"
+  printf 'project JUSTAWORD\n' > "$HOME_DIR/config/project-env"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "a config/project-env entry that is not an assignment should refuse the spawn"
+  assert_contains "$out" "is not a NAME=VALUE assignment" \
+    "the refusal did not explain the malformed entry"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "the spawn was refused but still wrote task metadata"
+  pass "a config/project-env entry that is not a NAME=VALUE assignment refuses the spawn"
+}
+
+test_project_env_other_project_malformed_line_still_spawns() {
+  local rec id out status launch
+  id=env-project-env-otherbad-x16
+  rec=$(make_env_case env-project-env-otherbad "$id")
+  read_env_case "$rec"
+  # Only the spawned project's own line is validated. Another project's bad line
+  # is that project's spawn to refuse, not this one's.
+  printf 'someotherproject 9NOPE=x\nproject FM_TEST_PROJECT_ENV=on\n' \
+    > "$HOME_DIR/config/project-env"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "another project's malformed line should not refuse this spawn"
+  launch=$(cat "$LAUNCH_LOG")
+  run_captured_launch "$launch" "$FAKEBIN_DIR"
+  assert_grep 'FM_TEST_PROJECT_ENV=on' "$AGENT_ENV" \
+    "this project's valid entry did not reach the worker"
+  pass "a malformed config/project-env line for another project does not affect this spawn"
+}
+
+test_project_env_line_with_no_entries_spawns_cleanly() {
+  local rec id out status
+  id=env-project-env-bare-x18
+  rec=$(make_env_case env-project-env-bare "$id")
+  read_env_case "$rec"
+  # A line naming the project and nothing else declares no environment. It is not
+  # a malformed assignment, so it must not refuse - it must simply inject nothing.
+  printf 'project\n' > "$HOME_DIR/config/project-env"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "a config/project-env line with no entries should spawn"
+  assert_contains "$out" "spawned $id" "spawn did not report success"
+  pass "a config/project-env line declaring no entries injects nothing and spawns cleanly"
+}
+
+test_project_env_value_holding_a_glob_is_not_expanded() {
+  local rec id launch
+  id=env-project-env-glob-x17
+  rec=$(make_env_case env-project-env-glob "$id")
+  read_env_case "$rec"
+  printf 'project FM_TEST_PROJECT_GLOB=*\n' > "$HOME_DIR/config/project-env"
+
+  run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" >/dev/null 2>&1
+  launch=$(cat "$LAUNCH_LOG")
+  run_captured_launch "$launch" "$FAKEBIN_DIR"
+  assert_grep 'FM_TEST_PROJECT_GLOB=*' "$AGENT_ENV" \
+    "a config/project-env value holding a glob was expanded against the filesystem"
+  pass "a config/project-env value holding a glob character reaches the worker verbatim"
 }
 
 # --- refusals ----------------------------------------------------------------
@@ -396,6 +565,14 @@ test_launch_keeps_what_the_worker_needs
 test_unset_allowed_name_stays_unset
 test_allow_file_widens_by_exact_name
 test_injection_seam_reaches_the_agent
+test_project_env_reaches_the_agent
+test_project_env_ignores_other_projects
+test_project_env_skipped_for_secondmate
+test_project_env_invalid_name_refuses_spawn
+test_project_env_non_assignment_refuses_spawn
+test_project_env_other_project_malformed_line_still_spawns
+test_project_env_line_with_no_entries_spawns_cleanly
+test_project_env_value_holding_a_glob_is_not_expanded
 test_credential_shaped_allow_entry_refuses_spawn
 test_invalid_allow_entry_refuses_spawn
 test_allow_entry_holding_two_names_refuses_spawn
