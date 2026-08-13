@@ -28,6 +28,7 @@ It also requires `AGENTS.md`, `bin/`, and the effective state directory to exist
 For an in-scope primary checkout, it counts PROGRESSING tasks through `bin/fm-progress-lib.sh`, not the raw `state/*.meta` count.
 A deliberately parked fleet has runtime records but nothing a watcher could observe, and warning about it on every turn is noise the guard used to produce; a task that is progressing, unrecorded, or unreadable still counts, so a genuinely unsupervised live fleet alarms exactly as before.
 See [`docs/supervision-arming.md`](supervision-arming.md) for the predicate and its deliberately asymmetric fail-toward-alarming mapping.
+An otherwise silent parked fleet does alarm here once per `FM_PROGRESS_IDLE_TTL`, when its idle verdicts age out and count progressing again; that is the re-observation trigger, it self-quenches as soon as the resulting arm rewrites the records, and the same document explains why the alternative was monitoring staying down while a task resumed.
 If nothing is progressing, it exits silently.
 If work is progressing, it requires `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`.
 That is the same identity-matched live lock and fresh beacon check used by `bin/fm-watch-arm.sh`.

@@ -45,6 +45,9 @@ That last line is the load-bearing one.
 A freshly spawned task has no record, so it counts progressing and the turn-end guard alarms until supervision is armed.
 `bin/fm-spawn.sh` therefore needs no change to stay safe, which matters while it is a multi-task edit-contention point.
 
+This mapping is necessary but not sufficient for an idle verdict.
+A reading may *conclude* idle only from evidence that was live when it was read, and the verdict it produces is believed only while that observation is itself fresh - so an idle-mapped token from a stale source, or a stale idle record, counts progressing anyway ("The verdict model, corrected" below).
+
 ## Why the verdict is cached
 
 Reconciliation is expensive: `fm-crew-state.sh` may make a bounded `no-mistakes` call per task, up to `FM_CREW_STATE_NM_TIMEOUT` (10s default) each.
@@ -55,12 +58,101 @@ So reconciliation and consumption are split.
 The expensive reconcile runs where a delay is already acceptable and already happening - the arm decision, and the watcher's wedge state-change check - and writes the record.
 The hooks only read records, which is pure filesystem work.
 
-A record is valid only while the evidence behind it is unchanged.
-It carries the `size:mtime` signature of the task's `state/<id>.meta`, `state/<id>.status`, and `state/<id>.turn-ended`, plus a long absolute expiry.
-Any of those changing invalidates the record, so a parked worker that writes a status line, ends a turn, or has its metadata rewritten immediately reverts to counting progressing.
+The record carries the `size:mtime` signature of the task's `state/<id>.meta`, `state/<id>.status`, and `state/<id>.turn-ended`, plus an expiry.
+Any of those changing retires the record, so a parked worker that writes a status line, ends a turn, or has its metadata rewritten immediately reverts to counting progressing.
 `bin/fm-send.sh` additionally invalidates the record for a steered task, because a steer is firstmate deliberately restarting work and must not wait for the worker's first turn-end marker to be believed.
+`bin/fm-teardown.sh` invalidates it too, in its main-task cleanup, so a record cannot outlive the task it describes.
 
-Invalidation is one-directional by design: it can only move a task from idle to progressing, never the reverse.
+**This section originally claimed the signature made the record valid, and that every real resumption path invalidated it.
+That claim was wrong, and the next section replaces it.**
+Signature invalidation is real but incomplete, and the model has been rebuilt so nothing depends on its completeness.
+
+## The verdict model, corrected
+
+Written 2026-08-12 for `progress-record-staleness-p8`, after the defect below was found by the worker that built the record above, against this document.
+
+### What was broken
+
+The model was *a verdict is valid until something invalidates it*.
+A model of that shape is only as good as its invalidation set is complete, and this one's could never be complete.
+
+A task moving from idle into an active validation run changes none of the three signature files.
+The sparse-status contract means a validating worker writes no status line, its metadata does not change, and its turn-end marker need not fire for as long as the pipeline runs.
+So there was no invalidation trigger at all on the idle-to-progressing transition, and a stale idle verdict survived exactly at the moment it must not: `bin/fm-crew-state.sh` reported `working - source: run-step - validating (running)` while `bin/fm-watch-arm.sh` declined with `nothing to watch ... none progressing`, and monitoring stayed down while a pipeline ran unwatched.
+
+Adding a trigger does not fix a model of that shape, because firstmate is not the only cause of resumption.
+A worker can resume itself off a gate, and a captain may steer one directly in its own window, which `AGENTS.md` section 1 rule 4 explicitly sanctions.
+Neither leaves a firstmate-side event to hang a trigger on.
+The turn boundary is not a usable trigger either: a worker inside a long backgrounded validation call has no turn boundary for the whole call, which is precisely the window where watching matters, and a steer asking one such worker to refresh took about ten minutes to be processed for the same reason.
+
+The same defect showed up in three more shapes, and they are one defect seen from different angles.
+The two consumers disagreed in the same minute, because a cache miss meant `progressing` to the turn-end guard and *reconcile, and believe whatever comes back* to the arm gate - opposite answers from identical inputs.
+The fallback source was stale too and had no age check: with the authoritative run-step reading unavailable, the reconcile fell back to a status log whose newest line was hours old and returned a confident `parked`, which then fed the record, so every automated view agreed on the wrong answer and only reading the worker's own window found the truth.
+One task sat at a review gate for 1h5m while its status log still quoted a five-day-old note, so every view read "awaiting external" when it was awaiting firstmate.
+
+### What replaces it
+
+**A verdict is a dated observation, not a fact that holds until contradicted.**
+
+The rule follows from what an idle verdict can honestly claim.
+It never means "nothing is happening"; it means "no evidence of activity was found at time T".
+Every source is a proxy with a blind spot - a backgrounded validation call is invisible to a pane read and to a turn-end marker alike - so that claim decays with its own age.
+`progressing` needs no such treatment: it is the fail-safe direction, and holding it too long costs an armed watcher and nothing else.
+
+Three rules, all in `bin/fm-progress-lib.sh`.
+
+1. **Freshness.** An `idle` verdict is believed only while its own observation age is under `FM_PROGRESS_IDLE_TTL` (900s default).
+   Past that it reads as no record at all, which counts progressing.
+   Nothing has to fire for this to work, which is exactly why completeness is no longer required: the verdict stops being believed on its own.
+2. **Evidence.** An observation may *conclude* idle only from evidence that was live when it was read.
+   `bin/fm-crew-state.sh` reports its source: `run-step` and `pane` are live probes, but `status-log` is a stored artifact whose newest line can be arbitrarily old, and the status contract makes old normal.
+   A status-log reading older than the same horizon is demoted to indeterminate at observation time, and resolves the way every indeterminate reading resolves - idle only if the endpoint is provably gone, otherwise progressing.
+   Bounding only the record would not have covered this: re-observing re-reads the same log and reproduces the same wrong verdict, which is why a fix that merely refreshes the record from crew-state inherits the bug.
+3. **One judge.** Every consumer decides on `fm_progress_verdict_cached`.
+   Consumers differ only in whether they may *create* an observation - the arm gate and the watcher may, the hooks may not - never in how they judge one.
+   The arm gate reconciles on a miss, writes the record, and then comes back through the same judge rather than acting on the raw reconcile result, so it can only decline on records the turn-end guard would also read as idle.
+
+Signature invalidation and the steer and teardown invalidations all survive, demoted from correctness mechanism to latency optimization.
+They shorten the window in the cases they cover, and nothing now depends on them covering every case.
+
+### Why the transition cannot be missed
+
+Under the old model the idle-to-progressing transition had to be *detected*.
+Under this one it does not have to be detected at all, only outlived.
+The longest a resumed task can stay invisible is the idle horizon, and it is invisible for less than that whenever any of the optimizations happens to fire.
+
+### What it costs, deliberately
+
+A genuinely parked fleet now re-observes once per horizon instead of staying quiet indefinitely.
+The turn-end guard counts the expired verdict progressing, firstmate arms, the gate pays one reconcile per task, confirms the fleet is still parked, rewrites the records, and declines again.
+The loop self-quenches after one arm attempt and starts no watcher cycle, so it does not reintroduce the 136 stale-pane wakes conditional arming removed; the cost is one short forced continuation per horizon, and only while firstmate is actively taking turns with no live watcher.
+That is the price of the guarantee above, and `FM_PROGRESS_IDLE_TTL` is the dial.
+
+A task whose only current-state evidence is an old status log now counts progressing rather than idle, so a fleet of those arms where it used to decline.
+That is the evidence rule working as intended: firstmate cannot verify such a task is quiet, and the watcher's awaiting-firstmate absorb already handles the resulting panes on its bounded cadence rather than escalating them.
+
+These two costs are not the same shape, and the second must not be read as the first.
+The parked-fleet re-observation above is PERIODIC: the reconcile finds live `parked` evidence, writes a fresh idle record, and the loop quenches until the next horizon.
+The status-log-sourced class is PERMANENT: a task parked on `needs-decision:` with no attributed no-mistakes run reaches crew-state's status-log fallback, and by the sparse-status contract its last line is old by construction, so every reconcile demotes it again and the gate arms a full watcher cycle indefinitely rather than once per horizon.
+Re-observation cannot quench it, because re-observing re-reads the same old line.
+
+The same permanence applies to a second, narrower class of status-log readings, and it is a labelling gap rather than a stale one.
+The two `emit "done" status-log ... run still monitoring PR` sites in `bin/fm-crew-state.sh`'s run-step authoritative path - the ones reached when `RUN_STATE=working` and `log_reports_ci_ready` both hold - emit `done` with the `status-log` source label from readings that are actually live and run-step-corroborated, the checks-green PR awaiting review.
+The evidence rule sees only the label, so it demotes those readings to indeterminate once the checks-green status line ages past `FM_PROGRESS_IDLE_TTL`, which it does within one horizon because the worker appends nothing while the PR sits.
+Like the class above and unlike the parked-fleet cost, this does not self-quench: re-observation reproduces `progressing` every time.
+
+It is accepted here because it is bounded from the other side.
+`bin/fm-pr-check.sh` arms a merge poll (`state/<id>.check.sh`) for exactly this class, and `fm_progress_has_pollable_work` already forces the gate to arm while such a poll exists, so for the whole life of the poll the demotion changes no decision.
+The incremental exposure is only the window before that poll is armed and the window after it is removed but before cleanup.
+
+The fix belongs at the source label, not at the rule: `status-log` is doing duty as both a provenance and a fallback marker.
+Changing it is a documented output-contract change with three consumers - two tests in `tests/fm-crew-state.test.sh` pin the current label, and `bin/fm-watch.sh` uses the `token|source` string printed by its `crew_reconciled_state` as the wedge-escalation comparand - so it was filed as backlog item `crewstate-source-provenance-taxonomy-s2` rather than made inside a task commissioned to fix a different defect.
+
+### What it does not cover
+
+`monitor-parked-tasks-p7` is untouched.
+This fix makes a task that only *looks* parked - because its evidence went stale - visible again, but a fleet that is genuinely parked, awaiting the captain, or failed still declines to arm and still generates no wake.
+That gap is p7's, and it needs a different answer than a freshness bound.
 
 ### The arm gate is time-bounded
 
@@ -71,7 +163,7 @@ The gate refuses to start a reconcile unless the remaining budget can absorb a w
 The ceiling has to bound the reconcile itself rather than the `no-mistakes` call inside it: `fm-crew-state.sh` makes up to two separately capped `no-mistakes` calls per run, and the endpoint probe sits outside both, so lowering `FM_CREW_STATE_NM_TIMEOUT` alone would have capped a fraction of the work and left the real worst case at roughly twice the ceiling.
 With the reconcile itself bounded, the honest worst case for the whole gate is `FM_ARM_GATE_BUDGET_SECS` plus the fraction of a second it takes to reap a killed child: 8s by default, a real 4s under the adapters' window rather than an average that a slow reconcile could blow through.
 A reconcile killed at the ceiling leaves its task unevaluated and writes no verdict record, because the record is written by the parent only for a child it saw finish.
-Every task left unevaluated, whether because the remaining budget could not absorb another reconcile or because the one it started was killed, counts progressing.
+Every task left unevaluated counts progressing, whether because the remaining budget could not absorb another reconcile, because the one it started was killed, or because the record that reconcile wrote is one the shared judge will not stand behind.
 The safety property is one-directional, the same way record invalidation is: the gate may decline only when it actually evaluated every task and found none progressing, so a spent budget always arms.
 A budgeted arm says so in its printed line, so an operator can tell it apart from an arm that saw real progress, and `--force` still bypasses the gate entirely.
 

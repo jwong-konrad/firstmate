@@ -209,11 +209,15 @@ if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARG
 fi
 
 # Steering a task is firstmate deliberately restarting work on it, so drop any
-# cached "idle" progressing verdict now rather than waiting for the worker's
-# first turn-end marker to invalidate it (bin/fm-progress-lib.sh). Invalidation
-# only ever moves a task from idle back to progressing, so the guards stay on the
-# alarming side. Done BEFORE delivery: a steer that then fails to land must not
-# leave a stale idle verdict behind.
+# cached "idle" verdict now rather than waiting out its freshness horizon
+# (bin/fm-progress-lib.sh). This only ever moves a task from idle back to
+# progressing, so the guards stay on the alarming side. Done BEFORE delivery: a
+# steer that then fails to land must not leave a stale idle verdict behind.
+#
+# A latency optimization, not a correctness mechanism. No firstmate-side trigger
+# can catch every resumption - a worker can resume itself, and the captain may
+# steer one directly in its own window - so the horizon, not this call, is what
+# guarantees a resumed task becomes visible again.
 if [ -n "$TARGET_META" ]; then
   fm_progress_record_invalidate "$STATE" "$(fm_send_id_from_meta "$TARGET_META")"
 fi

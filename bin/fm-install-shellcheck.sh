@@ -14,7 +14,10 @@ DESTINATION=${1:?usage: fm-install-shellcheck.sh <destination-directory>}
 TMP=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fm-shellcheck.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 
-curl -fsSL "$URL" -o "$TMP/$ARCHIVE"
+# The release CDN answers 503 often enough to fail a run on its own, so retry
+# transient HTTP and connection errors instead of failing the whole job.
+# The checksum below is what actually makes the download trustworthy.
+curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused "$URL" -o "$TMP/$ARCHIVE"
 ACTUAL_SHA256=$(sha256sum "$TMP/$ARCHIVE" | awk '{print $1}')
 [ "$ACTUAL_SHA256" = "$SHA256" ] || {
   printf 'fm-install-shellcheck.sh: checksum mismatch for %s\n' "$ARCHIVE" >&2
