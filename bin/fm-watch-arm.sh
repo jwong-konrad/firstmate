@@ -59,6 +59,12 @@
 # gate for a deliberate arm (a flag, not an env prefix, because
 # bin/fm-arm-pretool-check.sh denies an env-prefixed arm as a wrapper).
 #
+# This gate may CREATE an observation where the guards may not, but it does not
+# get its own opinion: every verdict it acts on comes back through
+# fm_progress_verdict_cached, the one judge all consumers share. So a decline is
+# always backed by records bin/fm-turnend-guard.sh would read the same way, and
+# the two cannot report opposite answers for the same task.
+#
 # The gate is TIME-BOUNDED. Each cache-miss reconcile shells bin/fm-crew-state.sh,
 # which allows up to FM_CREW_STATE_NM_TIMEOUT for its bounded no-mistakes call, so
 # a fleet of stale records could otherwise hold the arm past the readiness window
@@ -457,6 +463,18 @@ arm_gate_allows() {
         continue
       fi
       if ! arm_gate_reconcile "$id" "$ceiling"; then
+        unevaluated=$((unevaluated + 1))
+        continue
+      fi
+      # Judge the freshly written record through the SAME reader the guards use,
+      # never the raw reconcile result. That is what makes this gate and
+      # bin/fm-turnend-guard.sh structurally unable to disagree: the gate can
+      # only decline on records a guard would also read as idle, because they
+      # are literally the records it just wrote and the judging is one function
+      # (fm_progress_verdict_cached). A record that fails to write, or that the
+      # judge will not stand behind, leaves the task unevaluated - which counts
+      # progressing, so the gate arms.
+      if ! fm_progress_verdict_cached "$STATE" "$id"; then
         unevaluated=$((unevaluated + 1))
         continue
       fi

@@ -6,9 +6,10 @@
 # Three layers:
 #   MAPPING   the state-token -> verdict table, and its deliberate asymmetry
 #             (only a positively recognized idle state counts idle).
-#   RECORDS   durable per-task verdicts: written, invalidated by any change in
-#             the evidence they are bound to, expired by the absolute TTL, and
-#             absent-means-progressing.
+#   RECORDS   durable per-task verdicts as DATED OBSERVATIONS: an idle verdict
+#             believed only while fresh (and only from evidence that was live
+#             when read), progressing never aged into silence, retired early by
+#             changed evidence, and absent-means-progressing.
 #   ARM GATE  a real bin/fm-watch-arm.sh subprocess over a hermetic bin/ whose
 #             fm-watch.sh and fm-crew-state.sh are stubs, asserting that a fully
 #             parked fleet declines to arm and one progressing task does not.
@@ -25,6 +26,12 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-progress-arming)
 
+# The idle freshness horizon these tests age past. The fallback matters: against
+# a build that predates the horizon this file must still run and fail on its own
+# assertions - which is the regression it is here to catch - rather than dying on
+# an unbound variable.
+IDLE_TTL=${FM_PROGRESS_IDLE_TTL:-900}
+
 new_state() {  # <name>
   local state="$TMP_ROOT/$1/state"
   mkdir -p "$state"
@@ -36,6 +43,31 @@ seed_task() {  # <state> <id> [status-line]
   local state=$1 id=$2 line=${3:-}
   printf 'window=test:fm-%s\nkind=ship\n' "$id" > "$state/$id.meta"
   [ -z "$line" ] || printf '%s\n' "$line" > "$state/$id.status"
+}
+
+# Backdate a written record's observation timestamp without touching anything
+# else, so a test can age a verdict the way wall-clock time would. The record is
+# a single tab-separated line whose second field is the stamp; the signature
+# field is left exactly as written, which is the whole point - these tests are
+# about a verdict going stale while its evidence stays byte-identical.
+age_record() {  # <state> <id> <seconds-ago>
+  local state=$1 id=$2 secs=$3 path line version stamp rest
+  path=$(fm_progress_record_path "$state" "$id")
+  IFS= read -r line < "$path" || fail "no record to age for $id"
+  version=${line%%$'\t'*}; rest=${line#*$'\t'}
+  stamp=${rest%%$'\t'*}; rest=${rest#*$'\t'}
+  printf '%s\t%s\t%s\n' "$version" "$(( stamp - secs ))" "$rest" > "$path"
+}
+
+# Backdate a file's mtime, for the evidence-age half of the bound.
+backdate_file() {  # <path> <seconds-ago>
+  local path=$1 secs=$2 stamp
+  if [ "$(uname)" = Darwin ]; then
+    stamp=$(date -r "$(( $(date +%s) - secs ))" '+%Y%m%d%H%M.%S')
+  else
+    stamp=$(date -d "@$(( $(date +%s) - secs ))" '+%Y%m%d%H%M.%S')
+  fi
+  touch -t "$stamp" "$path"
 }
 
 # --- MAPPING ----------------------------------------------------------------
@@ -125,6 +157,65 @@ test_record_expires_on_absolute_ttl() {
   fm_progress_verdict_cached "$state" t1 \
     || fail "the same record inside the default TTL must still be valid"
   pass "fm_progress_verdict_cached: the absolute TTL backstop expires a record"
+}
+
+# THE REGRESSION. A task that moves from idle into an active validation run
+# changes NONE of the three signature files: the sparse-status contract means a
+# validating worker appends no status line, its metadata does not change, and its
+# turn-end marker need not fire for as long as the pipeline runs. Under the old
+# "valid until invalidated" model nothing invalidated the record, so the stale
+# idle verdict survived exactly when the task had started progressing and
+# monitoring stayed down while a pipeline ran unwatched.
+#
+# Nothing here touches the evidence, so this fails against a model that keys
+# validity on the evidence signature, and passes on one where an idle verdict is
+# a dated observation that stops being believed on its own.
+test_idle_verdict_expires_while_its_evidence_stays_identical() {
+  local state before after
+  state=$(new_state record-idle-horizon)
+  seed_task "$state" t1 'needs-decision: pick A or B'
+  fm_progress_record_write "$state" t1 idle parked 'parked at review'
+  before=$(fm_progress_signature "$state" t1)
+
+  fm_progress_verdict_cached "$state" t1 || fail "a fresh idle record must be believed"
+  [ "$FM_PROGRESS_VERDICT" = idle ] || fail "expected idle while fresh, got $FM_PROGRESS_VERDICT"
+
+  # The worker resumes into a backgrounded validation run: no status append, no
+  # metadata rewrite, no turn boundary for the length of the call.
+  age_record "$state" t1 $(( IDLE_TTL + 60 ))
+  after=$(fm_progress_signature "$state" t1)
+  [ "$before" = "$after" ] \
+    || fail "the test must not disturb the evidence; that is the whole point"
+
+  if fm_progress_verdict_cached "$state" t1; then
+    fail "an idle verdict past the freshness horizon must read as a cache miss, not as silence"
+  fi
+  [ "$FM_PROGRESS_VERDICT" = progressing ] \
+    || fail "an expired idle verdict must fall back to progressing, got $FM_PROGRESS_VERDICT"
+
+  fm_progress_count "$state"
+  [ "$FM_PROGRESS_PROGRESSING" -eq 1 ] \
+    || fail "a task whose idle verdict expired must count progressing to the guards"
+  pass "an idle verdict expires on its own horizon even when its evidence is byte-identical"
+}
+
+# The other half of the asymmetry: `progressing` is the fail-safe direction, so
+# it is not bound by the short horizon. Aging it must not flip a task to idle -
+# nothing may ever move a task from progressing to idle by the passage of time.
+test_progressing_verdict_is_not_bound_by_the_idle_horizon() {
+  local state
+  state=$(new_state record-progressing-horizon)
+  seed_task "$state" t1 'working: building'
+  fm_progress_record_write "$state" t1 progressing working 'validating (running)'
+  age_record "$state" t1 $(( IDLE_TTL + 60 ))
+  fm_progress_verdict_cached "$state" t1 \
+    || fail "a progressing verdict past the idle horizon must still be usable"
+  [ "$FM_PROGRESS_VERDICT" = progressing ] \
+    || fail "expected progressing, got $FM_PROGRESS_VERDICT"
+  fm_progress_count "$state"
+  [ "$FM_PROGRESS_PROGRESSING" -eq 1 ] \
+    || fail "an aged progressing verdict must still count progressing"
+  pass "the freshness horizon binds idle only; progressing is never aged into silence"
 }
 
 test_record_rejects_corrupt_content() {
@@ -222,6 +313,79 @@ SH
   [ "$FM_PROGRESS_VERDICT" = progressing ] \
     || fail "an unreadable crew-state verdict must resolve toward progressing"
   pass "fm_progress_reconcile: maps the reconciled state, persists it, and fails toward progressing"
+}
+
+# The age bound has to cover the FALLBACK SOURCE, not only the record. When the
+# authoritative run-step reading is unavailable, bin/fm-crew-state.sh falls back
+# to the status log, and an hours-old line there was observed producing a
+# confident `parked` for a task that was actually validating - a verdict that
+# then fed the record, so every automated view agreed on the wrong answer.
+# Refreshing the record from crew-state inherits that bug, because re-observing
+# re-reads the same log: the reading itself has to be rejected as evidence of
+# current state.
+test_reconcile_rejects_a_stale_status_log_reading() {
+  local state fakebin
+  state=$(new_state reconcile-stale-source)
+  fakebin="$TMP_ROOT/reconcile-stale-source/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_FAKE_CREW_STATE:-state: unknown · source: none · fake}"
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+  seed_task "$state" t1 'needs-decision: waiting on the captain'
+
+  # Fresh log: the reading rests on evidence that was current when read, so the
+  # declared wait is believed and the task is idle.
+  FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: parked · source: status-log · waiting on the captain' \
+    fm_progress_reconcile "$state" t1 >/dev/null
+  [ "$FM_PROGRESS_VERDICT" = idle ] \
+    || fail "a status-log reading backed by a recent line must still count idle"
+
+  # Same reading, but the newest status line is now hours old. That is no longer
+  # evidence of current state, so it must not be recorded as idle.
+  backdate_file "$state/t1.status" $(( IDLE_TTL + 3600 ))
+  FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: parked · source: status-log · waiting on the captain' \
+    fm_progress_reconcile "$state" t1 >/dev/null
+  [ "$FM_PROGRESS_VERDICT" = progressing ] \
+    || fail "an idle reading from a stale status log must resolve toward progressing, got $FM_PROGRESS_VERDICT"
+  case "$FM_PROGRESS_DETAIL" in
+    *'stale status-log evidence'*) ;;
+    *) fail "the demotion must say what it rejected, got: $FM_PROGRESS_DETAIL" ;;
+  esac
+
+  # The record written from that reading must agree, so a later cheap read
+  # cannot resurrect the verdict the reconcile refused to stand behind.
+  fm_progress_verdict_cached "$state" t1 \
+    || fail "the reconcile must still persist a usable record"
+  [ "$FM_PROGRESS_VERDICT" = progressing ] \
+    || fail "the persisted verdict must be progressing, got $FM_PROGRESS_VERDICT"
+  pass "fm_progress_reconcile: an idle reading resting on a stale status log is not believed"
+}
+
+# A live source is not aged out by the status log's age: the run-step reading was
+# made now, whatever the log says. Without this the bound would demote every
+# genuinely parked pipeline gate whose last status append happened to be old.
+test_reconcile_keeps_a_live_source_over_an_old_status_log() {
+  local state fakebin
+  state=$(new_state reconcile-live-source)
+  fakebin="$TMP_ROOT/reconcile-live-source/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_FAKE_CREW_STATE:-state: unknown · source: none · fake}"
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+  seed_task "$state" t1 'needs-decision: raised five days ago'
+  backdate_file "$state/t1.status" $(( IDLE_TTL + 3600 ))
+  FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review: 2 finding(s)' \
+    fm_progress_reconcile "$state" t1 >/dev/null
+  [ "$FM_PROGRESS_VERDICT" = idle ] \
+    || fail "a live run-step reading must not be aged out by an old status log"
+  pass "fm_progress_reconcile: the evidence bound applies to stored artifacts, not live probes"
 }
 
 # --- ARM GATE ---------------------------------------------------------------
@@ -475,16 +639,77 @@ test_arm_gate_declines_when_the_budget_is_ample() {
   pass "fm-watch-arm: with an ample budget every task is read and a fully idle fleet still declines"
 }
 
+# The two consumers of the shared verdict were observed returning OPPOSITE
+# answers for the same task in the same minute: the turn-end guard counted one
+# task progressing while the arm gate declined with "none progressing". They can
+# only diverge if they judge by different rules, so the gate is now required to
+# come back through fm_progress_verdict_cached - the guards' own judge - for
+# every verdict it acts on.
+#
+# The invariant is checkable without reproducing the race: after ANY decline, the
+# records the gate left behind must make the guards' own count agree with it.
+test_a_declined_arm_leaves_records_the_guards_read_the_same_way() {
+  local home state out
+  home=$(make_arm_home arm-agree); state="$home/state"
+  seed_task "$state" alpha 'needs-decision: pick A or B'
+  seed_task "$state" beta 'needs-decision: pick C or D'
+  # beta has no record, so the gate must reconcile it; alpha's is stale enough
+  # that the guards already count it progressing, so the gate must reconcile that
+  # one too rather than declining on a verdict the guards would not believe.
+  fm_progress_record_write "$state" alpha idle parked 'parked at review'
+  age_record "$state" alpha $(( IDLE_TTL + 60 ))
+  fm_progress_count "$state"
+  [ "$FM_PROGRESS_PROGRESSING" -eq 2 ] \
+    || fail "setup: the guards must start out counting both tasks progressing"
+
+  out=$(FM_ARM_GATE_BUDGET_SECS=60 \
+    FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review' run_arm "$home")
+  assert_contains "$out" "watcher: not armed - nothing to watch" \
+    "with an ample budget the gate must read both tasks and decline"
+
+  fm_progress_count "$state"
+  [ "$FM_PROGRESS_PROGRESSING" -eq 0 ] \
+    || fail "a declined arm left records the guards still read as $FM_PROGRESS_PROGRESSING progressing"
+  pass "fm-watch-arm: a decline is always backed by records the turn-end guard reads the same way"
+}
+
+# The converse direction of the same invariant, and the observed failure end to
+# end: a task resumed into a validation run while its stale record still said
+# idle+parked. The gate must not decline on that record - it must re-observe,
+# find the live run, and arm.
+test_arm_re_observes_a_task_whose_idle_verdict_went_stale() {
+  local home state out
+  home=$(make_arm_home arm-stale-idle); state="$home/state"
+  seed_task "$state" alpha 'needs-decision: pick A or B'
+  fm_progress_record_write "$state" alpha idle parked 'parked at review'
+  age_record "$state" alpha $(( IDLE_TTL + 60 ))
+  # The worker resumed with no status append, no metadata change, and no turn
+  # boundary, so the record's evidence signature is untouched - only its age
+  # changed. Current state says a pipeline is running.
+  out=$(FM_ARM_GATE_BUDGET_SECS=60 \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' run_arm "$home")
+  case "$out" in
+    *"not armed"*) fail "a stale idle verdict must be re-observed, not trusted: $out" ;;
+  esac
+  assert_contains "$out" "signal: stub-wake" \
+    "the arm must run its watcher cycle for a task that is genuinely validating"
+  pass "fm-watch-arm: a task that resumed behind an unchanged evidence signature still arms"
+}
+
 test_token_verdict_mapping
 test_record_absent_reads_progressing
 test_record_roundtrip_and_invalidation
 test_record_invalidated_by_changed_evidence
 test_record_expires_on_absolute_ttl
+test_idle_verdict_expires_while_its_evidence_stays_identical
+test_progressing_verdict_is_not_bound_by_the_idle_horizon
 test_record_rejects_corrupt_content
 test_count_parked_fleet_versus_live_fleet
 test_count_unrecorded_task_counts_progressing
 test_pollable_work_detected
 test_reconcile_maps_and_persists
+test_reconcile_rejects_a_stale_status_log_reading
+test_reconcile_keeps_a_live_source_over_an_old_status_log
 test_arm_declines_when_every_task_is_idle
 test_arm_declines_with_no_tasks_at_all
 test_arm_proceeds_with_one_progressing_task
@@ -497,3 +722,5 @@ test_arm_reconciles_on_a_cache_miss
 test_arm_gate_budget_exhaustion_arms_rather_than_declines
 test_arm_gate_kills_a_reconcile_that_outruns_the_ceiling
 test_arm_gate_declines_when_the_budget_is_ample
+test_a_declined_arm_leaves_records_the_guards_read_the_same_way
+test_arm_re_observes_a_task_whose_idle_verdict_went_stale
