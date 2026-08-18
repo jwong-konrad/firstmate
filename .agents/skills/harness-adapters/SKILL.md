@@ -112,6 +112,23 @@ The supported launch-profile flags below are verified locally; each row records 
 When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
 This preserves launch success instead of passing a known-bad value.
 
+## Spawn-time and dispatch hazards
+
+These hazards are learned operational facts about dispatch, not adapter capabilities.
+
+Concurrent validation pipelines, not model tier, exhaust the usage window.
+Each no-mistakes run spawns its own agents per step, so N concurrent runs cost roughly N times one run regardless of tier.
+Stagger validation *triggers* even when implementation dispatch is parallel, keeping to about two concurrent runs under limit pressure.
+On a fleet restart, resume only the one or two highest-leverage workers by what they unblock, and have the rest append a `paused:` event and wait, in one batched call.
+
+A dead agent releases its treehouse lease, so a later same-project spawn can be handed the same worktree slot while the old task metadata still records it.
+A `git reset --hard` by either worker then clobbers the other's branch.
+`bin/fm-spawn.sh` catches this in code: it compares the handed worktree against every in-flight task's recorded `worktree=` and refuses the spawn, naming the colliding task, rather than re-pooling the slot.
+On such a refusal, tear down the live occupant first so the slot is returned, then the stale-record task, and never hand-edit a recorded `worktree=`.
+
+A worker's launch environment is not the captain's: `bin/fm-spawn.sh` wraps every launch in `bin/fm-env-clean.sh`, which starts the agent deny-by-default, so forwarded credentials do not reach it.
+[`worker-environment.md`](../../../docs/worker-environment.md) owns that boundary's evidence and its residual risks.
+
 ## no-mistakes skill invocation
 
 Send the validation skill using the target harness's skill invocation form.

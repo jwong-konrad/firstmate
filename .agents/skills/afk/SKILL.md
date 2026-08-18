@@ -54,6 +54,9 @@ batched digest rather than per-wake injections.
 
 4. **Acknowledge** in `AGENTS.md` section 9 language: "Captain, away mode is active; I will batch routine updates and surface only decisions, failures, credentials, or review-ready work until you return."
 
+Away-mode entry with pending notifications is order-sensitive: drain the queue, arm supervision as tracked background work, then immediately start the daemon while the session lock is still held.
+"Arm supervision" here is the primary-harness supervision arm, never a separate `fm-watch.sh` arm, which step 3 rules out.
+
 ## How to exit afk
 
 No `/back` is needed. The first genuine message is the return signal:
@@ -64,6 +67,9 @@ No `/back` is needed. The first genuine message is the return signal:
   If it reports a firstmate-actionable `blocked:` event, remediate it immediately through the normal lifecycle, or explicitly reclassify it with a durable reason and close its decision key with `resolved [key=...]`, then run `bin/fm-afk-return.sh check`.
   Once the daemon stops, resume full per-wake responsiveness through the emitted primary-harness supervision protocol while blocker handling proceeds, so the gate never creates a blind wait.
   Do not answer a Bearings request or perform any other ordinary captain work until the check exits successfully.
+  Workers left in supervised or manual permission mode make no progress while away mode is active, because the daemon can only escalate and never approve.
+  Clear their queued prompts first thing on return, before ordinary catch-up work.
+  After an interrupted return, the return check must pass before away mode may be re-entered.
 - A message **with** the sentinel marker (`FM_INJECT_MARK`, U+2063 INVISIBLE SEPARATOR) -> it is a daemon escalation; stay afk and process it.
 - Re-invoking `/afk` while already away -> stay afk (refresh the flag); this
   does **not** trigger an exit.
