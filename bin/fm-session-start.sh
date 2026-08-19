@@ -38,7 +38,10 @@
 #                       always safe, always runs.
 #   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
+#                       state/.afk, and a cheap per-task endpoint read that
+#                       reports endpoint PRESENCE and whether an AGENT is
+#                       actually running in it as two separate facts (an exited
+#                       agent leaves a present endpoint holding a bare shell):
 #                       read-only, always runs.
 #   6. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
@@ -349,11 +352,25 @@ for meta in "$STATE"/*.meta; do
   target=$(fm_backend_target_of_meta "$meta")
   if [ -n "$window" ]; then
     backend=$(fm_backend_of_meta "$meta")
+    # Two separate facts, deliberately printed together: whether the endpoint
+    # EXISTS, and whether an AGENT is actually running in it. An exited agent
+    # leaves a bare shell whose endpoint still exists, so presence alone would
+    # report it as healthy - the misreading that let a steer land in a dead
+    # shell on 2026-08-13. fm_backend_agent_liveness (bin/fm-backend.sh) owns
+    # the classification; a backend with no verified classifier reports the
+    # agent line as inconclusive rather than implying a live agent.
+    # BOTH branches read that one owner, including the endpoint-absent branch: a
+    # failed presence check does not prove the endpoint is gone (an unreachable
+    # backend CLI fails the same way), so asserting the classifier's most
+    # confident negative verdict from a probe that never ran would make the two
+    # lines disagree about what an unreadable backend means.
+    liveness=$(fm_backend_agent_liveness "$backend" "${target:-$window}" 2>/dev/null) || liveness=unknown
     if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
       printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
     else
       printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
     fi
+    printf 'agent: %s - %s\n' "$liveness" "$(fm_backend_agent_liveness_phrase "$liveness")"
   else
     printf 'endpoint: unknown (no window recorded)\n'
   fi

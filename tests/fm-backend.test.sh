@@ -638,10 +638,20 @@ run_send_case() {  # <bin-root> <fakebin> <log> <home> -- <send args...>
     "$bin/bin/fm-send.sh" "$@" >/dev/null 2>&1
 }
 
+# fm-send's preflight probes are deliberate ADDITIONS over the old baseline, so
+# this equivalence check filters them out and compares only the send commands
+# themselves. Two of them now:
+#   #{pane_id}              - the explicit-target existence check.
+#   #{pane_current_command} - the agent-liveness preflight that stops a steer
+#                             being typed into the bare shell an exited agent
+#                             leaves behind (bin/fm-send.sh). Its own behavior is
+#                             covered in tests/fm-send-liveness.test.sh; here it
+#                             only has to not disturb the send command shape.
 strip_send_preflight() {  # <log>
-  local preflight
-  preflight=$'tmux\x1fdisplay-message\x1f-p\x1f-t\x1fsess:win\x1f#{pane_id}'
-  awk -v preflight="$preflight" '$0 != preflight { print }' "$1"
+  local pane_id_probe liveness_probe
+  pane_id_probe=$'tmux\x1fdisplay-message\x1f-p\x1f-t\x1fsess:win\x1f#{pane_id}'
+  liveness_probe=$'tmux\x1fdisplay-message\x1f-p\x1f-t\x1fsess:win\x1f#{pane_current_command}'
+  awk -v a="$pane_id_probe" -v b="$liveness_probe" '$0 != a && $0 != b { print }' "$1"
 }
 
 test_send_conformance_old_vs_new() {

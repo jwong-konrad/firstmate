@@ -71,7 +71,7 @@ You should see a `fm-<id>` window for the task, live and updating as the crewmat
 `fm_backend_target_exists` (`bin/fm-backend.sh`) only checks that a window's pane still exists.
 A secondmate agent that exits leaves its pane alive as a bare idle shell, which passes that check as "alive" - the gap `bin/fm-bootstrap.sh`'s session-start secondmate-liveness sweep exists to close (evidence 2026-07-07: every secondmate in one fleet was found sitting at a dead `zsh` shell, invisible to that check).
 
-`fm_backend_tmux_agent_alive` (`bin/backends/tmux.sh`) answers a deeper question: is a real harness-agent *process* running in the pane right now, not just whether the pane exists?
+`fm_backend_tmux_agent_liveness` (`bin/backends/tmux.sh`) answers a deeper question: is a real harness-agent *process* running in the pane right now, not just whether the pane exists?
 It reads tmux's own `#{pane_current_command}`, which reports the pane's live foreground process name - already resolved by tmux from the pty's controlling process group, not something this adapter derives itself.
 
 Agent liveness and composer safety are separate checks.
@@ -109,11 +109,18 @@ A second case matters for a harness that shells out to subcommands while it runs
 Verified the same session: a persisting parent process running a child command (`bash -c 'echo start; sleep 30; echo end'`, where the parent bash stays alive waiting on its own child) reports the PARENT's own name (`bash`) throughout, not the child's (`sleep`) - so a harness that survives while it shells out stays correctly classified as alive.
 (A single-simple-command `bash -c "sleep 30"` is a different, unrelated case: bash execs directly into `sleep`, replacing itself, so the reported name changes because the process itself became `sleep` - not because tmux "saw through" to a child.)
 
-The classifier (`fm_backend_tmux_agent_alive`) maps the observed name to `alive`, `dead`, or `unknown`:
+The classifier (`fm_backend_tmux_agent_liveness`) maps the observed name to `alive`, `shell`, `no-endpoint`, or `unknown`:
 
 - `alive` - the name contains `claude`, `codex`, `opencode`, or `grok`. All four were confirmed to run as their own literal process name (`ps -ef`, 2026-07-07): `claude` and `codex` and `opencode` are each a native compiled binary (`file` reports Mach-O), so their `comm` is their own binary name with no interpreter wrapper to hide behind.
-- `dead` - the name is a bare shell (`zsh`, `bash`, `sh`, `dash`, `ash`, `ksh`, `mksh`, `tcsh`, `csh`, `fish`).
-- `unknown` - anything else, including an unreadable pane.
+- `shell` - the name is a bare shell (`zsh`, `bash`, `sh`, `dash`, `ash`, `ksh`, `mksh`, `tcsh`, `csh`, `fish`), so the pane exists but its agent has exited.
+- `no-endpoint` - tmux reported no command name, `#{pane_id}` does not resolve either, AND `tmux list-panes -a` still enumerates panes, so tmux answers about other panes but not this one: the pane itself is gone.
+- `unknown` - anything else, including a pane that exists but whose command tmux would not report, and a tmux CLI that cannot answer at all (no server on this socket, a different `TMUX_TMPDIR`, a missing binary, a transient error).
+
+The reachability requirement on `no-endpoint` is deliberate: `fm_backend_tmux_agent_alive` projects `no-endpoint` to `dead`, and `dead` is what licenses `bin/fm-bootstrap.sh`'s session-start sweep to kill an endpoint and respawn a secondmate into it.
+An unreachable tmux is not evidence the worker is gone, so it stays `unknown` and the sweep skips the crew as inconclusive rather than duplicating a live supervisor.
+
+`fm_backend_tmux_agent_alive` remains available as the coarse `alive`/`dead`/`unknown` projection of that classifier, where `dead` merges `shell` and `no-endpoint`; `bin/fm-backend.sh`'s `fm_backend_agent_liveness` owns why the finer split exists.
+The extra `#{pane_id}` probe that separates `no-endpoint` from `unknown` runs only when the command read came back empty, so the ordinary `alive`/`shell` path still costs exactly one tmux round trip.
 
 ### Known gap: `pi` cannot be confidently classified
 
@@ -121,6 +128,7 @@ The classifier (`fm_backend_tmux_agent_alive`) maps the observed name to `alive`
 Since `node` is also the generic name for a plain interpreter session, any future JS-based harness, or someone's unrelated node script, there is no way to attribute a bare `node` foreground process back to `pi` specifically from outside the pane without deeper (and fragile) argument introspection.
 The classifier deliberately reports `unknown` for `node`/`python`/`python3` rather than guess - per the secondmate-liveness sweep's correctness bar, a wrong `alive` is harmless but a wrong `dead` spins up a duplicate agent, so an unresolvable case must never be treated as confidently dead.
 Practical effect: a dead `pi` secondmate is not auto-healed by the liveness sweep today; it is reported as `skipped: liveness probe inconclusive` instead, which still surfaces it for a human to act on.
+The same `unknown` means `bin/fm-send.sh` does not refuse a text send into an exited `pi` pane either, because an inconclusive verdict never blocks a send; only a confidently classified harness gets that refusal (`docs/herdr-backend.md` "Bare-shell endpoints are a distinct liveness state" owns the refusal contract and its limits).
 Resolving this would need either a `pi`-specific env marker inspectable from outside the process (mirroring `PI_CODING_AGENT=true`, which `bin/fm-harness.sh` already uses for self-detection but which is not readable from a different process without deeper introspection) or accepting the argument-inspection fragility - not attempted here.
 
 ## Limitations

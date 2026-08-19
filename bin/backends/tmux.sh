@@ -136,32 +136,80 @@ fm_backend_tmux_current_command() {  # <target>
   tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null
 }
 
+# fm_backend_tmux_server_answers: 0 when THIS process's tmux CLI demonstrably
+# reaches a running server and can enumerate panes on it. The positive evidence
+# fm_backend_tmux_agent_liveness below requires before it may call a target's
+# pane gone: a read that fails because tmux is unusable says nothing about the
+# pane, and must stay inconclusive rather than becoming a confident-dead verdict
+# that licenses a kill-and-respawn.
+fm_backend_tmux_server_answers() {
+  local panes
+  panes=$(tmux list-panes -a -F '#{pane_id}' 2>/dev/null) || return 1
+  [ -n "$panes" ]
+}
+
 # fm_backend_tmux_agent_alive: CONFIDENT liveness of a live harness-agent
 # PROCESS in <target>'s pane, distinct from fm_backend_target_exists's
 # pane-PRESENCE-only check (a pane that still exists but is sitting at a bare
 # idle shell passes THAT check as "alive" - the secondmate-liveness gap
 # AGENTS.md's session-start guarantee closes). See docs/tmux-backend.md
-# "Agent liveness probe" for the empirical basis. Prints one of:
-#   alive   - the foreground command is one of the verified harness binaries
-#             (claude, codex, opencode, grok - each confirmed to run as its
-#             own process name, never wrapped by a generic interpreter).
-#   dead    - the foreground command is a bare shell: nothing is running in
-#             the pane, so a prior agent process has exited.
-#   unknown - anything else, INCLUDING a bare "node"/"python" interpreter
-#             name (pi's own launcher execs into a generic "node" process
-#             with no reliable way to attribute it back to pi from outside
-#             the pane - docs/tmux-backend.md "Known gaps"), or an unreadable
-#             pane. Callers must never treat unknown as a confirmed-dead
-#             signal (bin/fm-bootstrap.sh's secondmate-liveness sweep gates a
-#             respawn on `dead` only).
+# "Agent liveness probe" for the empirical basis.
+# The COARSE alive|dead|unknown projection of fm_backend_tmux_agent_liveness
+# below, which states the classification; `dead` merges its `shell` and
+# `no-endpoint` verdicts. Callers must never treat unknown as a confirmed-dead
+# signal (bin/fm-bootstrap.sh's secondmate-liveness sweep gates a respawn on
+# `dead` only).
 fm_backend_tmux_agent_alive() {  # <target>
+  case "$(fm_backend_tmux_agent_liveness "$1")" in
+    alive) printf 'alive' ;;
+    shell|no-endpoint) printf 'dead' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# fm_backend_tmux_agent_liveness: the FINE-GRAINED classifier behind
+# fm_backend_tmux_agent_alive above, splitting that function's single `dead`
+# verdict into the two operationally different shapes a caller may need to
+# tell apart (bin/fm-backend.sh's fm_backend_agent_liveness owns the shared
+# vocabulary and the reason the split exists). Prints one of:
+#   shell       - the pane EXISTS and its foreground command is a bare shell:
+#                 a prior agent process exited and left the pane sitting at a
+#                 prompt. Text sent here lands in that shell, not an agent.
+#   no-endpoint - tmux itself answers, but not about this target: the pane is
+#                 gone. Nothing to send to.
+#   alive       - a verified harness binary is the foreground command.
+#   unknown     - the pane exists but its command is unattributable (a bare
+#                 "node"/"python" interpreter name - pi's gap, see
+#                 docs/tmux-backend.md "Known gaps"), or tmux could not be
+#                 reached at all to answer the question.
+# The pane-existence probe runs only when the command read came back empty, so
+# the common alive/shell path still costs exactly one tmux round trip.
+fm_backend_tmux_agent_liveness() {  # <target>
   local target=$1 comm
-  comm=$(fm_backend_tmux_current_command "$target") || { printf 'unknown'; return 0; }
+  comm=$(fm_backend_tmux_current_command "$target")
   comm=${comm#-}
   case "$comm" in
-    '') printf 'unknown' ;;
+    '')
+      # No command name at all, which has three causes that must NOT collapse
+      # into one verdict: the pane exists but tmux will not report its command,
+      # the pane is genuinely gone, or the tmux CLI cannot answer at all (no
+      # server on this socket, a different TMUX_TMPDIR, a missing binary, a
+      # transient error). Only the middle one is a confident negative. An
+      # unreachable tool is not evidence the worker is gone, and reporting it as
+      # `no-endpoint` would project to `dead` and license the session-start
+      # secondmate sweep (bin/fm-bootstrap.sh) to kill and respawn a LIVE
+      # supervisor. So `no-endpoint` is concluded only from a tmux that
+      # demonstrably answers about other panes.
+      if tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1; then
+        printf 'unknown'
+      elif fm_backend_tmux_server_answers; then
+        printf 'no-endpoint'
+      else
+        printf 'unknown'
+      fi
+      ;;
     *claude*|*codex*|*opencode*|*grok*) printf 'alive' ;;
-    zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'dead' ;;
+    zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *) printf 'unknown' ;;
   esac
 }

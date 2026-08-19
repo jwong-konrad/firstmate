@@ -395,7 +395,10 @@ signal_reason_is_actionable() {  # <file> ...
 #   paused  - the crew's authoritative current state is a declared external-wait
 #             pause (paused:), which is EXPECTED to idle;
 #   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
-#             torn-down/unknown crew, or an unreadable verdict).
+#             torn-down/unknown crew, or an unreadable verdict). This includes
+#             crew-state's `source: endpoint` reading - a confident no-live-agent
+#             verdict, which it pairs with state `unknown`, so an exited agent's
+#             bare shell surfaces instead of being absorbed as still working.
 # One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
 # that appended paused: but then STARTED a run reports working, never paused.
