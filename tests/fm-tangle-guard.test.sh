@@ -301,9 +301,10 @@ test_spawn_tmux_window_construction() {
   pass "fm-spawn: appends windows by session-colon, pins the name, and targets the window id"
 }
 
-test_lib_classification
-test_guard_banner
-test_bootstrap_line
-test_brief_assertion_precedes_branch
-test_spawn_isolation_abort
-test_spawn_tmux_window_construction
+run_case test_lib_classification
+run_case test_guard_banner
+run_case test_bootstrap_line
+run_case test_brief_assertion_precedes_branch
+run_case test_spawn_isolation_abort
+run_case test_spawn_tmux_window_construction
+fm_case_summary "fm-tangle-guard"

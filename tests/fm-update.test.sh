@@ -291,14 +291,13 @@ test_unsafe_secondmate_home_skipped_before_git_update() {
   pass "T11 unsafe secondmate home is not fast-forwarded"
 }
 
-test_updates_main_and_secondmate
-test_reread_gate_is_instruction_only
-test_dirty_secondmate_skipped
-test_diverged_secondmate_skipped
-test_idempotent_already_current
-test_registry_backstop_dedup_and_self_exclusion
-test_firstmate_wrong_branch_skipped
-test_firstmate_detached_head_skipped
-test_unsafe_secondmate_home_skipped_before_git_update
-
-echo "# all fm-update tests passed"
+run_case test_updates_main_and_secondmate
+run_case test_reread_gate_is_instruction_only
+run_case test_dirty_secondmate_skipped
+run_case test_diverged_secondmate_skipped
+run_case test_idempotent_already_current
+run_case test_registry_backstop_dedup_and_self_exclusion
+run_case test_firstmate_wrong_branch_skipped
+run_case test_firstmate_detached_head_skipped
+run_case test_unsafe_secondmate_home_skipped_before_git_update
+fm_case_summary "fm-update"

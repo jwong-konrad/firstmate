@@ -145,5 +145,6 @@ test_stale_pane_transient_persistent_resume() {
   pass "lifecycle: stale pane transient self-handles, persistent escalates once and clears, resumed clears quietly"
 }
 
-test_routine_then_terminal_after_restart
-test_stale_pane_transient_persistent_resume
+run_case test_routine_then_terminal_after_restart
+run_case test_stale_pane_transient_persistent_resume
+fm_case_summary "fm-wake-daemon-lifecycle-e2e"

@@ -33,5 +33,6 @@ test_agents_backlog_task_note_contract() {
   pass "AGENTS.md keeps task-note hygiene inline and points exact mechanics to their owner"
 }
 
-test_stow_skill_task_note_contract
-test_agents_backlog_task_note_contract
+run_case test_stow_skill_task_note_contract
+run_case test_agents_backlog_task_note_contract
+fm_case_summary "fm-stow-contract"

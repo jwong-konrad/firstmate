@@ -121,7 +121,8 @@ test_ci_still_runs_broad_behavior_suite() {
   pass "CI still owns partitioned broad behavior coverage and companion jobs"
 }
 
-test_nm_yaml_tracked
-test_nm_keeps_lint_pin
-test_nm_has_no_complete_local_test_command
-test_ci_still_runs_broad_behavior_suite
+run_case test_nm_yaml_tracked
+run_case test_nm_keeps_lint_pin
+run_case test_nm_has_no_complete_local_test_command
+run_case test_ci_still_runs_broad_behavior_suite
+fm_case_summary "fm-nm-test-contract"

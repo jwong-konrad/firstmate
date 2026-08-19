@@ -102,6 +102,7 @@ ROWS
   pass "projects/ paths are scoped through the firstmate home for single-task spawn"
 }
 
-test_batch_dispatches_every_pair
-test_batch_mode_boundaries
-test_projects_path_scoping
+run_case test_batch_dispatches_every_pair
+run_case test_batch_mode_boundaries
+run_case test_projects_path_scoping
+fm_case_summary "fm-spawn-batch"

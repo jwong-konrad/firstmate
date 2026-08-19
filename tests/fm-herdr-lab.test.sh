@@ -234,10 +234,11 @@ SH
   pass "fm-herdr-lab: timed-out provisioning cancels the launch before teardown"
 }
 
-test_refuses_unsafe_names
-test_provision_run_and_guarded_teardown
-test_missing_tripwire_blocks_destruction
-test_changed_default_trips_after_teardown
-test_stopped_owned_lab_can_reprovision
-test_failed_delete_retains_tripwire
-test_timed_out_provision_cancels_late_launch
+run_case test_refuses_unsafe_names
+run_case test_provision_run_and_guarded_teardown
+run_case test_missing_tripwire_blocks_destruction
+run_case test_changed_default_trips_after_teardown
+run_case test_stopped_owned_lab_can_reprovision
+run_case test_failed_delete_retains_tripwire
+run_case test_timed_out_provision_cancels_late_launch
+fm_case_summary "fm-herdr-lab"

@@ -122,7 +122,8 @@ test_idle_pane_composer_clears_first_try() {
   pass "fm_tmux_submit_enter_core: idle pane clears composer on first Enter - returns empty as before"
 }
 
-test_busy_pane_pending_returns_empty
-test_idle_pane_pending_returns_pending
-test_busy_pane_composer_clears_first_try
-test_idle_pane_composer_clears_first_try
+run_case test_busy_pane_pending_returns_empty
+run_case test_idle_pane_pending_returns_pending
+run_case test_busy_pane_composer_clears_first_try
+run_case test_idle_pane_composer_clears_first_try
+fm_case_summary "fm-tmux-submit-busy"

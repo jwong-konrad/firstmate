@@ -87,7 +87,8 @@ test_existing_singleton_watcher_is_not_success() {
   pass "checkpoint rejects an existing watcher singleton as unowned"
 }
 
-test_quiet_checkpoint_exits_124_cleanly
-test_signal_passes_through_and_exits_zero
-test_registered_check_uses_preserved_watcher_environment
-test_existing_singleton_watcher_is_not_success
+run_case test_quiet_checkpoint_exits_124_cleanly
+run_case test_signal_passes_through_and_exits_zero
+run_case test_registered_check_uses_preserved_watcher_environment
+run_case test_existing_singleton_watcher_is_not_success
+fm_case_summary "fm-watch-checkpoint"
