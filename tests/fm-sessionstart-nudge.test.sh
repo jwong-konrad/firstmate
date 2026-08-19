@@ -179,12 +179,13 @@ test_tracked_harness_registration() {
   pass "all five verified harnesses register the shared session-start nudge"
 }
 
-test_genuine_primary_nudges
-test_gate_env_is_silent
-test_gate_common_dir_is_silent
-test_unmarked_linked_worktree_is_silent
-test_linked_secondmate_primary_nudges
-test_missing_state_is_silent
-test_owned_lock_is_silent
-test_opencode_plugin_delivers_exact_nudge_once
-test_tracked_harness_registration
+run_case test_genuine_primary_nudges
+run_case test_gate_env_is_silent
+run_case test_gate_common_dir_is_silent
+run_case test_unmarked_linked_worktree_is_silent
+run_case test_linked_secondmate_primary_nudges
+run_case test_missing_state_is_silent
+run_case test_owned_lock_is_silent
+run_case test_opencode_plugin_delivers_exact_nudge_once
+run_case test_tracked_harness_registration
+fm_case_summary "fm-sessionstart-nudge"

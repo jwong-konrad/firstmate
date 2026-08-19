@@ -141,7 +141,6 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
-test_single_stale_first_read_is_not_accepted
-test_already_settled_pane_costs_one_confirm_sleep
-
-echo "# all fm-spawn-worktree-settle tests passed"
+run_case test_single_stale_first_read_is_not_accepted
+run_case test_already_settled_pane_costs_one_confirm_sleep
+fm_case_summary "fm-spawn-worktree-settle"

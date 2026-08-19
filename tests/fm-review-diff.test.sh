@@ -169,8 +169,9 @@ test_unreachable_pr_head_falls_back_with_warning() {
   pass "fm-review-diff falls back to local branch with a warning when PR head is unreachable"
 }
 
-test_pr_meta_uses_pr_head_not_stale_local
-test_pr_meta_fetches_pull_head_without_recorded_sha
-test_stale_recorded_pr_head_loses_to_fetched_pull_head
-test_no_pr_meta_uses_local_branch
-test_unreachable_pr_head_falls_back_with_warning
+run_case test_pr_meta_uses_pr_head_not_stale_local
+run_case test_pr_meta_fetches_pull_head_without_recorded_sha
+run_case test_stale_recorded_pr_head_loses_to_fetched_pull_head
+run_case test_no_pr_meta_uses_local_branch
+run_case test_unreachable_pr_head_falls_back_with_warning
+fm_case_summary "fm-review-diff"

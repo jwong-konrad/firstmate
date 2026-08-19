@@ -83,6 +83,7 @@ Keep instructions as the authority and discovery layer, but make repeated execut
 - `bin/*.sh` and `bin/backends/*.sh` must pass `shellcheck`.
 - Run `bin/fm-lint.sh` before treating a script change as done; it is the single owner of the lint definition (file set, config, and pinned shellcheck version) that CI and the no-mistakes pre-push gate both invoke, and it refuses to run under any other shellcheck version.
 - Colocate tests with the existing pattern in `tests/`, name them `<subject>.test.sh`, and extend an existing script rather than inventing a new runner.
+- Dispatch each `test_*` case through `run_case` and close the suite with one `fm_case_summary "<suite>"` instead of calling the cases directly, so one failing case cannot hide the rest; `tests/lib.sh` owns the contract, `tests/lib.test.sh` pins it, and the AFK-inject e2e suites are the deliberate exception (their inline comments explain the shared live fixture that per-case subshells would destroy).
 - A backend-verification doc (`docs/*-backend.md`) records empirical facts, not assumptions.
 - Include the date, version, exact commands run, and exact output.
 - Write incidents the same way, as evidence, not narrative alone.

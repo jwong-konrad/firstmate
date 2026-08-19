@@ -262,9 +262,8 @@ test_orca_collision_refusal_never_removes_or_creates() {
   pass "an orca collision refusal removes nothing, creates no terminal, and writes no meta"
 }
 
-test_collision_with_live_meta_is_refused
-test_no_collision_spawn_proceeds
-test_torn_down_task_worktree_is_reusable
-test_orca_collision_refusal_never_removes_or_creates
-
-echo "# all fm-spawn-collision-guard tests passed"
+run_case test_collision_with_live_meta_is_refused
+run_case test_no_collision_spawn_proceeds
+run_case test_torn_down_task_worktree_is_reusable
+run_case test_orca_collision_refusal_never_removes_or_creates
+fm_case_summary "fm-spawn-collision-guard"

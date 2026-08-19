@@ -100,7 +100,8 @@ test_ci_wires_installers_and_required_lane() {
   pass "CI wires pinned installers into a required serial Herdr lane"
 }
 
-test_herdr_installer_pins_exact_version_and_checksums
-test_treehouse_installer_pins_exact_version_and_checksums
-test_cleanup_only_targets_job_owned_lab_sessions
-test_ci_wires_installers_and_required_lane
+run_case test_herdr_installer_pins_exact_version_and_checksums
+run_case test_treehouse_installer_pins_exact_version_and_checksums
+run_case test_cleanup_only_targets_job_owned_lab_sessions
+run_case test_ci_wires_installers_and_required_lane
+fm_case_summary "fm-install-herdr"

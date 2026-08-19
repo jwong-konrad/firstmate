@@ -388,11 +388,12 @@ test_no_mistakes_yaml_disables_project_settings() {
   pass ".no-mistakes.yaml parses and sets disable_project_settings: true (trusted-only gate opt-out)"
 }
 
-test_helper_env_marker_refuses
-test_helper_empty_env_marker_refuses
-test_helper_path_backstop_refuses
-test_helper_normal_is_noop
-test_spawn_refuses_and_admits
-test_send_refuses_and_admits
-test_teardown_refuses_and_admits
-test_no_mistakes_yaml_disables_project_settings
+run_case test_helper_env_marker_refuses
+run_case test_helper_empty_env_marker_refuses
+run_case test_helper_path_backstop_refuses
+run_case test_helper_normal_is_noop
+run_case test_spawn_refuses_and_admits
+run_case test_send_refuses_and_admits
+run_case test_teardown_refuses_and_admits
+run_case test_no_mistakes_yaml_disables_project_settings
+fm_case_summary "fm-gate-refuse"

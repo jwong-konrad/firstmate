@@ -7,28 +7,16 @@
 #
 # These tests exercise behavior directly: fm-teardown is run as a subprocess against a
 # fake FM_HOME/FM_ROOT (built so the real script resolves into it), with stub helper scripts.
-# Nothing is sourced. The fm-spawn side is verified both structurally (the source has
-# the contract lines) and behaviorally (the mkdir + meta-write pattern it uses).
+# The scripts under test are never sourced, only run as subprocesses. The fm-spawn side is
+# verified both structurally (the source has the contract lines) and behaviorally (the
+# mkdir + meta-write pattern it uses).
 set -u
 
-# This suite does not source tests/lib.sh, so exempt its teardown subprocess from
-# the gate-lifecycle refusal (bin/fm-gate-refuse-lib.sh) the way lib.sh does for
-# the rest of the suite: the no-mistakes gate runs this suite from a gate worktree,
-# which the guard would otherwise refuse.
-export FM_GATE_REFUSE_BYPASS=1
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
-
-fail() {
-  printf 'not ok - %s\n' "$1" >&2
-  exit 1
-}
-
-pass() {
-  printf 'ok - %s\n' "$1"
-}
 
 TMP_ROOT=
 
@@ -211,7 +199,8 @@ test_teardown_skips_gracefully_when_dir_missing() {
   pass "fm-teardown skips gracefully when tasktmp= points to a nonexistent dir"
 }
 
-test_spawn_contract_and_mkdir_pattern
-test_teardown_removes_tasktmp_dir
-test_teardown_skips_gracefully_without_tasktmp
-test_teardown_skips_gracefully_when_dir_missing
+run_case test_spawn_contract_and_mkdir_pattern
+run_case test_teardown_removes_tasktmp_dir
+run_case test_teardown_skips_gracefully_without_tasktmp
+run_case test_teardown_skips_gracefully_when_dir_missing
+fm_case_summary "fm-gotmp"

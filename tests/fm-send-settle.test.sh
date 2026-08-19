@@ -116,7 +116,8 @@ test_key_path_never_pauses() {
   pass "fm-send: the --key path never pauses (settle scoped to text submit)"
 }
 
-test_default_send_pauses_one_second
-test_zero_disables_pause
-test_pause_is_tunable
-test_key_path_never_pauses
+run_case test_default_send_pauses_one_second
+run_case test_zero_disables_pause
+run_case test_pause_is_tunable
+run_case test_key_path_never_pauses
+fm_case_summary "fm-send-settle"

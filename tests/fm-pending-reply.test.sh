@@ -171,6 +171,8 @@ test_recovery_attempt_is_never_reinjected() {
   hook_log="$TMP_ROOT/recovery-at-most-once.log"
   : > "$hook_log"
   export FM_PENDING_REPLY_NOW=2500
+  # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
+  # shellcheck disable=SC2329
   recovery_fail_hook() {
     printf 'attempted\n' >> "$hook_log"
     return 1
@@ -372,7 +374,10 @@ test_undelivered_records_are_scan_immutable() {
       || fail "undelivered wrong-home check should be inert"
     fm_pending_reply_tick_one "$state" "$corr" busy "$sm_home" \
       || fail "undelivered direct tick should be inert"
+    # Overrides of the backend abstraction the library under test calls.
+    # shellcheck disable=SC2329
     fm_backend_busy_state() { fail "undelivered watcher tick must not probe the backend"; }
+    # shellcheck disable=SC2329
     fm_backend_capture() { fail "undelivered watcher tick must not capture the backend"; }
     fm_pending_reply_tick "$state" || fail "undelivered watcher tick should succeed"
     after=$(cat "$rec")
@@ -679,7 +684,10 @@ test_unknown_backend_state_uses_capture_fallback() {
       fm_pending_reply_mark_delivered "$state" "$corr"
       fm_write_secondmate_meta "$state/hibit.meta" "$sm_home" "session:fm-hibit"
       [ "$backend" = tmux ] || printf 'backend=%s\n' "$backend" >> "$state/hibit.meta"
+      # Overrides of the backend abstraction the library under test calls.
+      # shellcheck disable=SC2329
       fm_backend_busy_state() { printf 'unknown'; }
+      # shellcheck disable=SC2329
       fm_backend_capture() { printf '%s' "$FM_PENDING_TEST_CAPTURE"; }
       # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
       # shellcheck disable=SC2329
@@ -740,11 +748,15 @@ test_tick_skips_terminal_and_reuses_target_observation() {
     fm_write_secondmate_meta "$state/hibit.meta" "$home/hibit" "sess:fm-hibit"
     fm_write_secondmate_meta "$state/resolved.meta" "$home/resolved" "sess:fm-resolved"
     fm_write_secondmate_meta "$state/escalated.meta" "$home/escalated" "sess:fm-escalated"
+    # Overrides of functions the library under test calls.
+    # shellcheck disable=SC2329
     fm_backend_busy_state() {
       printf '%s\t%s\n' "$1" "$2" >> "$probe_log"
       printf 'busy'
     }
+    # shellcheck disable=SC2329
     fm_backend_capture() { fail "native busy observations should not capture"; }
+    # shellcheck disable=SC2329
     fm_pending_reply_find_resolve_line() {
       local status_file=$1 corr=$2 line
       printf '%s\t%s\n' "$status_file" "$corr" >> "$scan_log"
@@ -819,6 +831,8 @@ test_tick_end_to_end_missed_then_escalate() {
   mkdir -p "$sm_home/state"
   hook_log="$TMP_ROOT/tick-hook.log"
   : > "$hook_log"
+  # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
+  # shellcheck disable=SC2329
   recovery_hook() { printf 'recovered\n' >> "$hook_log"; }
   export -f recovery_hook
   # Reset hook and clock fixtures after isolated subshell tests.
@@ -872,27 +886,26 @@ test_failed_send_discards_undelivered_expectation() {
 
 # --- run --------------------------------------------------------------------
 
-test_normal_correlated_reply_resolves_once
-test_completed_turn_no_report_triggers_one_recovery
-test_recovery_attempt_is_never_reinjected
-test_recovery_reply_resolves_original
-test_second_missed_turn_escalates_once_and_stays_durable
-test_escalation_publication_failure_retries
-test_transport_success_is_not_reply_success
-test_undelivered_records_are_scan_immutable
-test_delivery_confirmation_fallback_reconciles
-test_unrelated_and_stale_corr_cannot_resolve
-test_restart_preserves_expectation_and_parent_destination
-test_wrong_home_detected_not_acknowledged
-test_unmarked_captain_input_creates_no_expectation
-test_fm_send_marked_secondmate_creates_pending_and_embeds_corr
-test_document_pointer_resolves
-test_helper_report_resolves
-test_busy_idle_observation_via_backend_abstraction
-test_unknown_backend_state_uses_capture_fallback
-test_tick_skips_terminal_and_reuses_target_observation
-test_correlations_reuse_only_for_matching_open_task
-test_tick_end_to_end_missed_then_escalate
-test_failed_send_discards_undelivered_expectation
-
-printf 'ok - all pending-reply tests passed\n'
+run_case test_normal_correlated_reply_resolves_once
+run_case test_completed_turn_no_report_triggers_one_recovery
+run_case test_recovery_attempt_is_never_reinjected
+run_case test_recovery_reply_resolves_original
+run_case test_second_missed_turn_escalates_once_and_stays_durable
+run_case test_escalation_publication_failure_retries
+run_case test_transport_success_is_not_reply_success
+run_case test_undelivered_records_are_scan_immutable
+run_case test_delivery_confirmation_fallback_reconciles
+run_case test_unrelated_and_stale_corr_cannot_resolve
+run_case test_restart_preserves_expectation_and_parent_destination
+run_case test_wrong_home_detected_not_acknowledged
+run_case test_unmarked_captain_input_creates_no_expectation
+run_case test_fm_send_marked_secondmate_creates_pending_and_embeds_corr
+run_case test_document_pointer_resolves
+run_case test_helper_report_resolves
+run_case test_busy_idle_observation_via_backend_abstraction
+run_case test_unknown_backend_state_uses_capture_fallback
+run_case test_tick_skips_terminal_and_reuses_target_observation
+run_case test_correlations_reuse_only_for_matching_open_task
+run_case test_tick_end_to_end_missed_then_escalate
+run_case test_failed_send_discards_undelivered_expectation
+fm_case_summary "fm-pending-reply"

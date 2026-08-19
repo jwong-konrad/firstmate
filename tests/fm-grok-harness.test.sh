@@ -137,6 +137,7 @@ SH
   pass "fm-lock recognizes grok harness processes"
 }
 
-test_grok_hook_requires_registered_token
-test_grok_teardown_removes_pointer_and_token
-test_fm_lock_recognizes_grok_holder
+run_case test_grok_hook_requires_registered_token
+run_case test_grok_teardown_removes_pointer_and_token
+run_case test_fm_lock_recognizes_grok_holder
+fm_case_summary "fm-grok-harness"

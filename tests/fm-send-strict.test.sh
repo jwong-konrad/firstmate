@@ -160,9 +160,10 @@ test_healthy_fm_id_send_still_works() {
   pass "fm-send strict: healthy fm-<id> sends still type once and submit"
 }
 
-test_exact_lane_id_send_still_works
-test_unset_fm_home_fails
-test_unresolvable_target_does_not_tmux_fallback
-test_prefixless_herdr_pane_id_fails
-test_unmatched_single_colon_target_must_exist
-test_healthy_fm_id_send_still_works
+run_case test_exact_lane_id_send_still_works
+run_case test_unset_fm_home_fails
+run_case test_unresolvable_target_does_not_tmux_fallback
+run_case test_prefixless_herdr_pane_id_fails
+run_case test_unmatched_single_colon_target_must_exist
+run_case test_healthy_fm_id_send_still_works
+fm_case_summary "fm-send-strict"

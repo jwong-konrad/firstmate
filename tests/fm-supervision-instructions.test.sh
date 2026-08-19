@@ -133,11 +133,12 @@ test_pi_snippet_uses_effective_extension_path() {
   pass "pi supervision snippet renders the effective extension path"
 }
 
-test_selected_harness_block_only
-test_unknown_fallback
-test_conditional_stanzas
-test_repair_lines
-test_ordinary_wake_lines_are_distinct_from_repair
-test_grok_is_background_notify
-test_grok_command_sources_effective_config
-test_pi_snippet_uses_effective_extension_path
+run_case test_selected_harness_block_only
+run_case test_unknown_fallback
+run_case test_conditional_stanzas
+run_case test_repair_lines
+run_case test_ordinary_wake_lines_are_distinct_from_repair
+run_case test_grok_is_background_notify
+run_case test_grok_command_sources_effective_config
+run_case test_pi_snippet_uses_effective_extension_path
+fm_case_summary "fm-supervision-instructions"

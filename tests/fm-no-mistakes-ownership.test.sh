@@ -35,5 +35,6 @@ test_firstmate_never_responds_for_crew_run() {
   pass "Validate contract forbids Firstmate from responding directly for a crew-owned run"
 }
 
-test_worker_owns_synchronous_driver
-test_firstmate_never_responds_for_crew_run
+run_case test_worker_owns_synchronous_driver
+run_case test_firstmate_never_responds_for_crew_run
+fm_case_summary "fm-no-mistakes-ownership"

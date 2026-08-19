@@ -41,6 +41,13 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
 
+# This suite deliberately keeps its own fail()/pass() instead of tests/lib.sh's,
+# and its scenarios are dispatched by bare sequential calls rather than
+# tests/lib.sh's run_case/fm_case_summary: fail() here tears down the ONE real
+# herdr session/state dir every scenario shares (set up once above, not
+# per-scenario), so running a scenario in its own subshell would let an early
+# failure's cleanup_all destroy the fixture out from under the next scenario -
+# a false failure, not the hidden-failure problem run_case fixes elsewhere.
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
