@@ -45,6 +45,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 
+# shellcheck source=bin/fm-banner-lib.sh
+. "$SCRIPT_DIR/fm-banner-lib.sh"
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
 # shellcheck source=bin/fm-primary-scope-lib.sh
@@ -96,13 +98,12 @@ x_mode=0
 [ -f "$CONFIG/x-mode.env" ] && x_mode=1
 REASON=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
   || printf '%s\n' 'tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn')
-rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
 {
-  printf '●%s\n' "$rule"
-  printf '●  TURN WOULD END BLIND - SUPERVISION IS OFF\n'
-  printf '●  %s task(s) progressing, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_PROGRESSING" "$FM_SUP_BEACON_DESC"
-  printf '●  Fleet: %s.\n' "$FM_SUP_PROGRESS_DESC"
-  printf '●  %s\n' "$REASON"
-  printf '●%s\n' "$rule"
+  fm_banner_rule
+  fm_banner_line 'TURN WOULD END BLIND - SUPERVISION IS OFF'
+  fm_banner_line '%s task(s) progressing, but no live watcher holds this home lock (last beat: %s).' "$FM_SUP_PROGRESSING" "$FM_SUP_BEACON_DESC"
+  fm_banner_line 'Fleet: %s.' "$FM_SUP_PROGRESS_DESC"
+  fm_banner_line '%s' "$REASON"
+  fm_banner_rule
 } >&2
 exit 2

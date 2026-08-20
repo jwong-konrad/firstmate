@@ -16,6 +16,7 @@ config/backend
 config/x-mode.env
 config/cmux-socket-password
 config/wedge-alarm
+config/idle-handoff
 config/herdr-presentation-spaces
 config/spawn-env-allow
 config/app-checkouts

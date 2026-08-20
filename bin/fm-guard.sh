@@ -35,6 +35,8 @@ CONTINUE_LINE=${FM_GUARD_CONTINUE_LINE:-This is a supervision warning only; the 
 # Cleared when the home leaves the unhealthy state so a later episode re-arms.
 STALE_BANNER_MARKER="$STATE/.guard-watcher-stale-banner"
 
+# shellcheck source=bin/fm-banner-lib.sh
+. "$SCRIPT_DIR/fm-banner-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh
@@ -123,21 +125,20 @@ fm_guard_clear_stale_banner() {
 tangle_branch=$(fm_primary_tangle_branch "$FM_ROOT" || true)
 if [ -n "$tangle_branch" ]; then
   tangle_default=$(fm_default_branch "$FM_ROOT" 2>/dev/null || echo main)
-  trule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
-    printf '●%s\n' "$trule"
-    printf '●  WORKTREE TANGLE - PRIMARY CHECKOUT IS ON A FEATURE BRANCH\n'
-    printf "●  %s is on '%s', not its default branch '%s'.\n" "$FM_ROOT" "$tangle_branch" "$tangle_default"
-    printf '●  A crewmate likely branched/committed in the primary instead of its own worktree.\n'
-    printf "●  The work is SAFE on the '%s' ref.\n" "$tangle_branch"
+    fm_banner_rule
+    fm_banner_line 'WORKTREE TANGLE - PRIMARY CHECKOUT IS ON A FEATURE BRANCH'
+    fm_banner_line "%s is on '%s', not its default branch '%s'." "$FM_ROOT" "$tangle_branch" "$tangle_default"
+    fm_banner_line 'A crewmate likely branched/committed in the primary instead of its own worktree.'
+    fm_banner_line "The work is SAFE on the '%s' ref." "$tangle_branch"
     if [ "$READ_ONLY" -eq 1 ]; then
-      printf '●  This read-only session must leave restore work to the session holding the fleet lock.\n'
+      fm_banner_line 'This read-only session must leave restore work to the session holding the fleet lock.'
     else
-      printf "●  Restore the primary to '%s':\n" "$tangle_default"
-      printf '●      git -C %s checkout %s\n' "$FM_ROOT" "$tangle_default"
-      printf "●  then re-validate '%s' in a proper isolated worktree.\n" "$tangle_branch"
+      fm_banner_line "Restore the primary to '%s':" "$tangle_default"
+      fm_banner_line '    git -C %s checkout %s' "$FM_ROOT" "$tangle_default"
+      fm_banner_line "then re-validate '%s' in a proper isolated worktree." "$tangle_branch"
     fi
-    printf '●%s\n' "$trule"
+    fm_banner_rule
   } >&2
 fi
 
@@ -185,20 +186,19 @@ if [ "$watcher_fresh" = false ]; then
       --x-mode "$x_mode" \
       --queue-pending "$queue_arg" \
       --repair-line 2>/dev/null || printf '%s\n' 'Repair missing watcher supervision according to the session-start operating block.')
-    rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
     {
-      printf '●%s\n' "$rule"
-      printf '●  WATCHER DOWN - SUPERVISION IS OFF\n'
-      printf '●  %s task(s) progressing, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$progressing" "$beacon_desc" "$GRACE"
-      printf '●  Fleet: %s.\n' "$progress_desc"
+      fm_banner_rule
+      fm_banner_line 'WATCHER DOWN - SUPERVISION IS OFF'
+      fm_banner_line '%s task(s) progressing, but no watcher has a fresh beacon (last beat: %s, grace %ss).' "$progressing" "$beacon_desc" "$GRACE"
+      fm_banner_line 'Fleet: %s.' "$progress_desc"
       if [ "$READ_ONLY" -eq 1 ]; then
-        printf '●  This read-only session should report the lapse, not repair it.\n'
+        fm_banner_line 'This read-only session should report the lapse, not repair it.'
       else
-        printf '●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.\n'
+        fm_banner_line 'Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.'
       fi
-      printf '●  %s\n' "$CONTINUE_LINE"
-      printf '●  %s\n' "$fix"
-      printf '●%s\n' "$rule"
+      fm_banner_line '%s' "$CONTINUE_LINE"
+      fm_banner_line '%s' "$fix"
+      fm_banner_rule
     } >&2
   else
     printf 'WARNING: watcher still down (same stale episode; last beat: %s, grace %ss) - full banner already printed this episode.\n' \

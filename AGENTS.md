@@ -77,6 +77,7 @@ config/backend  runtime session-provider backend override for new tasks; LOCAL, 
 config/herdr-presentation-spaces  optional presence flag for Herdr's default-off disposable single-task visual projection; LOCAL, gitignored; inherited by secondmate homes; see docs/herdr-backend.md "Optional disposable single-task presentation spaces"
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
+config/idle-handoff  optional captain-quiet stretch before an unprompted handoff capture and its CLEAR BEFORE SESSION reminder; LOCAL, gitignored; seconds or "off", absent means four hours; see docs/captain-idle-handoff.md
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
@@ -109,6 +110,7 @@ state/               volatile runtime signals; gitignored
   x-poll.error x-poll.claim-error  generated X-mode relay and offer-claim diagnostic dedupe markers
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
+  .last-captain-input .captain-idle-handoff .captain-idle-handoff.log  idle auto-handoff records: the last genuine captain prompt, the quiet stretch already captured, and its log; owned by bin/fm-captain-idle-handoff.sh
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
   .progress-<id>     durable progressing-or-idle verdict for a task; written by the arm gate and the watcher, read cheaply by the guards, and treated as progressing when absent or stale (bin/fm-progress-lib.sh, docs/supervision-arming.md)
   .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .wedge-state-* .wedge-rechecked-* .decision-since-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
@@ -227,6 +229,7 @@ A crewmate creates or updates it lazily through the project's selected delivery 
 Keep fleet delivery posture and captain-private strategy out of project memory.
 When the captain invokes `/stow`, load the `stow` skill for the complete knowledge-routing and unfinished-work sweep.
 When the captain invokes `/handoff`, load the `handoff` skill; it runs the stow sweep plus a session-context capture to `data/handoffs/`.
+That same capture also arrives unprompted, as an injected directive, on the captain's first message back after a long quiet stretch; follow the directive rather than treating it as captain input.
 
 ## 7. Task lifecycle
 
