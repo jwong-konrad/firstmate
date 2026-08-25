@@ -1,6 +1,6 @@
 ---
 name: handoff
-description: Combine the /stow sweep with a session-context capture so a long-running session can be cleared without losing mid-discussion reasoning. Use when the captain invokes /handoff (e.g. "/handoff", "hand off before I clear"), before clearing or compacting a session whose conversational state is not yet on disk, or when the captain wants the current reasoning and next steps preserved for the next session.
+description: Combine the /stow sweep with a session-context capture so a long-running session can be cleared without losing mid-discussion reasoning. Use when the captain invokes /handoff (e.g. "/handoff", "hand off before I clear"), before clearing or compacting a session whose conversational state is not yet on disk, or when the captain wants the current reasoning and next steps preserved for the next session. Also runs unprompted when bin/fm-captain-idle-handoff.sh detects that the captain has been quiet past the configured threshold and injects a capture directive.
 user-invocable: true
 metadata:
   internal: true
@@ -52,6 +52,19 @@ The goal is a session the captain can clear or reset with confidence that the ne
    Summarize, in plain outcome language (section 9): what was stowed and where (stow's own verdict from step 1), what was captured to the handoff document, which backlog items received a pointer, any entries retired this run, and a combined safe-to-clear verdict.
    The combined verdict holds only when both halves hold: every durable finding is on disk per stow, and the session's reasoning and next steps now live in the handoff document.
    If either half is incomplete, say so explicitly rather than reporting the session fully safe to clear.
+
+## Unprompted capture after a long quiet stretch
+
+`bin/fm-captain-idle-handoff.sh` runs this same capture without the captain asking, on their first message back after a long quiet stretch.
+`docs/captain-idle-handoff.md` owns why, which signal it measures, and the threshold; nothing about the capture itself changes.
+Two obligations are specific to an unprompted run, and the injected directive states both:
+
+- Do the capture BEFORE answering the captain's message, then answer it normally.
+- After step 6, print the `CLEAR BEFORE SESSION` banner the directive carries, verbatim, with `{{HANDOFF_PATH}}` replaced by the path of the document just written.
+  The captain asked for that reminder to be impossible to miss, so it is reproduced as given rather than reworded or folded into a sentence.
+
+Never clear or compact the session as part of this; the captain clears, this only captures and reminds.
+If the capture cannot be completed, say so in one plain line and carry on with the captain's message rather than escalating it.
 
 ## Scope exclusion: no skill storage
 
