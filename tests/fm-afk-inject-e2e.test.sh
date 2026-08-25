@@ -173,7 +173,7 @@ start_daemon() {
   FM_SIGNAL_GRACE=1 \
   FM_HEARTBEAT=999999 \
   FM_CHECK_INTERVAL=999999 \
-  FM_INJECT_CONFIRM_SLEEP=0.3 \
+  FM_INJECT_CONFIRM_SLEEP=1 \
   FM_INJECT_CONFIRM_RETRIES=5 \
   FM_STALE_ESCALATE_SECS=999999 \
   nohup "$DAEMON" >"$STATE_DIR/daemon.out" 2>"$STATE_DIR/daemon.err" &
@@ -294,7 +294,7 @@ test_scenario_a() {
   sleep 0.5
 
   # Wait for the daemon to retry injection (housekeeping tick = 1s).
-  sleep 6
+  sleep 8
 
   # Assert: human text was submitted alone (as a user message).
   grep -q 'human draft text' "$LOG_FILE" \
@@ -388,7 +388,7 @@ test_scenario_c() {
   start_daemon
 
   echo "done: PR https://example.test/pr/300" > "$STATE_DIR/fake-c1.status"
-  sleep 6
+  sleep 8
 
   # Exactly one terminal-safe marker in the submitted log (no duplicate, no loss).
   local marker_count

@@ -99,6 +99,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 
+# shellcheck source=bin/fm-banner-lib.sh
+. "$SCRIPT_DIR/fm-banner-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
@@ -251,17 +253,16 @@ printf '%s\n' "$LOCK_OUT"
 READ_ONLY=0
 if [ "$LOCK_RC" -ne 0 ]; then
   READ_ONLY=1
-  BAR='●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
-    printf '%s\n' "$BAR"
-    printf '●  READ-ONLY SESSION - ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK\n'
-    printf '●  %s\n' "$LOCK_OUT"
-    printf '●  Skipping every mutating step: PR-check migration, secondmate sync,\n'
-    printf '●  X-mode artifacts, fleet sync, and wake-queue drain. Detect-only bootstrap\n'
-    printf '●  diagnostics and the rest of this read-only-safe digest still ran below.\n'
-    printf '●  Operate read-only until this resolves - do not spawn, steer, merge, or\n'
-    printf '●  otherwise mutate fleet state from this session.\n'
-    printf '%s\n' "$BAR"
+    fm_banner_rule
+    fm_banner_line 'READ-ONLY SESSION - ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK'
+    fm_banner_line '%s' "$LOCK_OUT"
+    fm_banner_line 'Skipping every mutating step: PR-check migration, secondmate sync,'
+    fm_banner_line 'X-mode artifacts, fleet sync, and wake-queue drain. Detect-only bootstrap'
+    fm_banner_line 'diagnostics and the rest of this read-only-safe digest still ran below.'
+    fm_banner_line 'Operate read-only until this resolves - do not spawn, steer, merge, or'
+    fm_banner_line 'otherwise mutate fleet state from this session.'
+    fm_banner_rule
   }
 fi
 

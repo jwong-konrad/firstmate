@@ -104,6 +104,15 @@ An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisel
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verification evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+## Idle auto-handoff (config/idle-handoff)
+
+When the captain's previous message is older than a configured quiet stretch, `bin/fm-captain-idle-handoff.sh` runs the existing `/handoff` capture unprompted on their first message back and shows them a prominent `CLEAR BEFORE SESSION` reminder.
+`config/idle-handoff` (local, gitignored) holds the threshold on its first non-empty, non-comment line: a value in seconds, or `off` to disable the reminder entirely.
+`FM_IDLE_HANDOFF_SECONDS` overrides the file with the same two forms.
+An absent file means the built-in default of 14400 seconds (four hours), and an unreadable value falls back to that default rather than to anything shorter.
+The hook owns three records under `state/`: `.last-captain-input`, `.captain-idle-handoff`, and `.captain-idle-handoff.log`.
+See [`captain-idle-handoff.md`](captain-idle-handoff.md) for the measured rationale, the signal it chose and why, the threshold reasoning, the safety boundaries, and the harness matrix.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.
@@ -463,6 +472,7 @@ FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting X-mode completion 
 FMX_FOLLOWUP_MAX_COUNT=3   # local cap on X-mode completion follow-ups per linked mention
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
 FM_GUARD_GRACE=300      # seconds before guard warnings, arm health checks, and the primary turn-end guard treat a watcher beacon as stale
+FM_IDLE_HANDOFF_SECONDS=14400   # captain-quiet stretch before an auto-handoff and its CLEAR BEFORE SESSION reminder; `off` disables it, and config/idle-handoff holds the standing choice (docs/captain-idle-handoff.md)
 FM_ARM_CONFIRM_TIMEOUT=10   # seconds fm-watch-arm waits to confirm a fresh watcher before reporting FAILED
 FM_ARM_GATE_BUDGET_SECS=8   # total wall clock fm-watch-arm's conditional-arming gate may spend on authoritative progress reconciles; each reconcile is also killed at half this ceiling, and a spent budget always arms (docs/supervision-arming.md)
 FM_PROGRESS_IDLE_TTL=900   # seconds an `idle` state/.progress-<id> verdict is believed, and the same bound on the age of the status log a status-log-sourced idle reading rests on; past it the task counts progressing again with no trigger required (docs/supervision-arming.md)
