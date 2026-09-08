@@ -169,12 +169,12 @@ A budgeted arm says so in its printed line, so an operator can tell it apart fro
 
 ### Where the stale suppression stops
 
-The watcher's stale suppression covers exactly the awaiting-firstmate set: a declared external-wait pause, a verified captain-held transfer, and an open keyed `needs-decision`/`blocked` in the durable status fold.
-It deliberately does not extend to a `done:` or `failed:` pane inside a running watcher, even though both count idle for arming and for the guards.
+The watcher's stale suppression covers exactly the awaiting-firstmate set: a declared external-wait pause, a verified captain-held transfer, an open keyed `needs-decision`/`blocked` in the durable status fold, and a finished task parked on a merge firstmate has not made yet.
+Apart from that last class, it deliberately does not extend to a `done:` or `failed:` pane inside a running watcher, even though both count idle for arming and for the guards.
 
 The asymmetry is intentional.
 Arming is a one-shot decision about whether a cycle is worth starting at all, and a fleet of only finished or failed tasks has nothing to observe - so a fleet like that never reaches the stale path, because the arm declines first.
-Inside a *running* watcher, though, a `done:` line is the one captain-relevant status with a documented false-positive history: it can be a leftover from before a validation run started, and widening suppression there would re-open that hole for a case the arm gate already covers from the front.
+Inside a *running* watcher, though, a `done:` line is the one captain-relevant status with a documented false-positive history: it can be a leftover from before a validation run started, and widening suppression there in general would re-open that hole for a case the arm gate already covers from the front.
 
 Holding that boundary takes an explicit narrowing, because the durable fold does not close a decision on a terminal line.
 `status_open_decisions` keeps a `needs-decision:`/`blocked:` key open until an explicit `resolved:` or `captain-held:` closes it, so a crew that raised a decision, was steered without the `resolved:` line its status contract requires, and then wrote `done:` would still read as awaiting firstmate and have that `done:` absorbed.
@@ -182,10 +182,40 @@ The watcher therefore calls `status_task_awaits_firstmate_unterminated`, which d
 That narrowing is watcher-local and opt-in: `status_open_decisions` itself is unchanged, because the fleet snapshot and the decision-hold lifecycle depend on its durable semantics.
 A declared `paused:` or `captain-held:` last line still suppresses, and a genuinely still-open decision with no later same-key terminal event still suppresses.
 
-That last case is where the boundary needs one more limit: an open decision suppresses the ROUTINE stale wake only, and never wedge detection.
-A crew that raised a decision, was steered without the `resolved:` line, resumed work, and then froze without writing any terminal line keeps its key open forever, so an unlimited suppression would deny wedge detection to exactly the population that most needs it.
-So the awaiting-firstmate absorb keeps a wedge timer running underneath its bounded cadence, on its own `state/.decision-since-<key>` file, and once the pane has been idle past `FM_STALE_ESCALATE_SECS` it escalates through the same `wedge_timer_check` path everything else uses, with the escalation count advancing under the state-change rule below.
-This applies to the open-decision class only: a declared `paused:` external wait and a verified `captain-held:` transfer are legitimately indefinite and keep clearing that bookkeeping on every absorb.
+Those last two cases are where the boundary needs one more limit: an open decision and a pending merge each suppress the ROUTINE stale wake only, and never wedge detection.
+A crew that raised a decision, was steered without the `resolved:` line, resumed work, and then froze without writing any terminal line keeps its key open forever, and a crew firstmate steered again after its `done:` line keeps that line and its armed poll just as long, so an unlimited suppression would deny wedge detection to exactly the population that most needs it.
+So both absorbs keep a wedge timer running underneath the bounded cadence, sharing the `state/.decision-since-<key>` file (one file, because the two classes are mutually exclusive for a given poll), and once the pane has been idle past `FM_STALE_ESCALATE_SECS` it escalates through the same `wedge_timer_check` path everything else uses, with the escalation count advancing under the state-change rule below.
+This applies to those two classes only: a declared `paused:` external wait and a verified `captain-held:` transfer are legitimately indefinite and keep clearing that bookkeeping on every absorb.
+
+### The one `done:` case that does suppress: a pending merge
+
+A finished ship task whose PR is open and unmerged is the exception, and it is the one class of firstmate-owed wait that the status stream cannot express.
+Nothing declares it: the task's own last event is the terminal `done:`, which reads as needing nothing, while what it is actually waiting for is a merge only firstmate - with the captain's word - can make.
+So the fold said no, and `pause_state_class` fell through to its declared-pause branch, which absorbs only a confidently dead agent, while a finished crew sits at a live prompt by design.
+Every distinct pane hash therefore surfaced another routine stale wake, and pane hashes churn on a redrawn clock or a token counter: three green PRs held for a merge decision woke firstmate repeatedly within minutes on 2026-08-14, and the same churn recurred several times in one session through 2026-09-08.
+There was no legitimate escape, either, because teardown correctly refuses such a task - its work is not landed - and writing `captain-held:` only moves it onto the branches that still return `none` while the agent lives.
+
+`task_done_awaiting_merge` in `bin/fm-watch.sh` is that class, and the mixed fleet is why the arm gate cannot cover it from the front: the parked task is not what armed the cycle, so the cycle exists no matter how quiet that task is.
+It is watcher-local, like the terminal narrowing below, and for the same reason: `status_open_decisions` and the shared classifier stay unchanged, because the fleet snapshot and the decision-hold lifecycle depend on their durable semantics.
+A merge gate is not modelled there at all today, and giving it one is a separate change to a shared contract rather than part of this fix.
+
+Three conditions hold the class narrow, and the first of them is what keeps the `done:` hole above closed:
+
+- The task's merge poll must be ARMED (`state/<id>.check.sh` with its `state/<id>.pr-poll` data).
+  Firstmate arms that poll only once the PR exists, so a `done:` line left over from before a validation run has no PR and no poll and still surfaces at once.
+  Presence is all the predicate reads; the check sweep remains the sole owner of validating those artifacts.
+- The task's last status event must be the terminal `done:`.
+  A `failed:` task needs firstmate, and a crew steered back to work writes a `working:` line over it.
+- The PR must be recorded as `pr=` in the task's own metadata.
+
+That armed poll is also why going quiet here loses nothing: the suppression is conditional on an independent wake source.
+The poll is the thing that ends this wait, the check sweep dispatches it on its own cadence, and it wakes firstmate the moment the PR merges - a poll whose artifacts stop validating is rejected with its own wake rather than skipped silently.
+`handle_paused_stale`'s bounded `FM_PAUSE_RESURFACE_SECS` recheck is the second backstop, and teardown removes the poll with the rest of the task's state, so a landed task returns to ordinary stale handling.
+Authoritative state still wins ahead of all of it: a crew steered back into a run reports `working` through `pause_state_class`'s run-step precedence and is absorbed on the ordinary wedge timer, never as a merge wait.
+
+One consequence is deliberate: a finished task parked on a merge is now absorbed whether its agent is alive or gone.
+A crew that exited after finishing changes nothing about what firstmate can do next - the merge needs the captain's word and teardown is refused until the work lands - so the dead-agent reading is not new information here, and it re-surfaces on the same bounded cadence as everything else in this class.
+Away mode is unchanged too: while `state/.afk` exists the daemon owns triage and the watcher hands it every distinct stale hash exactly as before.
 
 ## Escalation requires a state change
 
@@ -197,8 +227,9 @@ An unchanged state still gets a bounded recheck on the long `FM_PAUSE_RESURFACE_
 
 That rule needs a starting point, and on the decision-wait timer the missing one used to escalate.
 There is no previous escalation to compare against at the first expiry, so every crew that raised a decision and waited on the captain was called a possible wedge about four minutes in, on a reading (`parked`) the verdict mapping positively classifies as idle.
-So the decision-wait timer, and only that timer, records a positively `parked` or `blocked` first-expiry reading as the comparison baseline instead of escalating on it: that reading is the healthy shape of a crew waiting on firstmate, not evidence of a freeze.
-Any other first-expiry reading - `working`, `unknown`, `done`, `failed`, `paused`, a dead endpoint - still escalates immediately, and once a baseline exists every later state change escalates with the count advancing normally.
+So the awaiting-firstmate timers, and only those, record a positively idle first-expiry reading as the comparison baseline instead of escalating on it: that reading is the healthy shape of a crew waiting on firstmate, not evidence of a freeze.
+Which reading counts as healthy is per-timer, because the two waits park on different ones, and each mode accepts only its own so neither widens the other: `parked` or `blocked` for a decision wait (`parked-baseline`), and `done` for a merge wait (`finished-baseline`), which is `fm-crew-state.sh`'s checks-green PR-monitoring reading for a finished task.
+Any other first-expiry reading - `working`, `unknown`, `failed`, `paused`, a dead endpoint, or a mode's own reading seen under the other mode - still escalates immediately, and once a baseline exists every later state change escalates with the count advancing normally.
 A crew steered without a `resolved:` line that resumes and leaves any evidence of resuming moves off its baseline, and that move is what escalates it.
 
 The baseline has a known limitation, and it is the narrower remainder of the case the original finding named.

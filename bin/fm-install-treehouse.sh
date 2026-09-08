@@ -54,7 +54,11 @@ TMP=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fm-treehouse.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 
 printf 'fm-install-treehouse.sh: downloading %s from %s\n' "$ARCHIVE" "$URL" >&2
-curl -fsSL --max-filesize "$FM_TREEHOUSE_CI_MAX_BYTES" "$URL" -o "$TMP/$ARCHIVE" \
+# Retry on transient network failures (e.g. connection reset) seen intermittently
+# from GitHub release asset downloads in CI.
+curl -fsSL --max-filesize "$FM_TREEHOUSE_CI_MAX_BYTES" \
+  --retry 5 --retry-delay 2 --retry-all-errors \
+  "$URL" -o "$TMP/$ARCHIVE" \
   || die "download failed for $URL (bounded at $FM_TREEHOUSE_CI_MAX_BYTES bytes)"
 
 if command -v sha256sum >/dev/null 2>&1; then

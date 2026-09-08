@@ -20,19 +20,23 @@
 #                          line, since the crew's own log gets no new entry once
 #                          firstmate hands it to a no-mistakes validation. A task
 #                          AWAITING FIRSTMATE - a declared external-wait pause, a
-#                          captain-held transfer, or an open keyed
-#                          needs-decision/blocked - is absorbed instead with its own
+#                          captain-held transfer, an open keyed
+#                          needs-decision/blocked, or a finished task parked on an
+#                          armed unmerged PR - is absorbed instead with its own
 #                          long re-surface cadence, because its
 #                          idle pane is the expected state and the decision was
 #                          already surfaced when its status line was written. That
 #                          suppression covers the ROUTINE wake only: an open
-#                          decision runs its own wedge timer underneath, so a crew
-#                          steered without a resolved: line still wedge-escalates
+#                          decision and a pending merge each run their own wedge
+#                          timer underneath, so a crew steered without a resolved:
+#                          line, or steered again after its done: line, still
+#                          wedge-escalates
 #                          once it sits idle past the threshold. That timer records
-#                          a positively parked/blocked reading at its first expiry
+#                          its wait's own healthy reading at the first expiry
 #                          as the comparison baseline instead of escalating on a
-#                          missing one, since parked IS the healthy shape of a crew
-#                          waiting on firstmate; any other first-expiry reading
+#                          missing one - parked or blocked for a decision wait, done
+#                          for a merge wait, since those ARE the healthy shapes of a
+#                          crew waiting on firstmate; any other first-expiry reading
 #                          escalates at once, and every later state change escalates
 #                          with the count advancing. A declared pause
 #                          and a captain-held transfer stay indefinite. Only
@@ -211,11 +215,14 @@ hash_pane() {
 }
 
 # 0 when a task is waiting on FIRSTMATE rather than on itself: a declared
-# external-wait pause, a verified captain-held transfer, or an open keyed
-# needs-decision/blocked in the durable status fold. An idle pane on such a task
-# is the expected state, not a wedge - and it was the single largest measured
-# wake source. fm-classify-lib.sh owns the vocabulary; this is just the
-# state-dir-bound convenience wrapper the stale loop calls.
+# external-wait pause, a verified captain-held transfer, an open keyed
+# needs-decision/blocked in the durable status fold, or a finished task parked on
+# a merge firstmate has not made yet (task_done_awaiting_merge). An idle pane on
+# such a task is the expected state, not a wedge - and it was the single largest
+# measured wake source. fm-classify-lib.sh owns the status vocabulary; this is the
+# state-dir-bound wrapper the stale loop calls, and the merge class below is
+# watcher-local because it is read from this home's own task state rather than
+# from the status stream.
 #
 # The fold behind it is terminal-narrowed: a decision key whose latest event is a
 # same-key done: or failed: is a forgotten resolved: line, not a live wait, and
@@ -234,8 +241,18 @@ _FM_AWAITS_MEMO=
 _FM_AWAITS_MEMO_MAX_BYTES=8192
 
 task_awaits_firstmate() {  # <task>
-  local task=$1 sig entry
+  local task=$1
   [ -n "$task" ] || return 1
+  task_awaits_firstmate_status "$task" && return 0
+  task_done_awaiting_merge "$task"
+}
+
+# The status-declared half of the predicate above: the memoized fold, unchanged.
+# Kept separate so the memo keeps meaning exactly what its signature covers - the
+# status file - and never caches an answer that also depends on files it does not
+# stat.
+task_awaits_firstmate_status() {  # <task>
+  local task=$1 sig entry
   sig=$(fm_progress_stat_sig "$STATE/$task.status")
   entry="|$task@$sig="
   case "$_FM_AWAITS_MEMO" in
@@ -249,6 +266,50 @@ task_awaits_firstmate() {  # <task>
   fi
   _FM_AWAITS_MEMO="$_FM_AWAITS_MEMO${entry}no|"
   return 1
+}
+
+# The other half: 0 when a task has FINISHED and the only event left is the merge
+# firstmate owes it - its own last status event is the terminal done:, firstmate
+# recorded a PR for it, and that PR's merge poll is still armed.
+#
+# This wait is invisible to the status fold above, and that is the defect. It is
+# declared by no verb and no decision key; it is implied by durable task state, a
+# terminal done: sitting over an armed unmerged PR. So the fold said no, and
+# pause_state_class fell through to its declared-pause branch, which requires a
+# confidently dead agent - while a crew parked on a merge keeps a live prompt by
+# design. Every distinct pane hash (a redrawn clock, a token counter) therefore
+# surfaced another routine stale wake, indefinitely, and teardown correctly
+# refuses such a task because its work is not landed yet, so there was no escape.
+# Measured on 2026-08-14 across three green PRs and again through 2026-09-08.
+# Writing captain-held: was not a workaround: both live-agent paths below it
+# return none while the agent is alive.
+#
+# Suppressing it is safe because the suppression is CONDITIONAL ON AN INDEPENDENT
+# WAKE SOURCE. The armed merge poll is the thing that ends this wait, the check
+# sweep dispatches it on its own cadence, and it wakes firstmate the moment the
+# PR merges - a poll whose artifacts stop validating is rejected with its own wake
+# rather than silently skipped. handle_paused_stale's bounded re-surface is the
+# second backstop, and teardown removes the poll with the rest of the task's
+# state, so a landed task returns to ordinary stale handling.
+#
+# The armed poll is also what keeps the done: false-positive hole closed
+# (docs/supervision-arming.md, "Where the stale suppression stops"): a done: line
+# left over from BEFORE a validation run has no PR and no poll, so it is not this
+# case, and a crew steered back into an active run reports working through
+# pause_state_class's run-step precedence before this class is ever consulted.
+#
+# Deliberately narrow, and the two cheapest gates come first so the hot stale path
+# pays two failed file tests and no fork for every ordinary task: the poll and its
+# data must both be armed, the last status event must be done: (failed: still needs
+# firstmate), and the PR must be recorded in the task's own metadata. Presence is
+# all that is read here; the check sweep remains the sole owner of poll validation.
+task_done_awaiting_merge() {  # <task>
+  local task=$1
+  [ -n "$task" ] || return 1
+  [ -f "$STATE/$task.check.sh" ] || return 1
+  [ -f "$STATE/$task.pr-poll" ] || return 1
+  [ "$(status_line_verb "$(last_status_line "$STATE/$task.status")")" = 'done' ] || return 1
+  grep -q '^pr=' "$STATE/$task.meta" 2>/dev/null
 }
 
 # The task's reconciled current state as "<state>|<source>", refreshing its
@@ -399,7 +460,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       # ticking clock or a token counter, is deliberately not the comparand.
       state_now=$(crew_reconciled_state "$task")
       state_prev=$(cat "$state_file" 2>/dev/null || true)
-      # parked-baseline mode (the decision-wait timer only): a crew waiting on
+      # Baseline modes (the awaiting-firstmate timers only): a crew waiting on
       # firstmate reconciles as positively idle, which is its HEALTHY shape, not
       # evidence of a wedge. There is no earlier escalation to compare against on
       # the first expiry, so record that reading as the baseline and stay quiet
@@ -407,9 +468,16 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       # first-expiry reading still escalates unconditionally, and once a baseline
       # exists the ordinary changed/unchanged rule below governs, so a crew that
       # later moves off that reading still escalates with the count advancing.
-      if [ -z "$state_prev" ] && [ "$mode" = parked-baseline ]; then
-        case "$state_now" in
-          'parked|'*|'blocked|'*)
+      #
+      # Which reading counts as healthy is per-mode, because the two waits park on
+      # different ones: a crew holding at a decision reconciles parked or blocked
+      # (parked-baseline, the decision-wait timer), while a crew that finished and
+      # is parked on an unmerged PR reconciles done - crew-state's checks-green
+      # PR-monitoring reading (finished-baseline, the merge-wait timer). Each mode
+      # accepts only its own, so neither widens the other.
+      if [ -z "$state_prev" ]; then
+        case "$mode:${state_now%%|*}" in
+          parked-baseline:parked|parked-baseline:blocked|finished-baseline:done)
             printf '%s' "$state_now" > "$state_file"
             date +%s > "$recheck_file"
             date +%s > "$since_file"
@@ -456,8 +524,8 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 }
 
 # Absorb a stale pane under a declared external-wait pause (paused:), a
-# dead-agent captain-held transfer, or an open decision firstmate itself owes the
-# task, and re-surface it once every
+# dead-agent captain-held transfer, an open decision firstmate itself owes the
+# task, or a pending merge firstmate owes a finished one, and re-surface it once every
 # PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
 # stale poll once pause_state_class permits the bounded cadence, so it must be
 # cheap: on the external-wait path it NEVER re-reads crew state. The re-surface
@@ -468,17 +536,20 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # re-surface epoch so, once past the window, it fires once per window rather than
 # every poll. Advances the stale suppressor to <hash> and flags the key paused.
 #
-# An open decision suppresses the ROUTINE stale wake ONLY; it never disables wedge
-# detection. A crew steered by firstmate without the resolved: line its status
-# contract requires keeps that key open forever, and such a crew can still freeze.
-# So the decision-wait path keeps a wedge timer running underneath the bounded
-# cadence (.decision-since-<key>, its own file so the provably-working
-# .stale-since-<key> timer keeps its distinct meaning) and hands the escalation to
-# wedge_timer_check, the single owner of the reconciled-state-change rule. A
-# declared paused: external wait and a verified captain-held: transfer are
-# legitimately indefinite, so they keep clearing that bookkeeping as before.
+# An open decision, and equally a pending merge, suppresses the ROUTINE stale wake
+# ONLY; neither disables wedge detection. A crew steered by firstmate without the
+# resolved: line its status contract requires keeps that key open forever, a crew
+# steered again after its done: line keeps that line and its armed poll just as
+# long, and either can still freeze. So both paths keep a wedge timer running
+# underneath the bounded cadence (.decision-since-<key>, one file shared by the two
+# mutually exclusive classes, kept separate from the provably-working
+# .stale-since-<key> timer so that one keeps its distinct meaning) and hand the
+# escalation to wedge_timer_check, the single owner of the reconciled-state-change
+# rule, differing only in which first-expiry reading each treats as its healthy
+# baseline. A declared paused: external wait and a verified captain-held: transfer
+# are legitimately indefinite, so they keep clearing that bookkeeping as before.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason wait_kind
+  local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason wait_kind baseline
   key=$(printf '%s' "$win" | tr ':/.' '___')
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
@@ -487,17 +558,29 @@ handle_paused_stale() {  # <window> <task> <hash>
   # from the status file rather than passed in, so every call site stays unchanged.
   if status_is_paused_or_captain_held "$(last_status_line "$statusf")"; then
     wait_kind=external-wait
+  elif task_done_awaiting_merge "$task"; then
+    wait_kind=merge-wait
   else
     wait_kind=decision-wait
   fi
-  if [ "$wait_kind" = decision-wait ]; then
-    rm -f "$STATE/.stale-since-$key"
-    wedge_timer_check "$win" "$STATE/.decision-since-$key" \
-      "stale (awaiting firstmate)" "$STATE/.wedge-escalations-$key" parked-baseline
-  else
+  # Only the legitimately indefinite external wait clears the wedge bookkeeping.
+  # A merge wait keeps the timer for the same reason an open decision does: a crew
+  # firstmate steered again after its done: line keeps that line and its armed
+  # poll, so it can still freeze while this class says it is parked. The baseline
+  # differs because the healthy reading differs - a crew parked on a merge
+  # reconciles as done, not parked.
+  if [ "$wait_kind" = external-wait ]; then
     rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" \
           "$STATE/.wedge-state-$key" "$STATE/.wedge-rechecked-$key" \
           "$STATE/.decision-since-$key"
+  else
+    rm -f "$STATE/.stale-since-$key"
+    case "$wait_kind" in
+      merge-wait) baseline=finished-baseline ;;
+      *)          baseline=parked-baseline ;;
+    esac
+    wedge_timer_check "$win" "$STATE/.decision-since-$key" \
+      "stale (awaiting firstmate)" "$STATE/.wedge-escalations-$key" "$baseline"
   fi
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
@@ -505,11 +588,17 @@ handle_paused_stale() {  # <window> <task> <hash>
   rf="$STATE/.paused-resurfaced-$key"
   rf_age=$(age_of "$rf")   # 999999 when no prior re-surface
   if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
-    if [ "$wait_kind" = decision-wait ]; then
-      reason="stale: $win (awaiting firstmate ${age}s - the last decision this task raised has no recorded resolution, rechecked on a long cadence not a wedge; decide it, record why it is still held, or record the resolution if it was already steered)"
-    else
-      reason="stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)"
-    fi
+    case "$wait_kind" in
+      decision-wait)
+        reason="stale: $win (awaiting firstmate ${age}s - the last decision this task raised has no recorded resolution, rechecked on a long cadence not a wedge; decide it, record why it is still held, or record the resolution if it was already steered)"
+        ;;
+      merge-wait)
+        reason="stale: $win (awaiting firstmate ${age}s - this task finished and the PR recorded for it is still unmerged, rechecked on a long cadence not a wedge; merge it, get the captain's word, or record why it is still held)"
+        ;;
+      *)
+        reason="stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)"
+        ;;
+    esac
     fm_wake_append stale "$win" "$reason" || exit 1
     date +%s > "$rf"
     wake "$reason"
@@ -537,8 +626,8 @@ clear_pause_tracking() {  # <window>
         "$STATE/.wedge-state-$key" "$STATE/.wedge-rechecked-$key" "$STATE/.decision-since-$key"
 }
 
-# Reconcile a declared pause, a captain-held status, or an open decision firstmate
-# owes the task, against authoritative crew state.
+# Reconcile a declared pause, a captain-held status, an open decision firstmate
+# owes the task, or a merge it owes a finished one, against authoritative crew state.
 # Only a confidently dead ordinary crew may recover paused classification after
 # fm-crew-state has fallen back to stopped or unknown.
 pause_state_class() {  # <window> <task>
@@ -548,16 +637,19 @@ pause_state_class() {  # <window> <task>
   key=${key//./_}
   last=$(last_status_line "$STATE/$task.status")
   recheck_file="$STATE/.paused-rechecked-$key"
-  # Awaiting firstmate's OWN decision: an open keyed needs-decision/blocked with
+  # Awaiting firstmate's OWN action: an open keyed needs-decision/blocked, or a
+  # finished task parked on an armed unmerged PR (task_done_awaiting_merge), with
   # no declared pause. This is the largest measured wake source, and suppressing
   # it loses nothing - the decision was already surfaced when its captain-relevant
   # status line was written, and the heartbeat backstop re-surfaces any that the
-  # per-wake path missed. Unlike the declared-pause path below it does NOT require
-  # a confidently dead agent: a crew that raised a decision and stopped keeps a
-  # live pane by design, which is exactly the population being suppressed.
-  # Authoritative state still wins - a crew that raised a decision and then
-  # STARTED a run reports working - and the costly read is throttled to at most
-  # once per STALE_ESCALATE_SECS by the same recheck marker.
+  # per-wake path missed, and a pending merge has the armed poll itself as an
+  # independent wake source. Unlike the declared-pause path below it does NOT
+  # require a confidently dead agent: a crew that raised a decision or finished its
+  # work keeps a live pane by design, which is exactly the population being
+  # suppressed. Authoritative state still wins - a crew that raised a decision or
+  # was steered again after done: and then STARTED a run reports working - and the
+  # costly read is throttled to at most once per STALE_ESCALATE_SECS by the same
+  # recheck marker.
   if ! status_is_paused_or_captain_held "$last" && task_awaits_firstmate "$task"; then
     if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
       printf 'paused'
