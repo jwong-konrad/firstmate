@@ -34,6 +34,10 @@
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                captain approves, firstmate merges to local main
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
+# A no-mistakes ship brief additionally makes bin/fm-pr-target-guard.sh a
+# precondition of invoking the pipeline, because `no-mistakes init` is the only
+# thing that rewrites the recorded pull-request target and a worker may run it
+# after the spawn-time check already passed.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
@@ -363,7 +367,8 @@ EOF
     ;;
   *)  # no-mistakes (default)
     SETUP2="
-2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`.
+3. Run \`$FM_ROOT/bin/fm-pr-target-guard.sh --explain\` and STOP if it refuses: it prints the repository the pipeline would open this repo's pull request against, and a refusal means that repository is one this home must never reach. Append \`blocked:\` with its refusal line and stop - never work around it. Run it again just before you invoke /no-mistakes if you re-initialized no-mistakes at any point after this step, because \`no-mistakes init\` is the only thing that rewrites that target."
     RESET_EXAMPLES="a push, opening or commenting on a PR, anything destructive"
     RULE1='1. Never push to the default branch. Never merge a PR.'
     DOD=$(cat <<EOF
