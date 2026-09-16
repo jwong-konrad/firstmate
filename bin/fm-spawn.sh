@@ -845,6 +845,21 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
+# Pull-request target guard (bin/fm-pr-target-guard.sh owns the rules and the
+# incident record). A project whose recorded pull-request target is a repository
+# this home must never open a pull request against refuses the spawn here, before
+# a window, worktree, or task record exists - because by the time a worker
+# reaches the pipeline's push step the wrong target is already loaded and nothing
+# downstream re-checks it. A secondmate spawn is exempt: its PROJ_ABS is a
+# firstmate home, not a project checkout, and the secondmate runs this same guard
+# for each project it later spawns into.
+if [ "$KIND" != secondmate ]; then
+  if ! "$SCRIPT_DIR/fm-pr-target-guard.sh" "$PROJ_ABS" >&2; then
+    echo "error: refusing to spawn $ID into $PROJ_ABS until its pull-request target is corrected" >&2
+    exit 1
+  fi
+fi
+
 # The project key both per-project config lookups below are keyed by, and the same
 # name the delivery-mode read further down passes to fm-project-mode.sh: the
 # basename of the projects/<name> clone. A secondmate spawn has no project key at

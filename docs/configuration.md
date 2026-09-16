@@ -308,6 +308,19 @@ A value that is not a positive whole number of seconds is rejected with a warnin
 When the host has none of `timeout`, `gtimeout`, or `perl` to bound the pull with, the refresh is skipped and says so rather than being reported as a slow remote, because running the pull unbounded is never the fallback.
 The refresh takes the same lock name the captain's scheduled dispatchers take for a checkout, so a scheduled refresh and a spawn never double-pull one checkout; a lock already held skips the pull and reports the lock path, and is never reaped, because removing a lock this process does not own is the race the lock exists to prevent.
 
+## Pull-request target denylist (config/pr-target-deny)
+
+`bin/fm-pr-target-guard.sh` refuses work in a checkout whose recorded pull-request target is a repository this home must never open a pull request against.
+Its header owns the rules, the incident record, and exactly what it reads; this section owns only the config file it consults.
+`bin/fm-spawn.sh` runs it on every non-secondmate spawn, and the generated no-mistakes ship brief makes it a precondition of invoking the pipeline.
+
+`config/pr-target-deny` is this home's optional list of forbidden pull-request targets, LOCAL and gitignored, one entry per line, with `#` comments and blank lines ignored.
+An entry may be a full URL (`https://github.com/owner/name`, `git@github.com:owner/name.git`), a `host/owner/name`, or a bare `owner/name`; a bare entry matches on any host, because a denylist should err toward matching.
+Absent is the normal state for a home with nothing to forbid, and the guard still has teeth without it: a remote whose push URL is set to something that is not a URL or a path at all is read as "fetch from here, never push here", and its repository joins the denied set on that evidence alone.
+
+Each entry is a standing rule rather than a preference, so the file is in `FM_INHERITABLE_CONFIG` and propagates to every secondmate home.
+The list is deliberately not shipped in tracked material: firstmate is a shared template whose `CONTRIBUTING.md` describes pull requests to the upstream repo as the normal contribution route, so a denylist baked into the repo would refuse the very work most users came to do.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
