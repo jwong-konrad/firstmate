@@ -119,11 +119,46 @@ print_blockers() {  # <file>
   done < "$file"
 }
 
+# bin/fm-auto-afk.sh may have entered away mode on the captain's behalf while
+# they were quiet. That changed how their fleet was supervised in their absence,
+# so they are told once, on return, in one line. Nothing else distinguishes an
+# auto-armed away session from a hand-typed one: state/.afk is identical, and
+# this record is read only here, only to say it happened.
+# The line follows AGENTS.md section 9 - plain outcome language - and restates
+# the authority boundary, because "it went away on its own" is exactly the
+# moment a captain is entitled to ask what was decided without them.
+auto_away_evidence() {  # -> one captain-facing line, or nothing
+  local line idle hours minutes gap
+  [ -f "$STATE/.auto-afk-armed" ] || return 0
+  IFS= read -r line < "$STATE/.auto-afk-armed" 2>/dev/null || return 0
+  # Field 3 is the measured quiet stretch in seconds; fields 1 and 2 are the
+  # detector's own claim bookkeeping and are deliberately not reported.
+  # -s so a record with no tab at all yields nothing rather than the whole
+  # line, which cut would otherwise hand back and a bare epoch would then be
+  # reported as a gap of half a million hours.
+  idle=$(printf '%s' "$line" | cut -s -f 3)
+  case "$idle" in
+    ''|*[!0-9]*)
+      printf 'away mode started on its own while you were quiet, so routine updates were batched rather than surfaced one at a time; nothing was approved on your behalf.\n'
+      return 0
+      ;;
+  esac
+  hours=$((idle / 3600))
+  minutes=$(((idle % 3600) / 60))
+  if [ "$hours" -gt 0 ]; then
+    gap="${hours}h ${minutes}m"
+  else
+    gap="${minutes}m"
+  fi
+  printf 'away mode started on its own after you were quiet %s, so routine updates were batched rather than surfaced one at a time; nothing was approved on your behalf.\n' "$gap"
+}
+
 clear_delivery_artifacts() {
   rm -f \
     "$STATE/.subsuper-escalations" \
     "$STATE/.subsuper-escalations.since" \
-    "$STATE/.subsuper-inject-wedged"
+    "$STATE/.subsuper-inject-wedged" \
+    "$STATE/.auto-afk-armed"
 }
 
 return_guard() {
@@ -144,6 +179,15 @@ return_reconcile() {
   evidence=$(mktemp "$STATE/.afk-return-evidence.XXXXXX") || return 1
   blockers=$(mktemp "$STATE/.afk-return-blockers.XXXXXX") || { rm -f "$evidence"; return 1; }
   preserve_evidence "$evidence"
+
+  # Read the auto-arm record BEFORE the lifecycle stop, but do not clear it here:
+  # a gated begin must be able to re-derive this line on the retry, and dropping
+  # the record before the evidence is durably placed would lose the captain's
+  # one notice to a failed gate write. append_evidence dedupes by exact record,
+  # so a begin that gated and a later check cannot produce it twice, and
+  # clear_delivery_artifacts drops the record only once the return actually
+  # closes.
+  append_evidence auto-away "$(auto_away_evidence)" "$evidence"
 
   if [ -e "$STATE/.afk" ] || [ -e "$STATE/.afk-daemon-terminal" ]; then
     if ! "$SCRIPT_DIR/fm-afk-launch.sh" stop; then

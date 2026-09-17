@@ -57,6 +57,29 @@ batched digest rather than per-wake injections.
 Away-mode entry with pending notifications is order-sensitive: drain the queue, arm supervision as tracked background work, then immediately start the daemon while the session lock is still held.
 "Arm supervision" here is the primary-harness supervision arm, never a separate `fm-watch.sh` arm, which step 3 rules out.
 
+## Arriving here without the captain typing /afk
+
+`bin/fm-auto-afk.sh` prints an `auto-afk:` directive when the captain has been
+quiet past its threshold (30 minutes by default) and work is still under way.
+Follow it exactly as a captain-typed `/afk`, through the same
+`bin/fm-afk-launch.sh` entry above. Do not add a flag, a marker, or a variant:
+the away session must be indistinguishable from one the captain typed, which is
+what keeps the exit path below unchanged.
+
+Two differences from a typed entry, and only two:
+
+- **Skip the step 4 acknowledgement.** The captain is not reading. Saying
+  nothing now is the point; they are told on return.
+- **The return says it happened.** `bin/fm-afk-return.sh` emits one plain
+  catch-up line naming how long they were quiet and stating that nothing was
+  approved on their behalf. Relay it with the rest of the catch-up; do not
+  expand it into an explanation, and do not omit it.
+
+`docs/captain-idle-handoff.md` owns the threshold, its default-on choice, and
+the structural argument that an auto-armed away mode widens no authority. The
+"Orthogonal to approval authority" section below applies to it without
+exception.
+
 ## How to exit afk
 
 No `/back` is needed. The first genuine message is the return signal:

@@ -4,6 +4,10 @@ This is the authoritative contract for the unprompted handoff capture referenced
 The predicate, the two outputs, and the state it owns live in `bin/fm-captain-idle-handoff.sh`, whose header and `--help` own exact mechanics.
 The banner shape is owned by `bin/fm-banner-lib.sh`, shared with the turn-end supervision alarm.
 
+It is also the owner of the captain-idle *signal* itself, which now has two consumers reading one clock at two thresholds.
+The second is auto-armed away mode (`bin/fm-auto-afk.sh`), below.
+Both are documented here on purpose: two competing notions of "the captain is away" that could disagree would be worse than either alone, so there is exactly one record of when the captain last spoke and exactly one place that explains what reads it.
+
 ## Gap closed
 
 When the captain resumes the main session after a gap longer than the model's prompt-cache lifetime, the whole accumulated conversation is rebuilt at full price instead of being re-read cheaply.
@@ -80,7 +84,9 @@ The banner leaves one field for the agent to fill: `{{HANDOFF_PATH}}`, replaced 
   The captain clears; this only captures and reminds.
 - It never enters away mode.
   Away mode is a declared mode by design, it never widens approval authority (`AGENTS.md` section 8), and its escalations are injected into this same transcript - so it grows the very thing that later gets rebuilt.
-  While `state/.afk` is present the hook stays out of the way entirely and only keeps the captain clock honest, because the away-mode return procedure owns the captain's first unmarked message.
+  Entering it is a separate decision made by `bin/fm-auto-afk.sh`, below, which this hook neither makes nor depends on.
+  While `state/.afk` is present the hook stays out of the way entirely, because the away-mode return procedure owns the captain's first unmarked message.
+  It leaves the clock alone while deferring, so the quiet stretch survives the away session rather than being consumed by it; see "Two thresholds on one clock" below for why that matters.
 - It never blocks, fails, or delays a turn.
   Every path exits 0.
   A failed banner print still counts the handoff as delivered: the failure is logged to `state/.captain-idle-handoff.log` and never escalated.
@@ -98,8 +104,9 @@ The banner leaves one field for the agent to fill: `{{HANDOFF_PATH}}`, replaced 
 Under the effective state directory:
 
 - `.last-captain-input` - epoch of the last genuine captain prompt.
+  This is the shared clock; the auto-arm below reads it and never writes it.
 - `.captain-idle-handoff` - epoch of the stretch a capture was already claimed for.
-- `.captain-idle-handoff.log` - dated log of fires, skipped repeats, unreadable thresholds, and banner-print failures.
+- `.captain-idle-handoff.log` - dated log of fires, skipped repeats, unreadable thresholds, banner-print failures, and stretches deferred because away mode was active.
 
 ## Harness integrations
 
@@ -150,7 +157,96 @@ A second prompt immediately afterwards produced no banner, confirming that the a
 
 An earlier run of the same probe against a deliberately empty scratch checkout produced no banner and one plain line saying the capture was skipped because there was nothing to capture, which is the directive's stated behavior when a capture cannot be completed - not an escalation, and not a blocked turn.
 
+## Auto-armed away mode
+
+`bin/fm-auto-afk.sh` is the second consumer of the clock above.
+Past a much shorter quiet stretch it prints one directive telling firstmate to enter away mode through the ordinary `/afk` path, and firstmate does it.
+Its header owns the exact predicate, decline order, and state; this section owns why it exists and where its limits come from.
+
+### Gap closed
+
+Away mode was already the right tool for a captain-quiet stretch: the sub-supervisor daemon self-handles routine wakes in bash and batches captain-relevant events into one digest, instead of spending a firstmate turn per wake.
+But it only ever armed when the captain typed `/afk` before walking away, which is exactly the moment they do not.
+On 2026-09-16 one session spent 26 monitoring cycles re-arming supervision overnight for a fleet parked entirely on the captain, with no external signal to poll; every one of those cycles was guaranteed to report "unchanged" before it ran.
+The captain requested this on 2026-09-17 in direct response.
+
+### Threshold, and why the default is ON
+
+`config/auto-afk` (local, gitignored) holds seconds, or `off` to disable it entirely; `FM_AUTO_AFK_SECONDS` overrides the file with the same two forms.
+An absent file means 1800 seconds, thirty minutes, **enabled**.
+
+Default-on is the deliberate choice, not an oversight.
+The captain asked for this feature, so an opt-in default would have left the measured waste in place for exactly the captain who requested the fix.
+
+Thirty minutes is far shorter than the handoff's four hours because the two thresholds buy different things and have opposite cost asymmetries.
+The handoff interrupts the captain with a banner, so firing it after a lunch break is a real cost and four hours buys quiet.
+Arming away mode interrupts nobody: it changes only how firstmate spends its own turns while the captain is gone, it exits automatically on their first real message, and a premature arm costs at most a slightly batched update.
+So this threshold sits where the waste starts rather than where the annoyance would.
+A malformed value falls back to the default and is logged, never to anything shorter - a typo must not make firstmate arm away mode more eagerly than asked.
+
+### Two thresholds on one clock
+
+Both detectors read `state/.last-captain-input` and only the handoff hook writes it.
+That record already excludes away-mode daemon injections and supervisor relays, which is the subtle half of "is this really the captain", and it is solved once.
+
+At thirty minutes the auto-arm always fires first, which created one non-obvious way to break the handoff.
+The handoff hook defers while `state/.afk` is present, because the away-mode return procedure owns the captain's first unmarked message.
+That branch used to advance the clock as it deferred.
+Harmless when away mode only ever existed because the captain typed `/afk`; silently fatal once a thirty-minute auto-arm makes `state/.afk` present for essentially every long gap, because the captain's return would land with away mode still up, the clock would jump to now, and a nine-hour gap would read as no gap at all.
+
+So the deferring branch no longer advances the clock.
+The quiet stretch survives the away session and is measured against the real gap on the first message after away mode clears - one message later than before, and still the full stretch.
+The auto-arm itself never writes the clock and never touches `state/.captain-idle-handoff`, so the handoff's own once-per-stretch claim is untouched either way.
+
+### It arms nothing over a parked fleet
+
+Arming requires progressing work or an armed poll, judged through `fm_supervision_status` - the same cached-record reader `bin/fm-turnend-guard.sh` and `bin/fm-watch-arm.sh` use - so this and the arm gate cannot report opposite answers for the same fleet.
+A fleet with nothing progressing is the healthy resting state (`AGENTS.md` section 8), and a daemon over it would batch nothing.
+That is also why the call site is `bin/fm-watch-arm.sh`, immediately after its own gate allows an arm: the gate has just proved there is real work to watch, which is the same precondition away mode needs to be worth entering, and it is the exact moment whose waste this removes.
+
+### Authority is inherited, not restated
+
+`AGENTS.md` section 8 is explicit that away mode never expands approval authority for merges, ask-user findings, destructive actions, irreversible actions, or security-sensitive choices, and never confers the captain-present sandbox override.
+An auto-armed away mode that approved something a hand-typed one would not is the failure this design exists to make impossible, so it is prevented structurally rather than by repetition:
+
+- The detector never sets `state/.afk` and never launches the daemon.
+  It prints a directive; firstmate enters away mode through `bin/fm-afk-launch.sh`, the same single lifecycle owner a typed `/afk` uses.
+- `state/.afk` carries no provenance - it holds an entry timestamp and nothing else - and there is no second flag, no variant, and no "auto" mode.
+- The daemon is presence-gated on `state/.afk` alone and has no approval path of any kind: it classifies wakes and injects digests, and nothing in it reads how that flag came to exist.
+- `bin/fm-afk-return.sh` exits away mode identically. It reads the auto-arm record only to print one line and then delete it; no decision anywhere branches on it.
+
+The directive restates the boundary anyway, because it is the text firstmate reads at the moment it enters the mode.
+
+### The captain is told, once, on return
+
+Auto-arming changed how the fleet was supervised while the captain was gone, so they see it on return rather than discovering it.
+`bin/fm-afk-return.sh` emits one plain-English catch-up line naming how long they were quiet and stating that nothing was approved on their behalf, then clears the record so the same away session is never re-announced.
+Nothing is said at arming time: the captain is not reading, and the return is where the information is worth anything.
+
+### Do not fight a present captain
+
+Every ambiguous reading declines.
+The detector stays silent when away mode is already active, when a return catch-up is still open, when no genuine captain input has ever been recorded, when that record is corrupt or dated in the future, and in a secondmate home or a task worktree.
+It arms at most once per quiet stretch, keyed on the epoch that opened it, so a firstmate that declined or failed to enter away mode is not nagged once per monitoring cycle.
+And because the directive is read one monitoring cycle after it is written, it ends by telling firstmate to do nothing if the captain has spoken since - firstmate is the only party that knows, and a present captain takes precedence.
+
+### Harness reach
+
+The auto-arm inherits the harness matrix above rather than adding one.
+It reads a record only the user-prompt hook writes, so on a primary where that hook is not wired - today `codex`, `opencode`, `pi`, and `grok` - there is no captain clock, the detector reads it as absent, and nothing changes.
+Wiring the hook for one of those harnesses enables both consumers at once, which is the point of sharing the record.
+
+### State it owns
+
+Under the effective state directory:
+
+- `.auto-afk-armed` - `<stretch-epoch>\t<armed-epoch>\t<idle-seconds>` for the stretch already armed, read only by the return path and cleared there.
+- `.auto-afk.log` - dated log of arms and declines with their reasons.
+
 ## Tests
 
-`tests/fm-captain-idle-handoff.test.sh` covers firing past the threshold, staying silent below it, one capture per quiet stretch, a failed banner print still counting the handoff as delivered, the away-mode and supervisor-relay exclusions, away-mode deference, secondmate-home and task-worktree scoping, the missing-`jq` and empty-payload no-ops, threshold configuration and the `off` switch, a live actively-supervised fleet being unaffected, tracked hook registration, and the banner's captain-facing wording.
-All cases are hermetic over temp dirs with an injected clock; none invokes a live language-model harness.
+`tests/fm-captain-idle-handoff.test.sh` covers firing past the threshold, staying silent below it, one capture per quiet stretch, a failed banner print still counting the handoff as delivered, the away-mode and supervisor-relay exclusions, away-mode deference preserving the stretch, secondmate-home and task-worktree scoping, the missing-`jq` and empty-payload no-ops, threshold configuration and the `off` switch, a live actively-supervised fleet being unaffected, tracked hook registration, and the banner's captain-facing wording.
+
+`tests/fm-auto-afk.test.sh` covers the auto-arm: both sides of the threshold boundary, `off` from the file and the environment, a malformed value falling back to the default and never to anything shorter, one arm per quiet stretch with a later stretch arming again, the fleet precondition in both directions, the already-away and mid-return declines, an absent, corrupt, or future-dated clock never reading as a quiet captain, secondmate-home and task-worktree scoping, the shared clock and the handoff's claim being read-only, the handoff still firing at its own threshold after an auto-armed away session, the away-mode exit path being unchanged with and without an auto-arm, the return notice appearing exactly once, and the authority boundary travelling with the directive.
+
+All cases in both suites are hermetic over temp dirs with an injected clock; none invokes a live language-model harness, a real daemon, or real away mode.
