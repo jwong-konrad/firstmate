@@ -6,6 +6,7 @@ This page is the setup record, the isolation evidence, and the teardown procedur
 
 `data/upstream-rebase-strategy-s5/report.md` is the plan of record and owns the phase sequence and the porting decisions.
 This page owns only the vehicle those phases run in.
+[`upstream-port-log.md`](upstream-port-log.md) is the per-phase ledger of what each phase actually ported and where the next phase picks up.
 
 ## Why a separate home and not a branch
 
