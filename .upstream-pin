@@ -1,0 +1,44 @@
+# Vetted upstream ingestion pin.
+#
+# This fork tracks the upstream template repo named below, and that relationship
+# is PULL-ONLY: firstmate fetches from it and never pushes, opens a pull request,
+# or creates any other artifact there.
+#
+# Two different facts, deliberately kept under two names:
+#
+#   sha          how far upstream has been reviewed. An UPSTREAM commit, and the
+#                only value the drift count and the CI gate are computed from.
+#                Upstream work counts as reviewed exactly when it is reachable
+#                from here, so everything upstream published after it is
+#                UNREVIEWED.
+#   review_head  which state of THIS fork the review ended at. Optional, an audit
+#                record only, never used to decide anything.
+#
+# Keeping them apart matters: a fork commit and an upstream commit answer
+# different questions, and one value cannot honestly serve as both. The current
+# pair records the clean review the captain re-baselined to on 2026-08-06:
+# `review_head` is the fork commit that review ended at, and `sha` is
+# `git merge-base <review_head> <upstream branch>`, the furthest upstream commit
+# that review actually reached.
+#
+# Ingesting unreviewed upstream work is what this pin exists to prevent:
+# upstream has previously landed code that injected the maintainer's own secrets
+# into every agent launch, so ingestion is treated as adversarial by default.
+#
+# Advancing `sha` claims that everything newly reachable from it was reviewed.
+# Make that claim only after the review, never to get a merge through.
+#
+# Two consumers read this file, and both are deterministic rather than advisory:
+#   - bin/fm-upstream-gate.sh refuses any push or pull request to the default
+#     branch that ingests upstream commits this pin does not already cover.
+#   - bin/fm-bootstrap.sh reports the unreviewed-commit count at session start.
+#
+# Format: `key=value` lines, `#` comments, blank lines ignored. Keys are `url`,
+# `branch`, `sha`, and optional `review_head`; bin/fm-upstream-pin.sh owns
+# parsing and validation and refuses a file that is missing a required key or
+# holds a malformed value.
+
+url=https://github.com/kunchenguid/firstmate.git
+branch=main
+sha=673b6ad39d01183a19c5bd8a52675a2ee8ea06e6
+review_head=f157a6b605ba3c3d85d5d4e12fad28720b453d3f
