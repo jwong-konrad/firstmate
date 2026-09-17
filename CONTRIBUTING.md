@@ -97,6 +97,13 @@ Discover tests by listing `tests/*.test.sh`: each is a self-contained bash scrip
 Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the portable suite remains safe on machines without those tools.
 The [Herdr backend guide](docs/herdr-backend.md) owns the lane's safety and isolation rationale, including why live harness credential tests remain opt-in.
 
+## Ingesting from upstream
+
+This repo is a fork, and the upstream template is pull-only: never push, open a pull request, or create anything else there.
+Upstream work is unvetted until someone reviews it, so CI refuses any push or pull request to `main` that ingests upstream commits the vetting recorded in [`.upstream-pin`](.upstream-pin) does not already cover.
+If you are merging from upstream, review the range first and advance `sha` in that file to the upstream commit your review reached, in the same change.
+[`docs/upstream-vetting.md`](docs/upstream-vetting.md) explains why the guard sits at the fork-ingestion boundary and what the review weighs.
+
 ## Questions
 
 Open an issue, or talk to me on [Discord](https://discord.gg/Wsy2NpnZDu).

@@ -349,3 +349,46 @@ jobs:
             printf '%s\n' "$tracked"
             exit 1
           fi
+
+  # The fork-ingestion boundary. Upstream is pull-only and its work is unvetted
+  # until someone reviews it, so nothing may enter main carrying upstream
+  # commits the .upstream-pin vetting does not already cover. Rules and refusal
+  # messages: bin/fm-upstream-gate.sh. This gate fails closed, so it needs the
+  # full history and a reachable upstream.
+  upstream-pin:
+    name: Upstream ingestion gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Refuse upstream ingestion the vetting pin does not cover
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+          # This gate fails closed, so a slow runner must not read as a
+          # violation. A cold full fetch of upstream measured 2.6s/23MB on
+          # 2026-09-16; the session-start diagnostic keeps the short default
+          # because there a hung fetch would stall a session start, which is
+          # the opposite trade-off.
+          FM_UPSTREAM_FETCH_TIMEOUT: 120
+        run: |
+          set -eu
+          case "$EVENT_NAME" in
+            pull_request) base=$PR_BASE_SHA ;;
+            push) base=$PUSH_BEFORE_SHA ;;
+            *) echo "::error::upstream gate does not know how to range $EVENT_NAME"; exit 1 ;;
+          esac
+          # A branch-creation push reports an all-zero "before". The first parent
+          # of the new tip is the previous main in every real case here, so range
+          # against it rather than skipping the gate.
+          case "$base" in
+            ''|0000000000000000000000000000000000000000)
+              base=$(git rev-parse --verify --quiet "${HEAD_SHA}^" || true)
+              [ -n "$base" ] || { echo "::error::cannot resolve a base commit to range against"; exit 1; }
+              ;;
+          esac
+          bin/fm-upstream-gate.sh --base "$base" --head "$HEAD_SHA"

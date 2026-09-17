@@ -16,6 +16,7 @@
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed: <reason>",
+#                 "UPSTREAM_DRIFT: <n> unreviewed upstream commit(s) since <sha>[ (count may be stale...)]",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
 #          own current default-branch commit (a purely LOCAL fast-forward, never
@@ -66,6 +67,17 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
+#          The upstream drift diagnostic reports how far the fork's template
+#          upstream has run ahead of the vetted ingestion pin (bin/fm-upstream-pin.sh,
+#          .upstream-pin). It is ADVISORY and deliberately never blocks: a zero
+#          count is silent, and no upstream ref at all is silent too, because a
+#          session must still start offline. It fetches only when this session
+#          holds the lock (the fetch is a network call and a ref write, so a
+#          detect-only session reports from whatever refs are already present
+#          and says the count may be stale). The CI gate at the fork-ingestion
+#          boundary, bin/fm-upstream-gate.sh, is the enforcing half; this line
+#          only makes the drift visible. Bounded by FM_UPSTREAM_FETCH_TIMEOUT,
+#          and FM_NO_UPSTREAM_DRIFT=1 turns the diagnostic off entirely.
 #          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the five MUTATING sweeps
 #          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
 #          x_mode_setup, fleet_sync) while still printing every read-only detect line
@@ -182,6 +194,34 @@ fleet_sync() {
 
   fleet_sync_relay_filtered_output "$tmp"
   rm -f "$tmp"
+}
+
+# Advisory drift report. Every failure path here is silent on purpose: an
+# unreachable upstream, a missing ref, or an unreadable pin must not turn a
+# session start into a stop. Enforcement lives in bin/fm-upstream-gate.sh.
+upstream_drift() {
+  local pin sha count stale=""
+  [ "${FM_NO_UPSTREAM_DRIFT:-0}" != 1 ] || return 0
+  # Resolved from the running code's own directory, not FM_ROOT/bin: the
+  # diagnostic reports on the repo at FM_ROOT using this firstmate's tooling.
+  pin="$SCRIPT_DIR/fm-upstream-pin.sh"
+  [ -x "$pin" ] || return 0
+  [ -f "$FM_ROOT/.upstream-pin" ] || return 0
+
+  sha=$("$pin" --repo "$FM_ROOT" --sha 2>/dev/null) || return 0
+
+  if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
+    "$pin" --repo "$FM_ROOT" --fetch 2>/dev/null || stale=" (count may be stale - upstream fetch failed)"
+  else
+    stale=" (count may be stale - read-only session did not fetch)"
+  fi
+
+  count=$("$pin" --repo "$FM_ROOT" --count 2>/dev/null) || return 0
+  case "$count" in
+    ''|*[!0-9]*) return 0 ;;
+    0) return 0 ;;
+  esac
+  echo "UPSTREAM_DRIFT: $count unreviewed upstream commit(s) since $sha$stale"
 }
 
 secondmate_sync() {
@@ -855,6 +895,7 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
   && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
   echo "BOOTSTRAP_INFO: tasks-axi available"
 fi
+upstream_drift
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_liveness_sweep
   secondmate_sync

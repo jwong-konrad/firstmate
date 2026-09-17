@@ -14,7 +14,9 @@
 # which no-mistakes version is on PATH.
 # Dedicated fleet-sync cases pin the computed bootstrap timeout, explicit
 # override, blank-env defaulting, partial-output relay, and pre-launch timeout
-# scan.
+# scan. Dedicated upstream-drift cases pin the advisory UPSTREAM_DRIFT line:
+# what it reports, when it stays silent, and that no failure path in it can
+# stop a session start.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -786,6 +788,138 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+# --- upstream drift diagnostic ---------------------------------------------
+#
+# The drift line is ADVISORY. Enforcement is bin/fm-upstream-gate.sh in CI, so
+# the property these cases protect is that nothing here can block a session:
+# every failure is silent, and the exit stays 0.
+
+# make_drift_fixture <case_dir> <pin-sha-key>: a fixture upstream with three
+# commits and a FM_ROOT clone holding only the first, pinned per <pin-sha-key>
+# ("behind" = 2 unreviewed, "level" = 0). Echoes "root|home|fakebin".
+make_drift_fixture() {
+  local case_dir=$1 which=$2 root home up fakebin u1 u3 sha
+  root="$case_dir/root"
+  home="$case_dir/home"
+  up="$case_dir/upstream"
+  fm_git_identity
+  mkdir -p "$home/config" "$home/state" "$up"
+
+  git init -q -b main "$up"
+  printf 'one\n' > "$up/u1"; git -C "$up" add -A; git -C "$up" commit -qm u1
+  u1=$(git -C "$up" rev-parse HEAD)
+  printf 'two\n' > "$up/u2"; git -C "$up" add -A; git -C "$up" commit -qm u2
+  printf 'three\n' > "$up/u3"; git -C "$up" add -A; git -C "$up" commit -qm u3
+  u3=$(git -C "$up" rev-parse HEAD)
+
+  git clone --quiet "$up" "$root"
+  git -C "$root" checkout -q -B main "$u1"
+  case "$which" in
+    level) sha=$u3 ;;
+    *) sha=$u1 ;;
+  esac
+  {
+    printf 'url=file://%s\n' "$(cd "$up" && pwd)"
+    printf 'branch=main\n'
+    printf 'sha=%s\n' "$sha"
+  } > "$root/.upstream-pin"
+
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+  printf '%s|%s|%s\n' "$root" "$home" "$fakebin"
+}
+
+run_drift_bootstrap() {
+  local fixture=$1 root home fakebin
+  shift
+  root=${fixture%%|*}
+  fixture=${fixture#*|}
+  home=${fixture%%|*}
+  fakebin=${fixture#*|}
+  env "$@" PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$home" \
+    FM_ROOT_OVERRIDE="$root" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    bash "$ROOT/bin/fm-bootstrap.sh"
+}
+
+test_upstream_drift_reports_unreviewed_commits() {
+  local out rc=0
+  out=$(run_drift_bootstrap "$(make_drift_fixture "$TMP_ROOT/drift-behind" behind)") || rc=$?
+  expect_code 0 "$rc" "the drift diagnostic must never fail a session start"
+  assert_contains "$out" "UPSTREAM_DRIFT: 2 unreviewed upstream commit(s) since " \
+    "drift line must report the real count and the pin it counted from"
+  pass "bootstrap reports the unreviewed upstream commit count when there is drift"
+}
+
+test_upstream_drift_is_silent_with_nothing_unreviewed() {
+  local out rc=0
+  out=$(run_drift_bootstrap "$(make_drift_fixture "$TMP_ROOT/drift-level" level)") || rc=$?
+  expect_code 0 "$rc" "a level pin must not fail a session start"
+  assert_not_contains "$out" "UPSTREAM_DRIFT" "a pin level with upstream must print nothing"
+  pass "bootstrap stays silent when no upstream commits are unreviewed"
+}
+
+test_upstream_drift_survives_an_unreachable_upstream() {
+  local fixture out rc=0 root
+  fixture=$(make_drift_fixture "$TMP_ROOT/drift-offline" behind)
+  root=${fixture%%|*}
+  # A session start offline, or against an upstream that has gone away, still
+  # has to start. It reports from the refs it has and says the count may be old.
+  "$ROOT/bin/fm-upstream-pin.sh" --repo "$root" --fetch >/dev/null 2>&1 \
+    || fail "fixture fetch failed before the offline case"
+  rm -rf "$TMP_ROOT/drift-offline/upstream"
+
+  out=$(run_drift_bootstrap "$fixture") || rc=$?
+  expect_code 0 "$rc" "an unreachable upstream must not fail a session start"
+  assert_contains "$out" "UPSTREAM_DRIFT: 2 unreviewed" "the last known count should still be reported"
+  assert_contains "$out" "count may be stale" "a failed fetch must be marked stale, not presented as current"
+  pass "an unreachable upstream leaves the diagnostic advisory and the session start intact"
+}
+
+test_upstream_drift_with_nothing_known_is_silent() {
+  local fixture out rc=0
+  # Never fetched, and upstream is gone: nothing is known, so nothing is
+  # claimed. Silence beats a number nobody can stand behind.
+  fixture=$(make_drift_fixture "$TMP_ROOT/drift-unknown" behind)
+  rm -rf "$TMP_ROOT/drift-unknown/upstream"
+
+  out=$(run_drift_bootstrap "$fixture") || rc=$?
+  expect_code 0 "$rc" "an unknown drift state must not fail a session start"
+  assert_not_contains "$out" "UPSTREAM_DRIFT" "with no upstream ref at all the diagnostic must say nothing"
+  pass "bootstrap says nothing about drift when it has never seen upstream"
+}
+
+test_upstream_drift_can_be_switched_off() {
+  local out rc=0
+  out=$(run_drift_bootstrap "$(make_drift_fixture "$TMP_ROOT/drift-off" behind)" \
+    FM_NO_UPSTREAM_DRIFT=1) || rc=$?
+  expect_code 0 "$rc" "the opt-out must not fail a session start"
+  assert_not_contains "$out" "UPSTREAM_DRIFT" "FM_NO_UPSTREAM_DRIFT=1 must silence the diagnostic"
+  pass "the drift diagnostic can be switched off entirely"
+}
+
+test_upstream_drift_detect_only_does_not_fetch() {
+  local fixture out rc=0 root up
+  fixture=$(make_drift_fixture "$TMP_ROOT/drift-detect-only" behind)
+  root=${fixture%%|*}
+  up="$TMP_ROOT/drift-detect-only/upstream"
+  "$ROOT/bin/fm-upstream-pin.sh" --repo "$root" --fetch >/dev/null 2>&1 \
+    || fail "fixture fetch failed before the detect-only case"
+
+  # Upstream moves after that fetch. A read-only session holds no lock, so it
+  # must not make the network call that would notice - it reports the count it
+  # already has and marks it as possibly old.
+  printf 'four\n' > "$up/u4"
+  git -C "$up" add -A
+  git -C "$up" commit -qm u4
+
+  out=$(run_drift_bootstrap "$fixture" FM_BOOTSTRAP_DETECT_ONLY=1) || rc=$?
+  expect_code 0 "$rc" "a read-only session start must still succeed"
+  assert_contains "$out" "UPSTREAM_DRIFT: 2 unreviewed" "detect-only must report from the refs it already had"
+  assert_not_contains "$out" "3 unreviewed" "detect-only must not have fetched the new upstream commit"
+  assert_contains "$out" "read-only session did not fetch" "detect-only must mark the count as possibly stale"
+  pass "a read-only session start reports drift without fetching"
+}
+
 run_case test_bootstrap_reporting
 run_case test_no_mistakes_min_version
 run_case test_git_is_required_with_supported_install_instruction
@@ -807,4 +941,10 @@ run_case test_routine_bootstrap_contract_runs_under_system_bash
 run_case test_bootstrap_info_is_no_load_and_actionable_lines_trigger
 run_case test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 run_case test_crew_dispatch_validation
+run_case test_upstream_drift_reports_unreviewed_commits
+run_case test_upstream_drift_is_silent_with_nothing_unreviewed
+run_case test_upstream_drift_survives_an_unreachable_upstream
+run_case test_upstream_drift_with_nothing_known_is_silent
+run_case test_upstream_drift_can_be_switched_off
+run_case test_upstream_drift_detect_only_does_not_fetch
 fm_case_summary "fm-bootstrap"
