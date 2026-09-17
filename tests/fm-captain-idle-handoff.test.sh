@@ -217,17 +217,43 @@ test_from_firstmate_relay_is_not_captain_input() {
 }
 
 test_away_mode_owns_the_session() {
-  local dir out now
+  local dir out now last
   dir=$(make_primary_dir "$TMP_ROOT/afk")
   now=1800000000
-  seed_stretch "$dir" $((now - 8 * HOUR))
+  last=$((now - 8 * HOUR))
+  seed_stretch "$dir" "$last"
   : > "$dir/state/.afk"
   run_hook "$dir" "$now"
   out=$HOOK_OUT
   [ -z "$out" ] || fail "away mode owns the session; the hook must stay out of it, got: $out"
   assert_absent "$dir/state/.captain-idle-handoff" "away mode must leave no claim behind"
-  assert_grep "$now" "$dir/state/.last-captain-input" "away mode still keeps the captain clock honest"
-  pass "idle auto-handoff: stays out of the way while away mode is active"
+  # Deferring must PRESERVE the stretch, not consume it. Away mode can now be
+  # armed on the captain's behalf after 30 quiet minutes (bin/fm-auto-afk.sh),
+  # so advancing the clock here would let a short auto-arm silently swallow
+  # every long gap this hook exists to capture.
+  assert_grep "$last" "$dir/state/.last-captain-input" \
+    "deferring to away mode must preserve the quiet stretch, not advance the clock"
+  pass "idle auto-handoff: defers to away mode without consuming the quiet stretch"
+}
+
+test_the_deferred_stretch_is_captured_once_away_mode_clears() {
+  local dir now last
+  dir=$(make_primary_dir "$TMP_ROOT/afk-deferred")
+  now=1800000000
+  last=$((now - 8 * HOUR))
+  seed_stretch "$dir" "$last"
+  : > "$dir/state/.afk"
+  run_hook "$dir" "$now"
+  [ -z "$HOOK_OUT" ] || fail "the hook must stay silent while away mode is active"
+  # Away mode exits; the very next captain message is still measured against the
+  # real eight-hour gap.
+  rm -f "$dir/state/.afk"
+  run_hook "$dir" $((now + 120))
+  assert_contains "$HOOK_OUT" 'CLEAR BEFORE SESSION' \
+    "the preserved stretch must still be captured on the first message after away mode clears"
+  assert_grep "$last" "$dir/state/.captain-idle-handoff" \
+    "the capture must claim the stretch it actually measured"
+  pass "idle auto-handoff: a stretch deferred by away mode is captured once it clears"
 }
 
 test_silent_in_secondmate_home() {
@@ -450,7 +476,11 @@ test_never_clears_or_enters_away_mode() {
   assert_contains "$body" 'Do NOT clear or compact anything yourself' \
     "the directive must forbid the agent from clearing the session itself"
   assert_contains "$body" 'do NOT enter away mode' "the directive must forbid entering away mode"
-  assert_not_contains "$body" 'fm-afk' "the hook must never reach for away-mode machinery"
+  # It may NAME the sibling that does enter away mode - explaining why this one
+  # does not advance the clock requires saying so - but must never reach for the
+  # lifecycle itself.
+  assert_not_contains "$body" 'fm-afk-launch' "the hook must never reach for away-mode machinery"
+  assert_not_contains "$body" 'fm-afk-start' "the hook must never reach for away-mode machinery"
   # shellcheck disable=SC2016  # single quotes are deliberate: a literal needle string, not an expansion
   assert_not_contains "$body" 'touch "$STATE/.afk"' "the hook must never set the away-mode flag"
   pass "idle auto-handoff: never clears the session and never enters away mode"
@@ -476,6 +506,7 @@ run_case test_no_prior_captain_input_starts_the_clock_silently
 run_case test_daemon_injection_is_not_captain_input
 run_case test_from_firstmate_relay_is_not_captain_input
 run_case test_away_mode_owns_the_session
+run_case test_the_deferred_stretch_is_captured_once_away_mode_clears
 run_case test_silent_in_secondmate_home
 run_case test_silent_in_crewmate_worktree
 run_case test_silent_without_stdin

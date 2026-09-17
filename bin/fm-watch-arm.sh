@@ -93,6 +93,15 @@
 # says so in the printed line so the operator can tell a budgeted arm from an
 # arm that saw real progress.
 #
+# AWAY-MODE AUTO-ARM. Once the gate has allowed an arm, this runs
+# bin/fm-auto-afk.sh, which decides on its own whether the captain has been quiet
+# long enough that away mode should take over the monitoring firstmate would
+# otherwise do a turn at a time. It is advisory only: it prints a directive for
+# firstmate and never touches the watcher, the lock, or any task state, so it
+# cannot affect anything this script promises. Arming is the right place for it
+# precisely because the gate has just proved there is real work to watch, which
+# is the same precondition away mode needs to be worth entering.
+#
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
 # state/.watch.lock) and own a fresh cycle, or attach if a verified live peer
 # wins the singleton while the duplicate child stands down. It
@@ -499,6 +508,16 @@ arm_gate_allows() {
 }
 
 arm_gate_allows || exit 0
+
+# The gate just proved there is real work to watch, which is also the exact
+# precondition for auto-arming away mode: a quiet captain plus a fleet that keeps
+# producing wakes is the case where every further monitoring cycle spends a
+# firstmate turn nobody is reading. bin/fm-auto-afk.sh owns that decision
+# entirely; it only ever PRINTS a directive for firstmate to act on, never
+# touches supervision, and always exits 0, so it can neither arm anything here
+# nor cost this home a watcher. Guarded anyway, because nothing in this script's
+# job depends on it.
+"$SCRIPT_DIR/fm-auto-afk.sh" 2>/dev/null || true
 
 if [ "$mode" = restart ]; then
   # Home-scoped stop: only the watcher pid recorded in THIS home's lock.

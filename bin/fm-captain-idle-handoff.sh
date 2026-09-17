@@ -36,6 +36,10 @@
 # clears, this only captures and reminds. It never enters away mode: away mode is
 # a declared mode, it never widens approval authority, and its escalations are
 # injected into this same transcript, so it GROWS the very thing being rebuilt.
+# (Away mode may still be entered on the captain's behalf by bin/fm-auto-afk.sh -
+# a separate decision, on the same shared clock, that this hook neither makes nor
+# depends on; while its flag is present this hook defers and, crucially, leaves
+# the clock alone so the stretch is not lost.)
 # It never blocks, fails, or delays a turn: every path exits 0, and if the banner
 # cannot be printed the handoff still counts as delivered and the failure is
 # logged rather than escalated. It touches no watcher, lock, wake-queue, or task
@@ -62,6 +66,11 @@ State it owns, under the effective state dir:
   .last-captain-input       epoch of the last genuine captain prompt
   .captain-idle-handoff     epoch of the stretch a capture was already claimed for
   .captain-idle-handoff.log dated log of fires, skips, and banner-print failures
+
+While away mode is active this defers to the away-mode return procedure and
+leaves the clock alone, so a quiet stretch survives an away session - including
+one armed automatically by bin/fm-auto-afk.sh - and is captured on the first
+message after away mode clears.
 USAGE
     exit 0
     ;;
@@ -180,9 +189,19 @@ esac
 # Away mode owns the session while it is active, and its own return procedure
 # owns the captain's first unmarked message. Adding a handoff directive on top of
 # that would collide with a contract this hook does not own, so stay out of the
-# way and only keep the clock honest.
+# way.
+#
+# But do NOT advance the clock here, which this branch used to do. Away mode can
+# now be armed on the captain's behalf after a short quiet stretch
+# (bin/fm-auto-afk.sh, 30 minutes by default) rather than only by a captain who
+# typed /afk, so marking here would let that short auto-arm silently swallow
+# every quiet stretch this hook exists to capture: the captain's return message
+# would land with away mode still up, the clock would jump to now, and a
+# nine-hour gap would look like no gap at all. Preserving the stretch instead
+# defers the capture to the first message after away mode clears - one message
+# later than it used to arrive, and still measured against the real gap.
 if [ -e "$STATE/.afk" ]; then
-  mark_now
+  note away-mode-deferred "stretch=$(read_epoch "$MARK" || printf none)"
   exit 0
 fi
 

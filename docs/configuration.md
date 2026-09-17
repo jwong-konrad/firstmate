@@ -113,6 +113,18 @@ An absent file means the built-in default of 14400 seconds (four hours), and an 
 The hook owns three records under `state/`: `.last-captain-input`, `.captain-idle-handoff`, and `.captain-idle-handoff.log`.
 See [`captain-idle-handoff.md`](captain-idle-handoff.md) for the measured rationale, the signal it chose and why, the threshold reasoning, the safety boundaries, and the harness matrix.
 
+## Auto-armed away mode (config/auto-afk)
+
+When the captain has been quiet past a configured stretch and work is still under way, `bin/fm-auto-afk.sh` tells firstmate to enter away mode through the ordinary `/afk` path, so the sub-supervisor daemon batches routine wakes instead of firstmate spending a turn on each one.
+`config/auto-afk` (local, gitignored) holds the threshold on its first non-empty, non-comment line: a value in seconds, or `off` to disable the auto-arm entirely.
+`FM_AUTO_AFK_SECONDS` overrides the file with the same two forms.
+An absent file means the built-in default of 1800 seconds (thirty minutes) and, deliberately, **enabled**; an unreadable value falls back to that default rather than to anything shorter.
+
+It reads the same `state/.last-captain-input` clock the idle auto-handoff writes and never writes it, so the two thresholds cannot disagree about whether the captain is present.
+It arms nothing over a fleet with no progressing work and no armed poll, and it owns two records under `state/`: `.auto-afk-armed` and `.auto-afk.log`.
+The away mode that results is indistinguishable from a hand-typed `/afk`, inherits every approval limit in `AGENTS.md` section 8 without exception, and exits through the unchanged return path, which tells the captain in one line that it happened.
+See [`captain-idle-handoff.md`](captain-idle-handoff.md) for the measured rationale, the two-thresholds-one-clock contract, and the structural argument that no authority is widened.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.
@@ -486,6 +498,7 @@ FMX_FOLLOWUP_MAX_COUNT=3   # local cap on X-mode completion follow-ups per linke
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
 FM_GUARD_GRACE=300      # seconds before guard warnings, arm health checks, and the primary turn-end guard treat a watcher beacon as stale
 FM_IDLE_HANDOFF_SECONDS=14400   # captain-quiet stretch before an auto-handoff and its CLEAR BEFORE SESSION reminder; `off` disables it, and config/idle-handoff holds the standing choice (docs/captain-idle-handoff.md)
+FM_AUTO_AFK_SECONDS=1800        # captain-quiet stretch before away mode arms itself; `off` disables it, and config/auto-afk holds the standing choice (docs/captain-idle-handoff.md)
 FM_ARM_CONFIRM_TIMEOUT=10   # seconds fm-watch-arm waits to confirm a fresh watcher before reporting FAILED
 FM_ARM_GATE_BUDGET_SECS=8   # total wall clock fm-watch-arm's conditional-arming gate may spend on authoritative progress reconciles; each reconcile is also killed at half this ceiling, and a spent budget always arms (docs/supervision-arming.md)
 FM_PROGRESS_IDLE_TTL=900   # seconds an `idle` state/.progress-<id> verdict is believed, and the same bound on the age of the status log a status-log-sourced idle reading rests on; past it the task counts progressing again with no trigger required (docs/supervision-arming.md)
