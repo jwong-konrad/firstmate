@@ -80,6 +80,7 @@ config/herdr-presentation-spaces  optional presence flag for Herdr's default-off
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
 config/idle-handoff  optional captain-quiet stretch before an unprompted handoff capture and its CLEAR BEFORE SESSION reminder; LOCAL, gitignored; seconds or "off", absent means four hours; see docs/captain-idle-handoff.md
+config/context-handoff  optional margin, in percentage points before auto-compaction, at which the same handoff capture fires; LOCAL, gitignored; points or "off", absent means five; see docs/captain-idle-handoff.md
 config/auto-afk  optional captain-quiet stretch before away mode arms itself on the same clock; LOCAL, gitignored; seconds or "off", absent means thirty minutes and ENABLED; the resulting away mode is indistinguishable from a typed /afk and widens no authority; see docs/captain-idle-handoff.md
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
 data/                personal fleet records; LOCAL, gitignored as a whole
@@ -113,7 +114,7 @@ state/               volatile runtime signals; gitignored
   x-poll.error x-poll.claim-error  generated X-mode relay and offer-claim diagnostic dedupe markers
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
-  .last-captain-input .captain-idle-handoff .captain-idle-handoff.log  idle auto-handoff records: the last genuine captain prompt, the quiet stretch already captured, and its log; owned by bin/fm-captain-idle-handoff.sh, which alone writes the shared captain clock
+  .last-captain-input .captain-idle-handoff .captain-idle-handoff.log .context-handoff .context-handoff-model  auto-handoff records: the last genuine captain prompt, the quiet stretch and the context climb already captured, the cached model identity, and their log; owned by bin/fm-captain-idle-handoff.sh, which alone writes the shared captain clock
   .auto-afk-armed .auto-afk.log  auto-armed away-mode records: the quiet stretch already armed and its log; owned by bin/fm-auto-afk.sh, read once by bin/fm-afk-return.sh to tell the captain it happened
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
   .progress-<id>     durable progressing-or-idle verdict for a task; written by the arm gate and the watcher, read cheaply by the guards, and treated as progressing when absent or stale (bin/fm-progress-lib.sh, docs/supervision-arming.md)

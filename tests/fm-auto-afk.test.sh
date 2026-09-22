@@ -35,7 +35,8 @@ install_scripts() {  # <dir>
   local dir=$1 f
   mkdir -p "$dir/bin"
   for f in fm-auto-afk.sh fm-captain-idle-handoff.sh fm-primary-scope-lib.sh \
-           fm-supervision-lib.sh fm-progress-lib.sh fm-banner-lib.sh fm-marker-lib.sh; do
+           fm-supervision-lib.sh fm-progress-lib.sh fm-banner-lib.sh fm-marker-lib.sh \
+           fm-context-fill-lib.sh; do
     cp "$ROOT/bin/$f" "$dir/bin/$f"
   done
   chmod +x "$dir/bin/fm-auto-afk.sh" "$dir/bin/fm-captain-idle-handoff.sh"

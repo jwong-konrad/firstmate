@@ -113,6 +113,17 @@ An absent file means the built-in default of 14400 seconds (four hours), and an 
 The hook owns three records under `state/`: `.last-captain-input`, `.captain-idle-handoff`, and `.captain-idle-handoff.log`.
 See [`captain-idle-handoff.md`](captain-idle-handoff.md) for the measured rationale, the signal it chose and why, the threshold reasoning, the safety boundaries, and the harness matrix.
 
+## Context-fill handoff (config/context-handoff)
+
+The same hook also runs that capture on the first genuine captain prompt once the session is close to auto-compacting, once per climb, re-armed only after a compaction or a clear drops the fill.
+It fires a margin of percentage points before Claude Code's own compaction point, which is `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` when set and Claude Code's default otherwise, so with that override at 45 and the default margin it fires at 40.
+`config/context-handoff` (local, gitignored) holds the margin on its first non-empty, non-comment line: a number of points, or `off` to disable only this condition.
+`FM_CONTEXT_HANDOFF_MARGIN` overrides the file with the same two forms.
+An absent file means 5 points; a malformed value falls back to 5 and is logged, and a margin that leaves the fire point at or below zero does nothing.
+The window comes from the transcript's model identity, where a `[1m]` suffix means 1,000,000 tokens; for any other model `FM_CONTEXT_WINDOW_TOKENS` declares it, and without either the condition does nothing rather than guess.
+It owns two records under `state/`: `.context-handoff` and `.context-handoff-model`, and logs to `.captain-idle-handoff.log`.
+See [`captain-idle-handoff.md`](captain-idle-handoff.md) "Context-fill trigger" for the signal, its measured accuracy, and its limits.
+
 ## Auto-armed away mode (config/auto-afk)
 
 When the captain has been quiet past a configured stretch and work is still under way, `bin/fm-auto-afk.sh` tells firstmate to enter away mode through the ordinary `/afk` path, so the sub-supervisor daemon batches routine wakes instead of firstmate spending a turn on each one.
@@ -498,6 +509,8 @@ FMX_FOLLOWUP_MAX_COUNT=3   # local cap on X-mode completion follow-ups per linke
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
 FM_GUARD_GRACE=300      # seconds before guard warnings, arm health checks, and the primary turn-end guard treat a watcher beacon as stale
 FM_IDLE_HANDOFF_SECONDS=14400   # captain-quiet stretch before an auto-handoff and its CLEAR BEFORE SESSION reminder; `off` disables it, and config/idle-handoff holds the standing choice (docs/captain-idle-handoff.md)
+FM_CONTEXT_HANDOFF_MARGIN=5     # percentage points before Claude Code auto-compacts at which the same auto-handoff fires; `off` disables it, and config/context-handoff holds the standing choice (docs/captain-idle-handoff.md)
+FM_CONTEXT_WINDOW_TOKENS=       # explicit context window, tokens (k/m suffixes accepted), for a model whose window the transcript does not state; unset means never guess (docs/captain-idle-handoff.md)
 FM_AUTO_AFK_SECONDS=1800        # captain-quiet stretch before away mode arms itself; `off` disables it, and config/auto-afk holds the standing choice (docs/captain-idle-handoff.md)
 FM_ARM_CONFIRM_TIMEOUT=10   # seconds fm-watch-arm waits to confirm a fresh watcher before reporting FAILED
 FM_ARM_GATE_BUDGET_SECS=8   # total wall clock fm-watch-arm's conditional-arming gate may spend on authoritative progress reconciles; each reconcile is also killed at half this ceiling, and a spent budget always arms (docs/supervision-arming.md)
