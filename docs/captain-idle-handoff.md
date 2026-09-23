@@ -3,6 +3,7 @@
 This is the authoritative contract for the unprompted handoff capture referenced from the `handoff` skill and `docs/configuration.md`.
 The predicate, the two outputs, and the state it owns live in `bin/fm-captain-idle-handoff.sh`, whose header and `--help` own exact mechanics.
 The banner shape is owned by `bin/fm-banner-lib.sh`, shared with the turn-end supervision alarm.
+The same capture also fires shortly before Claude Code auto-compacts the session; see "Context-fill trigger" below.
 
 It is also the owner of the captain-idle *signal* itself, which now has two consumers reading one clock at two thresholds.
 The second is auto-armed away mode (`bin/fm-auto-afk.sh`), below.
@@ -157,6 +158,85 @@ A second prompt immediately afterwards produced no banner, confirming that the a
 
 An earlier run of the same probe against a deliberately empty scratch checkout produced no banner and one plain line saying the capture was skipped because there was nothing to capture, which is the directive's stated behavior when a capture cannot be completed - not an escalation, and not a blocked turn.
 
+## Context-fill trigger
+
+The same hook has a second reason to fire: the session is about to auto-compact.
+It is a second condition feeding the same capture, directive, banner, filters, and limits above, not a second mechanism.
+`bin/fm-context-fill-lib.sh` owns how the fill, the window, and the compaction point are read; the hook owns the margin and the once-per-climb claim; this section owns why.
+
+### Gap closed
+
+Claude Code compacts a long conversation into a summary once it passes a threshold, and that summary is lossy: mid-discussion reasoning that never reached disk is gone afterwards.
+On 2026-09-22 the captain lowered that threshold to 45% (`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=45` in their global Claude Code settings, down from 90) and asked for the handoff to land about five points before it.
+The quiet-stretch condition cannot do that: a busy session can climb to its compaction point in an afternoon without the captain ever stepping away.
+
+### The signal
+
+Measured first-hand on 2026-09-22 against Claude Code 2.1.280 (Darwin 27.0.0).
+
+- The `UserPromptSubmit` payload carries `session_id`, `transcript_path`, `cwd`, `prompt_id`, `permission_mode`, `hook_event_name`, and `prompt`, and nothing about the model, usage, or context; the hook's environment carries no model id either.
+  Probe: a scratch project whose hook dumped stdin and `env`, driven by `claude -p "Reply with just OK."`.
+- Statusline data does carry a context reading, but only to the captain's own statusline command, which is private global configuration a tracked hook must neither depend on nor rewrite.
+- The transcript carries both halves.
+  Every main-chain assistant line records the usage of the request that produced it, and Claude Code counts the context as input plus cache-creation plus cache-read plus output tokens of the latest such usage.
+  A `model` attachment line records the session's model identity including the `[1m]` window suffix (`claude-opus-5-5[1m]`), and Claude Code reads the last one and re-emits it when the identity changes.
+
+So the fill is the latest main-chain usage in the transcript tail, and the window is the latest model identity.
+A compaction boundary newer than that usage means the session was just compacted, and its recorded post-compaction size becomes the fill.
+
+Accuracy, measured over 419 captain prompts in two real primary transcripts: the reading at prompt time under-counts the request that follows by a median of about 350 tokens and a p99 of about 1,600, because the prompt being submitted is not in it yet.
+That is under 0.2 percentage points of a 1M window, against a 5-point margin.
+Read against the full file with `jq`, the tail reading matched the latest usage exactly (547,096 tokens on the largest current transcript).
+
+Cost: the fill read looks only at the transcript's last 256 KiB.
+Across 767 captain prompts in the eight largest real primary transcripts the latest assistant line sat a median 3.5 KiB and at most 73 KiB before the prompt, so the window has more than three times the worst observed headroom.
+The model identity line sits near the start of the file, so it is found once per transcript and cached with the bytes scanned; later prompts scan only what was appended since.
+The whole context condition adds about 90 ms per prompt on the measuring host (ten runs against a 4.8 MB transcript: 1.57 s with it, 0.70 s with it `off`).
+
+### Where it fires
+
+Claude Code's compaction arithmetic, read from the installed 2.1.280 binary: the effective window is the model window less `min(max output, 20000)` tokens reserved for the reply, the default compaction point is 13,000 tokens short of that, and `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` lowers it to that percentage of the effective window when it is lower.
+The hook fires at the compaction point less the margin, in points of that same effective window, so the margin means what the captain's own setting means.
+
+Under the captain's current setting, with a 1M window:
+
+| Quantity | Tokens | Share of the 980,000-token effective window |
+| --- | --- | --- |
+| Effective window | 980,000 | 100% |
+| Auto-compaction | 441,000 | 45% |
+| Handoff fire point | 392,000 | 40% |
+
+Without the override the same window compacts at 967,000 (about 99%) and the hook fires at 918,000.
+
+`config/context-handoff` (local, gitignored) holds the margin in percentage points on its first non-empty, non-comment line, or `off` to disable only this condition; `FM_CONTEXT_HANDOFF_MARGIN` overrides the file.
+A malformed margin falls back to the default and is logged, never to anything that fires earlier.
+A margin that pushes the fire point to zero or below does nothing and is logged.
+
+Never guess the window.
+A `[1m]` model identity means 1,000,000 tokens unless `CLAUDE_CODE_DISABLE_1M_CONTEXT` is set, and `CLAUDE_CODE_AUTO_COMPACT_WINDOW` caps it as it caps Claude Code's own.
+Any other model identity, or none, leaves the window undetermined and the condition does nothing; `FM_CONTEXT_WINDOW_TOKENS` declares it explicitly for such a model.
+The condition also does nothing when `DISABLE_AUTO_COMPACT` or `DISABLE_COMPACT` is set, because there is no compaction to get ahead of.
+
+### Once per climb
+
+`state/.context-handoff` records the transcript a capture was already taken for.
+The fill only falls through a compaction (same transcript, much smaller reading) or a clear (a new transcript that starts small), so a reading below the fire point is exactly the drop that re-arms the trigger; staying past the line on later prompts stays silent.
+After a clear, then, the next session starts well below the line, the claim is dropped on its first prompt, and the next climb captures again.
+An unreadable fill or window changes nothing, including the claim.
+
+When both conditions hold on the same prompt, one capture covers both: the quiet stretch leads the wording and the climb is claimed too.
+The context condition never reads or writes `.captain-idle-handoff`, `.auto-afk-armed`, or the clock beyond what the quiet-stretch condition already does, so both of those fire on their own terms.
+
+### Limits
+
+- It fires on a genuine captain prompt, so a session that crosses its compaction point entirely inside autonomous turns, with no captain prompt in between, compacts first.
+  The margin is the only buffer for that.
+- The capture itself adds to the context, so a margin smaller than a handoff's own cost can still lose the race.
+- Claude Code can also shrink the window from a settings-level `autoCompactWindow` or a server-side experiment, neither of which a hook can see; the hook would then fire later than intended.
+- Primary only.
+  Crewmates in other projects never carry this repo's `.claude/settings.json`, and a firstmate-repo task worktree is excluded by the same scope check as the quiet-stretch condition.
+- Claude Code only: the transcript format is Claude Code's, and the other primaries are unwired for both conditions (see "Harness integrations").
+
 ## Auto-armed away mode
 
 `bin/fm-auto-afk.sh` is the second consumer of the clock above.
@@ -246,6 +326,7 @@ Under the effective state directory:
 ## Tests
 
 `tests/fm-captain-idle-handoff.test.sh` covers firing past the threshold, staying silent below it, one capture per quiet stretch, a failed banner print still counting the handoff as delivered, the away-mode and supervisor-relay exclusions, away-mode deference preserving the stretch, secondmate-home and task-worktree scoping, the missing-`jq` and empty-payload no-ops, threshold configuration and the `off` switch, a live actively-supervised fleet being unaffected, tracked hook registration, and the banner's captain-facing wording.
+The same suite covers the context-fill trigger: either side of the derived fire point, the compaction override present and absent, the margin from file, environment, `off`, malformed, and at or below zero, an undeterminable window or transcript doing nothing, an explicit window declaration, the latest model identity winning, one capture per climb re-armed after a compaction or a clear, the quiet-stretch and away-mode records left alone, one capture when both conditions hold, injected input and away mode never triggering it, task-worktree scoping, tail-only reading, and subagent or synthetic usage being ignored.
 
 `tests/fm-auto-afk.test.sh` covers the auto-arm: both sides of the threshold boundary, `off` from the file and the environment, a malformed value falling back to the default and never to anything shorter, one arm per quiet stretch with a later stretch arming again, the fleet precondition in both directions, the already-away and mid-return declines, an absent, corrupt, or future-dated clock never reading as a quiet captain, secondmate-home and task-worktree scoping, the shared clock and the handoff's claim being read-only, the handoff still firing at its own threshold after an auto-armed away session, the away-mode exit path being unchanged with and without an auto-arm, the return notice appearing exactly once, and the authority boundary travelling with the directive.
 

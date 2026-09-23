@@ -1,6 +1,6 @@
 ---
 name: handoff
-description: Combine the /stow sweep with a session-context capture so a long-running session can be cleared without losing mid-discussion reasoning. Use when the captain invokes /handoff (e.g. "/handoff", "hand off before I clear"), before clearing or compacting a session whose conversational state is not yet on disk, or when the captain wants the current reasoning and next steps preserved for the next session. Also runs unprompted when bin/fm-captain-idle-handoff.sh detects that the captain has been quiet past the configured threshold and injects a capture directive.
+description: Combine the /stow sweep with a session-context capture so a long-running session can be cleared without losing mid-discussion reasoning. Use when the captain invokes /handoff (e.g. "/handoff", "hand off before I clear"), before clearing or compacting a session whose conversational state is not yet on disk, or when the captain wants the current reasoning and next steps preserved for the next session. Also runs unprompted when bin/fm-captain-idle-handoff.sh detects that the captain has been quiet past the configured threshold, or that the session is close to auto-compacting, and injects a capture directive.
 user-invocable: true
 metadata:
   internal: true
@@ -55,7 +55,7 @@ The goal is a session the captain can clear or reset with confidence that the ne
 
 ## Unprompted capture after a long quiet stretch
 
-`bin/fm-captain-idle-handoff.sh` runs this same capture without the captain asking, on their first message back after a long quiet stretch.
+`bin/fm-captain-idle-handoff.sh` runs this same capture without the captain asking, on their first message back after a long quiet stretch or on their first message once the session is close to auto-compacting.
 `docs/captain-idle-handoff.md` owns why, which signal it measures, and the threshold; nothing about the capture itself changes.
 Two obligations are specific to an unprompted run, and the injected directive states both:
 
