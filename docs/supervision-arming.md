@@ -243,9 +243,21 @@ Three changes, all in `bin/fm-watch.sh`:
 An hourly one is the measured noise.
 A day is long enough that a PR sitting overnight costs at most one wake, short enough that a forgotten one comes back at the next working session, and bounded so the class cannot rot invisibly - the same promise the pause cadence makes, at the length this class can afford because two independent wakes already cover the events that end it.
 
+**Commits the PR does not hold.** Added 2026-10-02 for `fm-watch-unpushed-baseline-u2`.
+Since `bin/fm-crew-state.sh` reads a ship `done:` whose branch has commits no remote holds as `unpushed`, a merge wait that gains a later local commit no longer reads its healthy `done`.
+Before this, that reading fell through the `done`-only baseline and the `done`-only recheck exemption, so it escalated once as a possible wedge and then re-woke hourly as "reconciled state unchanged at unpushed", never saying why.
+The wedge timer now treats `unpushed` as the merge wait's second finished reading:
+
+- The first such reading wakes firstmate once with a reason that names the cause, `<id>: N local commit(s) not on the remote - push or discard before merge`, and is not counted as a wedge escalation.
+- An unchanged reading after that is absorbed, and the merge wait's own `FM_MERGE_RESURFACE_SECS` reminder owns the bounded recheck, naming the unpushed commits instead of calling the work merely unmerged.
+- "Unchanged" is judged from `state/.unpushed-surfaced-<id>`, which records the commit count and the task's meta, status, and turn-end signature, because a pane redraw wipes the wedge bookkeeping and would otherwise re-announce the same commits.
+  More commits, a new status line, or a turn the crew took surfaces afresh.
+- A push that clears it reads `done` again, which removes the record and re-takes the quiet `done` baseline; the merge poll still wakes firstmate on merge, and teardown removes the record with the rest of the task's state.
+
 What this deliberately does not touch:
 
 - A `done:` task with no `pr=` in its metadata is not in this class at all, so it surfaces at once on ordinary stale handling; `done` is not landed, and without a recorded PR nothing independent will ever wake firstmate about it.
+  That holds for its `unpushed` reading too, which is the false-done hazard `bin/fm-crew-state.sh` reports it to expose.
 - A task parked on a decision keeps its hourly reminder and its hourly unchanged-state recheck, because nothing independent wakes firstmate when the captain decides.
 - The merge poll still fires on merge, ahead of the closed probe, which runs only when the poll stayed silent.
 - Away mode is unchanged: the daemon already self-handles a finished task's repeat stale panes once its `done:` line was escalated.

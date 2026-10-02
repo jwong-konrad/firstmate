@@ -1518,6 +1518,153 @@ test_done_without_recorded_pr_still_surfaces() {
   pass "a done: task with no recorded PR still surfaces at once - done is not landed"
 }
 
+# --- a merge wait whose branch the PR no longer holds (fm-watch-unpushed-baseline-u2)
+#
+# bin/fm-crew-state.sh reads a ship done: with commits no remote holds as
+# `unpushed`, which a merge wait that gained a later local commit now does. The
+# merge wait's baseline and recheck exemption knew only `done`, so that reading
+# escalated as a possible wedge and then re-woke hourly as "unchanged at
+# unpushed", never naming the cause. These cases pin the replacement: one wake
+# that names the commits, no repeat for the same commits (not even after a pane
+# redraw wipes the wedge bookkeeping), a fresh wake when the commits change, and a
+# push that clears it returning to the quiet done baseline.
+
+# Crew-state's reading of a merge wait whose branch is <n> commits ahead of its PR.
+unpushed_reading() {  # <n>
+  printf 'state: unpushed · source: status-log · PR https://github.com/o/r/pull/7 checks green · not landed: %s commit(s) ahead of any remote, beyond recorded PR https://github.com/o/r/pull/7' "$1"
+}
+
+test_merge_wait_unpushed_wakes_once_by_name() {
+  local dir state out drain_out window key pid
+  dir=$(make_merge_wait_case merge-wait-unpushed ahead test:fm-ahead 'PR open, awaiting the captain')
+  state="$dir/state"; out="$dir/watch.out"; drain_out="$dir/drain.out"; window="test:fm-ahead"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  FM_FAKE_CREW_STATE=$(unpushed_reading 2)
+  export FM_FAKE_CREW_STATE
+  echo $(( $(date +%s) - 500 )) > "$state/.decision-since-$key"
+
+  # Phase A: the first expiry on the unpushed reading wakes once, by name.
+  merge_watch_bg "$dir" "$window" "$out" FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=240
+  pid=$!
+  wait_for_exit "$pid" 40 \
+    || fail "a merge wait reading unpushed never woke firstmate: $(cat "$out")"
+  grep -F "ahead: 2 local commit(s) not on the remote - push or discard before merge" "$out" >/dev/null \
+    || fail "the unpushed wake did not name its cause: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null \
+    && fail "an unpushed merge wait was escalated as a possible wedge: $(cat "$out")"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = 0 ] \
+    || fail "the unpushed wake bumped the wedge escalation count"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the unpushed wake failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "local commit(s) not on the remote" >/dev/null \
+    || fail "the unpushed wake was not queued"
+
+  # Phase B: the same commits, the timer expired again with the hourly recheck
+  # throttle long spent, and a pane redraw having wiped the wedge bookkeeping.
+  # None of that is news, so it is absorbed.
+  rm -f "$state/.wedge-state-$key"
+  backdate "$state/.wedge-rechecked-$key" 500
+  echo $(( $(date +%s) - 500 )) > "$state/.decision-since-$key"
+  : > "$out"
+  merge_watch_bg "$dir" "$window" "$out" FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=240
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "unchanged unpushed commits re-woke firstmate: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "unchanged unpushed commits printed a wake: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "unchanged unpushed commits enqueued a wake"
+  grep -F "already surfaced, merge reminder owns the recheck" "$state/.watch-triage.log" >/dev/null \
+    || fail "the absorbed unpushed recheck was not attributed to the merge reminder: $(cat "$state/.watch-triage.log" 2>/dev/null)"
+  reap "$pid"
+
+  # Phase C: more commits are a change, so they surface afresh.
+  FM_FAKE_CREW_STATE=$(unpushed_reading 3)
+  backdate "$state/.wedge-rechecked-$key" 500
+  echo $(( $(date +%s) - 500 )) > "$state/.decision-since-$key"
+  : > "$out"
+  merge_watch_bg "$dir" "$window" "$out" FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=240
+  pid=$!
+  wait_for_exit "$pid" 40 \
+    || fail "a merge wait gaining more unpushed commits did not surface afresh: $(cat "$out")"
+  grep -F "ahead: 3 local commit(s) not on the remote" "$out" >/dev/null \
+    || fail "the fresh unpushed wake did not name the new count: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the fresh unpushed wake failed"
+
+  # Phase D: the merge reminder, once its long cadence is due, names the commits.
+  backdate "$state/ahead.status" 500
+  printf '%s' "$(seen_sig "$state/ahead.status")" > "$state/.seen-ahead_status"
+  : > "$out"
+  merge_watch_bg "$dir" "$window" "$out" FM_MERGE_RESURFACE_SECS=240
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "the merge reminder did not fire once due: $(cat "$out")"
+  grep -F "3 local commit(s) on its branch are still not on the remote" "$out" >/dev/null \
+    || fail "the merge reminder did not name the unpushed commits: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "a merge wait reading unpushed wakes once by name, stays quiet for the same commits, and surfaces afresh when they change"
+}
+
+# A push clears it: the reading returns to done, which re-takes the quiet merge
+# baseline instead of escalating as a move off `unpushed`, and drops the record so
+# a later unpushed reading is news again.
+test_merge_wait_unpushed_cleared_returns_to_done_baseline() {
+  local dir state out window key pid
+  dir=$(make_merge_wait_case merge-wait-pushed pushed test:fm-pushed 'PR open, awaiting the captain')
+  state="$dir/state"; out="$dir/watch.out"; window="test:fm-pushed"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' 'unpushed|status-log' > "$state/.wedge-state-$key"
+  printf '%s' '1|stale-signature' > "$state/.unpushed-surfaced-pushed"
+  : > "$state/.wedge-rechecked-$key"
+  backdate "$state/.wedge-rechecked-$key" 500
+  echo $(( $(date +%s) - 500 )) > "$state/.decision-since-$key"
+  export FM_FAKE_CREW_STATE='state: done · source: status-log · PR https://github.com/o/r/pull/7 checks green'
+
+  merge_watch_bg "$dir" "$window" "$out" FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=240
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a merge wait whose unpushed commits were pushed woke firstmate: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "clearing the unpushed reading printed a wake: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "clearing the unpushed reading enqueued a wake"
+  [ "$(cat "$state/.wedge-state-$key" 2>/dev/null || true)" = 'done|status-log' ] \
+    || fail "the cleared reading did not re-take the done baseline: $(cat "$state/.wedge-state-$key" 2>/dev/null || true)"
+  [ ! -e "$state/.unpushed-surfaced-pushed" ] \
+    || fail "the cleared reading left the unpushed record behind"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = 0 ] \
+    || fail "clearing the unpushed reading bumped the escalation count"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a push that clears the unpushed reading returns the merge wait to its quiet done baseline"
+}
+
+# No recorded PR: the false-done hazard bin/fm-crew-state.sh reports `unpushed`
+# to expose. It is not a merge wait, so none of the above reaches it, and it
+# surfaces at once on ordinary stale handling.
+test_unpushed_without_recorded_pr_still_surfaces() {
+  local dir state out drain_out window key pid
+  dir=$(make_merge_wait_case unpushed-nopr localonly test:fm-localonly 'reported done, nothing pushed')
+  state="$dir/state"; out="$dir/watch.out"; drain_out="$dir/drain.out"; window="test:fm-localonly"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  rm -f "$state/localonly.check.sh" "$state/localonly.pr-poll" "$state/localonly.pr-poll-registration"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/localonly.meta"
+  printf 'done: committed, not yet validated - did the thing\n' > "$state/localonly.status"
+  printf '%s' "$(seen_sig "$state/localonly.status")" > "$state/.seen-localonly_status"
+  export FM_FAKE_CREW_STATE='state: unpushed · source: status-log · committed, not yet validated - did the thing · not landed: 1 commit(s) not on any remote, no PR recorded'
+
+  merge_watch_bg "$dir" "$window" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 \
+    || fail "an unpushed done: with no recorded PR was absorbed instead of surfaced: $(cat "$out")"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the no-PR unpushed pane did not print a stale wake: $(cat "$out")"
+  [ ! -e "$state/.paused-$key" ] \
+    || fail "an unpushed done: with no recorded PR must not be filed under any bounded cadence"
+  [ ! -e "$state/.unpushed-surfaced-localonly" ] \
+    || fail "an unpushed done: with no recorded PR must not take the merge wait's once-only record"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the no-PR unpushed surface failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null \
+    || fail "the no-PR unpushed surface was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "an unpushed done: with no recorded PR still surfaces at once - it is the false-done hazard"
+}
+
 # A fake gh answering every `pr view` with FM_TEST_GH_STATE, the one call both the
 # merge poll and the closed probe make.
 make_fake_gh() {  # <fakebin>
@@ -2399,6 +2546,9 @@ run_case test_merge_wait_still_wedge_escalates_off_its_baseline
 run_case test_merge_wait_unchanged_done_takes_no_hourly_recheck
 run_case test_parked_decision_keeps_its_hourly_recheck
 run_case test_done_without_recorded_pr_still_surfaces
+run_case test_merge_wait_unpushed_wakes_once_by_name
+run_case test_merge_wait_unpushed_cleared_returns_to_done_baseline
+run_case test_unpushed_without_recorded_pr_still_surfaces
 run_case test_closed_unmerged_pr_surfaces_once
 run_case test_pr_closed_poll_contract
 run_case test_exited_declared_pause_is_bounded_but_live_gate_surfaces
