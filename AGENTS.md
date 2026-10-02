@@ -312,6 +312,7 @@ Judge validation by the current-code-matched run step through `bin/fm-crew-state
 Running, fixing, or CI states remain working; parked approval or fix-review states require the worker to follow the active gate help; passed or checks-passed is done; failed or cancelled is failed.
 A worker hand-editing, committing, aborting, or restarting during an active validation run duplicates pipeline ownership; steer it back to the gate response flow.
 The worker reports the PR when CI first becomes green rather than waiting for merge monitoring to finish.
+A ship `done:` is a claim, not landing evidence: `bin/fm-crew-state.sh` reports `unpushed` when the branch holds commits no remote has, and nothing reaches the captain as landed on a status line alone.
 
 ### PR ready, landing, and teardown
 

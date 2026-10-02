@@ -590,7 +590,8 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
          | select(.current_state.state == "working"
                   or .current_state.state == "parked"
                   or .current_state.state == "paused"
-                  or .current_state.state == "blocked")
+                  or .current_state.state == "blocked"
+                  or .current_state.state == "unpushed")
          | select(.id as $id | [$owned_in_flight[].id] | index($id) | not)
          | {id,state:.current_state.state} ]) as $unowned_current
     | ([ $owned_in_flight[] as $work
@@ -609,7 +610,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
          | {id:(.id | trunc(120)),title:(.title | trunc(90)),blocked_by:(.blocked_by | trunc(120)),reason:((.blocked_reason // "blocked") | trunc(120)),source:"backlog"} ]
        + [ $owned_in_flight[] as $work
            | $tasks[]
-           | select(.id == $work.id and (.current_state.state == "parked" or .current_state.state == "paused" or .current_state.state == "blocked"))
+           | select(.id == $work.id and (.current_state.state == "parked" or .current_state.state == "paused" or .current_state.state == "blocked" or .current_state.state == "unpushed"))
            | {id,title:((.backlog.title // .id) | trunc(90)),blocked_by:null,
               reason:((.current_state.detail // .current_state.state) | trunc(120)),source:"child-state"} ]) as $holds_all
     | ($backlog.present == true

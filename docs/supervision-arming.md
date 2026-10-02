@@ -36,7 +36,7 @@ The rule may only ever remove noise, never remove an alarm.
 So the mapping is deliberately asymmetric: a state must be *positively* recognized as idle to be counted idle.
 
 - `working` is progressing.
-- `parked`, `blocked`, `paused`, `failed`, and `done` are idle: each changes only when firstmate acts.
+- `parked`, `blocked`, `paused`, `failed`, `done`, and `unpushed` are idle: each changes only when firstmate acts.
 - `unknown` is progressing, **except** when the endpoint is provably absent - no metadata, a torn-down worktree, no recorded backend target, or an unreadable target.
   A provably absent endpoint is the "dead" case and counts idle; every other `unknown` is indeterminate and counts progressing.
 - A task with no verdict record at all counts progressing.

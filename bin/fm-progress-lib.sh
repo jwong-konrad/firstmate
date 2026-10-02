@@ -244,9 +244,9 @@ EOF
 # asymmetric.
 fm_progress_token_verdict() {  # <state-token>
   case "$1" in
-    working)                            printf 'progressing' ;;
-    parked|blocked|paused|failed|done)  printf 'idle' ;;
-    *)                                  printf 'indeterminate' ;;
+    working)                                     printf 'progressing' ;;
+    parked|blocked|paused|failed|done|unpushed)  printf 'idle' ;;
+    *)                                           printf 'indeterminate' ;;
   esac
 }
 

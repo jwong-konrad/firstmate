@@ -16,7 +16,7 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|endpoint|status-log|none> · <detail>
+#   state: <working|parked|done|unpushed|blocked|paused|failed|unknown> · source: <run-step|pane|endpoint|status-log|none> · <detail>
 #
 # `endpoint` is a live agent-liveness read (bin/fm-backend.sh's
 # fm_backend_agent_liveness), reported only for a confident not-a-live-agent
@@ -46,7 +46,9 @@
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      `resolved` never become current state or detail. A PR-delivered ship
+#      task's `done:` whose HEAD has commits on no remote reports `unpushed`, not
+#      `done` (done_claim_landing_check, below).
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log, and an endpoint that still EXISTS but
@@ -138,6 +140,36 @@ map_log_state() {  # <line>
 
 LOG_LINE=$(log_last_line || true)
 LOG_VERB=$(status_line_verb "$LOG_LINE")
+
+# A ship worker's `done:` is a self-report, and in no-mistakes mode the generated
+# brief makes "committed locally, ready for validation" a legitimate `done:`
+# checkpoint (bin/fm-brief.sh). So the verb alone cannot say the work landed. For a
+# PR-delivered ship task (any mode but local-only), a `done:` whose worktree HEAD
+# still has commits no remote-tracking ref contains is reported as `unpushed`
+# instead: the work exists only in this disposable worktree, whatever the status
+# line claims. This also covers a later local commit after a PR is recorded (the
+# branch is ahead of what the PR holds). The remote test is the same one
+# bin/fm-teardown.sh's landed-work check starts from (`HEAD --not --remotes`), so
+# any remote, the no-mistakes gate and a fork included, counts as pushed. Scouts,
+# secondmates, and local-only delivery keep the plain `done` reading. Emits and
+# exits when the claim is not landed; returns otherwise.
+done_claim_landing_check() {
+  local mode count pr detail
+  [ "$KIND" = ship ] || return 0
+  mode=$(meta_value mode)
+  [ "$mode" != local-only ] || return 0
+  if ! count=$(git -C "$WT" rev-list --count HEAD --not --remotes -- 2>/dev/null); then
+    emit unknown status-log "$(status_line_note "$LOG_LINE")${SEP}cannot verify the done claim reached a remote"
+  fi
+  case "$count" in ''|*[!0-9]*|0) return 0 ;; esac
+  pr=$(meta_value pr)
+  if [ -n "$pr" ]; then
+    detail="not landed: $count commit(s) ahead of any remote, beyond recorded PR $pr"
+  else
+    detail="not landed: $count commit(s) not on any remote, no PR recorded"
+  fi
+  emit unpushed status-log "$(status_line_note "$LOG_LINE")${SEP}$detail"
+}
 
 # pane_readable is consulted ONLY in the no-run fallback below. The run-step path
 # stays authoritative regardless of pane liveness - judge by the run-step, not the
@@ -647,6 +679,9 @@ fi
 # `unknown` verdict as the "not a state" test needs no second verb list here.
 if [ -n "$LOG_VERB" ]; then
   LOG_STATE=$(map_log_state "$LOG_LINE")
+  if [ "$LOG_STATE" = "done" ]; then
+    done_claim_landing_check
+  fi
   if [ "$LOG_STATE" != unknown ]; then
     emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
   fi

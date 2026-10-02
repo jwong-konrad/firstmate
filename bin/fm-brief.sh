@@ -29,7 +29,10 @@
 # For ship tasks, the definition of done is shaped by the project's delivery mode
 # (data/projects.md via fm-project-mode.sh; see the project-management skill
 # and AGENTS.md task lifecycle):
-#   no-mistakes  implement -> /no-mistakes pipeline -> PR -> captain merge (default)
+#   no-mistakes  implement -> /no-mistakes pipeline -> PR -> captain merge (default);
+#                the pre-validation `done: committed, not yet validated - ...` line
+#                is a local checkpoint, and bin/fm-crew-state.sh reads any ship
+#                `done:` with commits on no remote as `unpushed`, not landed
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                captain approves, firstmate merges to local main
@@ -374,7 +377,8 @@ EOF
     DOD=$(cat <<EOF
 # Definition of done
 The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
+When you believe it is complete, append \`done: committed, not yet validated - {summary}\` to the status file and stop.
+That line is a local checkpoint, not shipped work: nothing is pushed or reviewed until /no-mistakes runs.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.

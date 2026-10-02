@@ -119,6 +119,26 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
 }
 
+# The pre-validation checkpoint and genuinely shipped work both use `done:`, so
+# the no-mistakes checkpoint line must say on its face that nothing is pushed yet.
+# Firstmate reads that line in the wake reason before any current-state read.
+test_no_mistakes_checkpoint_names_itself_local() {
+  local home id brief
+  home="$TMP_ROOT/checkpoint-home"
+  mkdir -p "$home/data"
+  id="brief-checkpoint-c1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  assert_grep 'done: committed, not yet validated - {summary}' "$brief" \
+    "no-mistakes checkpoint line does not name itself a local commit"
+  assert_grep "local checkpoint, not shipped work" "$brief" \
+    "no-mistakes DOD lost the checkpoint-is-not-shipped sentence"
+  assert_grep 'done: PR {url} checks green' "$brief" \
+    "no-mistakes DOD lost the shipped done line"
+  pass "fm-brief.sh: no-mistakes checkpoint done line names itself a local commit"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -467,6 +487,7 @@ run_case test_help_includes_entire_header
 run_case test_ship_modes_generate_clean_briefs
 run_case test_faster_paths_use_configured_authority_without_stacked_review
 run_case test_no_mistakes_dod_wording
+run_case test_no_mistakes_checkpoint_names_itself_local
 run_case test_ship_project_memory_wording
 run_case test_herdr_lab_contract_is_explicit_and_complete
 run_case test_herdr_lab_contract_quotes_foreign_firstmate_path
