@@ -38,6 +38,8 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (q2) no-mistakes + pushed, open PR, later local commits     -> REFUSE (r3: ahead of origin)
+#   (q3) same as (q2) + --force                                 -> ALLOW  (discard authority)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -821,6 +823,73 @@ test_merged_pr_with_later_local_commit_refuses() {
   pass "merged PR does not allow teardown after a later local commit"
 }
 
+# The r3 case (backlog ship-done-requires-remote-d4): the branch was pushed and
+# its PR recorded and left OPEN, then the worker made further local commits that
+# never reached origin. No new teardown logic is needed - the landed-work test
+# already starts from `HEAD --not --remotes` - so this pins that it refuses, and
+# that the existing --force discard authority still overrides it.
+add_gh_pr_open_for_head() {
+  local case_dir=$1 head=$2
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *"state,headRefOid"*) printf '%s\t%s\n' 'OPEN' '$head' ; exit 0 ;;
+      *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
+    esac
+    ;;
+esac
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh"
+}
+
+make_pushed_pr_then_local_ahead_case() {  # <name> -> echoes case dir
+  local case_dir pr_head
+  case_dir=$(make_case "$1")
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  append_pr_meta_for_current_head "$case_dir"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_open_for_head "$case_dir" "$pr_head"
+  wt_commit_file "$case_dir" gate-fix-1.txt one "post-gate fix one"
+  wt_commit_file "$case_dir" gate-fix-2.txt two "post-gate fix two"
+  printf '%s\n' "$case_dir"
+}
+
+test_open_pr_with_local_commits_ahead_of_origin_refuses() {
+  local case_dir rc
+  case_dir=$(make_pushed_pr_then_local_ahead_case open-pr-local-ahead)
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "open-pr-local-ahead: teardown should refuse commits ahead of origin"
+  grep -q REFUSED "$case_dir/stderr" || fail "open-pr-local-ahead: no REFUSED line in stderr"
+  grep -q 'post-gate fix two' "$case_dir/stderr" || fail "open-pr-local-ahead: refusal does not list the unpushed commits"
+  pass "pushed branch with an open PR and later local commits is refused"
+}
+
+test_open_pr_with_local_commits_ahead_force_discards() {
+  local case_dir rc
+  case_dir=$(make_pushed_pr_then_local_ahead_case open-pr-local-ahead-force)
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "open-pr-local-ahead-force: --force should keep its discard authority"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "open-pr-local-ahead-force: REFUSED printed despite --force"
+  pass "pushed branch with later local commits is discarded only under --force"
+}
+
 test_pr_check_does_not_refresh_stale_pr_head() {
   local case_dir rc pr_head new_head count
   case_dir=$(make_case pr-check-stale)
@@ -1552,6 +1621,8 @@ run_case test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 run_case test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 run_case test_squash_merged_pr_allows_replayed_unpushed_patch
 run_case test_merged_pr_with_later_local_commit_refuses
+run_case test_open_pr_with_local_commits_ahead_of_origin_refuses
+run_case test_open_pr_with_local_commits_ahead_force_discards
 run_case test_pr_check_does_not_refresh_stale_pr_head
 run_case test_pr_check_records_remote_head_when_local_lags
 run_case test_content_in_default_fallback_allows

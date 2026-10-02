@@ -697,6 +697,11 @@ EOF
     "harness=codex" "kind=ship" "mode=no-mistakes"
   printf 'done: complete\n' > "$mate/state/done.status"
   printf 'failed: stopped\n' > "$mate/state/failed.status"
+  # A ship done: is checked against the remote (bin/fm-crew-state.sh), so the done
+  # child needs a real worktree whose HEAD a remote-tracking ref already holds.
+  git -C "$mate/projects/done" init -q
+  git -C "$mate/projects/done" -c user.name=t -c user.email=t@t commit -q --allow-empty -m landed
+  git -C "$mate/projects/done" update-ref refs/remotes/origin/main HEAD
   rm "$mate/state/parked.meta" "$mate/state/parked.status"
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
@@ -707,6 +712,25 @@ EOF
       and (.current.reason | contains("done=done"))
       and (.current.reason | contains("failed=failed"))
   ' >/dev/null || fail "terminal in-flight child states were silently dropped: $canonical"
+  # A done: child whose commits never reached a remote is not terminal: it is held
+  # waiting on its home's firstmate, never silently counted as finished.
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] done - Done child with unpushed commits (repo: sample) (kind: ship) (since 2026-07-11)
+
+## Queued
+
+## Done
+EOF
+  rm "$mate/state/failed.meta" "$mate/state/failed.status"
+  git -C "$mate/projects/done" -c user.name=t -c user.email=t@t commit -q --allow-empty -m local-only
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "states")
+    | .current.state == "externally_held"
+      and (.holds | any(.id == "done" and .source == "child-state"))
+  ' >/dev/null || fail "unpushed done child was not held: $canonical"
   pass "nonprogressing child states are explicit and inconsistent terminal rows invalidate"
 }
 

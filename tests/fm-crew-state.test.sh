@@ -25,6 +25,8 @@
 #       This is the direct regression pair for the 2026-07-02 herdr incident,
 #       proving the watcher's own absorb-only-when-provably-working predicate
 #       benefits from the fix in both directions.
+#   (l) a no-run status-log done: on a PR-delivered ship task is checked against
+#       the remote: unpushed commits read `unpushed`; scouts and local-only keep done.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -770,7 +772,8 @@ EOF
   local out; out=$(run_crew_state "$d" feat-g)
   assert_not_contains "$out" "source: run-step" "another branch's run not misattributed"
   assert_contains "$out" "source: status-log" "no own run -> falls back to status-log"
-  assert_contains "$out" "state: done" "falls back to the log verb"
+  # The fixture branch was never pushed, so its pre-validation done: is not landed.
+  assert_contains "$out" "state: unpushed" "falls back to the log verb, checked against the remote"
   pass "another branch's run is ignored, falls back"
 }
 
@@ -1133,6 +1136,99 @@ EOF
   pass "crew_is_provably_working still surfaces a genuinely stopped crew (safety property preserved)"
 }
 
+# (l) A ship done: is a self-report, and the no-mistakes checkpoint makes
+# "committed locally, not yet validated" a legitimate done: line. With no run
+# attributed, the status-log done must be checked against the remote: commits no
+# remote-tracking ref holds read `unpushed`, never `done`. Scouts and local-only
+# delivery keep the plain done reading.
+
+# Give <dir> a bare origin and push <branch> to it, so origin/<branch> exists.
+push_to_origin() {  # <dir> <branch>
+  local dir=$1 branch=$2
+  git init -q --bare "$dir.origin.git"
+  git -C "$dir" remote add origin "$dir.origin.git"
+  git -C "$dir" push -q -u origin "$branch" 2>/dev/null
+}
+
+# One idle-pane, no-run done: case. Echoes the helper's line.
+done_claim_case() {  # <name> <id> <kind> <mode> <push:0|1> <extra-commits> [pr]
+  local name=$1 id=$2 kind=$3 mode=$4 push=$5 extra=$6 pr=${7:-} d i
+  reset_fakes
+  d=$(new_case "$name")
+  make_repo_on_branch "$d/wt" "fm/$id"
+  [ "$push" = 1 ] && push_to_origin "$d/wt" "fm/$id"
+  i=0
+  while [ "$i" -lt "$extra" ]; do
+    git -C "$d/wt" commit -q --allow-empty -m "local $i"
+    i=$((i + 1))
+  done
+  make_fakebin "$d" >/dev/null
+  if [ -n "$pr" ]; then
+    fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=$kind" "mode=$mode" "pr=$pr"
+  else
+    fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=$kind" "mode=$mode"
+  fi
+  printf 'done: committed, not yet validated - did the thing\n' > "$d/state/$id.status"
+  FM_FAKE_BUSY=0
+  run_crew_state "$d" "$id"
+}
+
+test_done_committed_not_pushed_is_unpushed() {
+  local out
+  out=$(done_claim_case done-local done-local ship no-mistakes 0 1)
+  assert_contains "$out" "state: unpushed" "local-only commit done: must not read done"
+  assert_contains "$out" "source: status-log" "the reading still names its source"
+  assert_contains "$out" "not on any remote, no PR recorded" "detail names the missing remote and PR"
+  assert_contains "$out" "did the thing" "detail keeps the worker's note"
+  pass "committed-not-pushed done: reads unpushed"
+}
+
+test_done_pushed_no_pr_is_done() {
+  local out
+  out=$(done_claim_case done-pushed done-pushed ship direct-PR 1 0)
+  assert_contains "$out" "state: done" "a branch in sync with its remote keeps the done reading"
+  assert_not_contains "$out" "not landed" "no not-landed detail for pushed work"
+  pass "pushed-no-PR done: keeps done"
+}
+
+test_done_pr_recorded_in_sync_is_done() {
+  local out
+  out=$(done_claim_case done-pr-sync done-pr-sync ship no-mistakes 1 0 https://github.com/o/r/pull/7)
+  assert_contains "$out" "state: done" "PR recorded and branch in sync keeps done"
+  pass "PR recorded and in sync keeps done"
+}
+
+test_done_pr_recorded_local_ahead_is_unpushed() {
+  local out
+  out=$(done_claim_case done-pr-ahead done-pr-ahead ship no-mistakes 1 2 https://github.com/o/r/pull/8)
+  assert_contains "$out" "state: unpushed" "local commits after the PR must not read done"
+  assert_contains "$out" "2 commit(s) ahead of any remote, beyond recorded PR https://github.com/o/r/pull/8" \
+    "detail names the count and the recorded PR"
+  pass "PR recorded but local ahead reads unpushed"
+}
+
+test_done_local_only_mode_is_done() {
+  local out
+  out=$(done_claim_case done-localonly done-localonly ship local-only 0 1)
+  assert_contains "$out" "state: done" "local-only delivery never pushes, so done stays done"
+  pass "local-only mode keeps done"
+}
+
+test_done_scout_is_done() {
+  local out
+  out=$(done_claim_case done-scout done-scout scout no-mistakes 0 1)
+  assert_contains "$out" "state: done" "a scout's scratch commits never make its done unpushed"
+  pass "scout done: keeps done"
+}
+
+test_unpushed_maps_idle() {
+  # shellcheck source=bin/fm-progress-lib.sh
+  . "$ROOT/bin/fm-progress-lib.sh"
+  [ "$(fm_progress_token_verdict unpushed)" = idle ] \
+    || fail "unpushed must be idle: it changes only when firstmate acts"
+  pass "unpushed maps to the idle verdict"
+}
+
 # Usage error (no id) is the one non-zero exit.
 test_usage_error() {
   reset_fakes
@@ -1279,4 +1375,11 @@ run_case test_historical_same_branch_rewritten_head_not_current
 run_case test_active_run_descendant_fix_head_remains_current
 run_case test_local_advanced_past_run_head_invalidates
 run_case test_missing_run_head_falls_back_to_current_state
+run_case test_done_committed_not_pushed_is_unpushed
+run_case test_done_pushed_no_pr_is_done
+run_case test_done_pr_recorded_in_sync_is_done
+run_case test_done_pr_recorded_local_ahead_is_unpushed
+run_case test_done_local_only_mode_is_done
+run_case test_done_scout_is_done
+run_case test_unpushed_maps_idle
 fm_case_summary "fm-crew-state"
