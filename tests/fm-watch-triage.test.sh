@@ -1209,8 +1209,9 @@ test_done_awaiting_merge_stale_absorbed_then_resurfaced() {
   [ ! -s "$state/.wake-queue" ] || fail "a changed pane hash on an unchanged pending merge enqueued a wake"
   reap "$pid"
 
-  # Phase B: age the wait past the bounded cadence. It re-surfaces once, naming
-  # the unmerged PR as the thing firstmate owes it, never as a possible wedge.
+  # Phase B0: age the wait past the hourly PAUSE cadence but not the merge-wait
+  # cadence. This is the hourly "still unmerged" wake that re-woke firstmate once
+  # per open PR with nothing new to say; the merge wait no longer rides it.
   back=$(( $(date +%s) - 500 ))
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
   else touch -m -d "@$back" "$statusf"; fi
@@ -1218,10 +1219,27 @@ test_done_awaiting_merge_stale_absorbed_then_resurfaced() {
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_TMUX_CURRENT_COMMAND=claude \
-    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 \
+    FM_MERGE_RESURFACE_SECS=999999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 40 || fail "a pending merge never re-surfaced past the bounded cadence: $(cat "$out")"
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a pending merge re-surfaced on the hourly pause cadence instead of its own: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a pending merge past only the pause cadence printed a wake: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a pending merge past only the pause cadence enqueued a wake"
+  reap "$pid"
+
+  # Phase B: age the wait past the merge-wait cadence. It re-surfaces once, naming
+  # the unmerged PR as the thing firstmate owes it, never as a possible wedge.
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=claude \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999999 \
+    FM_MERGE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a pending merge never re-surfaced past the merge-wait cadence: $(cat "$out")"
   grep -F "stale: $window" "$out" >/dev/null || fail "the recheck did not print a stale wake: $(cat "$out")"
   grep -F "awaiting firstmate" "$out" >/dev/null \
     || fail "the recheck was not labeled as awaiting firstmate: $(cat "$out")"
@@ -1232,7 +1250,7 @@ test_done_awaiting_merge_stale_absorbed_then_resurfaced() {
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null \
     || fail "the merge recheck was not queued"
   unset FM_FAKE_CREW_STATE
-  pass "a finished task parked on an unmerged PR is absorbed across pane churn, then rechecked on the bounded cadence, never wedge-escalated"
+  pass "a finished task parked on an unmerged PR is absorbed across pane churn and the hourly pause cadence, then rechecked on its own long merge-wait cadence, never wedge-escalated"
 }
 
 # The narrowness that keeps the documented done: false-positive hole closed
@@ -1368,6 +1386,254 @@ test_merge_wait_still_wedge_escalates_off_its_baseline() {
     || fail "the merge wedge escalation was not queued"
   unset FM_FAKE_CREW_STATE
   pass "a pending merge keeps its wedge timer: a healthy done reading becomes the first-expiry baseline, and moving off it escalates"
+}
+
+# --- the merge wait's single, long reminder (arming-done-unmerged-gap-g1) ------
+#
+# Measured 2026-10-01: with several PRs open and every worker finished, firstmate
+# was woken roughly hourly PER PR, by two separate rechecks that carried the same
+# non-news - handle_paused_stale's "still unmerged" resurface and wedge_timer_check's
+# "reconciled state unchanged at done" recheck. The merge poll is the signal that
+# matters and it worked. These cases pin the replacement: the merge reminder owns
+# the one recheck, on its own long cadence; a closure still surfaces through its
+# own probe; and the classes this must not reach - a done: with no recorded PR, and
+# a task parked on a decision - keep exactly the behavior they had.
+
+# Run the watcher in the background over a merge-wait fixture's state, with the
+# fixture's tmux and crew-state fakes, an alive agent, and every sweep and timer
+# off unless the caller overrides it in <env...>.
+merge_watch_bg() {  # <dir> <window> <out> [env assignments...]
+  local dir=$1 window=$2 out=$3
+  shift 3
+  env PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=claude \
+    FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_PAUSE_RESURFACE_SECS=999999 FM_MERGE_RESURFACE_SECS=999999 "$@" "$WATCH" > "$out" &
+}
+
+backdate() {  # <path> <seconds-ago>
+  local back
+  back=$(( $(date +%s) - $2 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$1"
+  else touch -m -d "@$back" "$1"; fi
+}
+
+# Done with a recorded PR: the second hourly source. Once the merge wait's wedge
+# timer holds its healthy `done` baseline, an unchanged `done` reading is not news,
+# so it takes no recheck of its own even past the hourly pause cadence - the merge
+# reminder above is the single owner of that resurface.
+test_merge_wait_unchanged_done_takes_no_hourly_recheck() {
+  local dir state out window key pid
+  dir=$(make_merge_wait_case merge-wait-norecheck norecheck test:fm-norecheck 'PR open, awaiting the captain')
+  state="$dir/state"; out="$dir/watch.out"; window="test:fm-norecheck"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review'
+  # The baseline an earlier expiry recorded, with its recheck throttle long spent
+  # and the wedge timer expired again: exactly the state that used to wake hourly.
+  printf '%s' 'done|run-step' > "$state/.wedge-state-$key"
+  : > "$state/.wedge-rechecked-$key"
+  backdate "$state/.wedge-rechecked-$key" 500
+  echo $(( $(date +%s) - 500 )) > "$state/.decision-since-$key"
+
+  merge_watch_bg "$dir" "$window" "$out" FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=240
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "an unchanged done reading on a merge wait still woke firstmate: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "an unchanged done reading on a merge wait printed a wake: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "an unchanged done reading on a merge wait enqueued a wake"
+  grep -F "merge reminder owns the recheck" "$state/.watch-triage.log" >/dev/null \
+    || fail "the absorbed recheck was not attributed to the merge reminder: $(cat "$state/.watch-triage.log" 2>/dev/null)"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = 0 ] \
+    || fail "an unchanged done reading bumped the escalation count"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a merge wait holding its done baseline takes no hourly unchanged-state recheck; the merge reminder owns its one resurface"
+}
+
+# Parked: the contrast case, and the reason the exemption above is keyed on the
+# merge wait's own baseline rather than on "awaiting firstmate". A task parked on
+# a decision still gets its hourly unchanged-state recheck, unchanged.
+test_parked_decision_keeps_its_hourly_recheck() {
+  local dir state fakebin out capture_file window key pid statusf
+  dir=$(make_case parked-keeps-recheck); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-parkeddecision"
+  printf 'idle, waiting on firstmate' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/parkeddecision.meta"
+  statusf="$state/parkeddecision.status"
+  printf 'needs-decision: keep the retry loop or fail fast\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-parkeddecision_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'idle, waiting on firstmate')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review'
+  printf '%s' 'parked|run-step' > "$state/.wedge-state-$key"
+  : > "$state/.wedge-rechecked-$key"
+  backdate "$state/.wedge-rechecked-$key" 500
+  echo $(( $(date +%s) - 500 )) > "$state/.decision-since-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 \
+    FM_MERGE_RESURFACE_SECS=999999 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a parked decision lost its hourly unchanged-state recheck: $(cat "$out")"
+  grep -F "reconciled state unchanged at parked|run-step" "$out" >/dev/null \
+    || fail "the parked recheck did not name its unchanged reading: $(cat "$out")"
+  grep -F "not a new escalation" "$out" >/dev/null \
+    || fail "the parked recheck was not labeled a non-escalation: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "a task parked on a decision keeps its hourly unchanged-state recheck"
+}
+
+# Done WITHOUT a recorded PR is never silenced: done: is not landed, and without
+# pr= nothing independent will ever wake firstmate about this task. This is the
+# state a worker that wrote done: before any PR existed leaves behind - no pr= in
+# its metadata and therefore no merge poll - and it must surface at once.
+test_done_without_recorded_pr_still_surfaces() {
+  local dir state out drain_out window key pid
+  dir=$(make_merge_wait_case merge-wait-nopr nopr test:fm-nopr 'reported done, no PR recorded')
+  state="$dir/state"; out="$dir/watch.out"; drain_out="$dir/drain.out"; window="test:fm-nopr"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  rm -f "$state/nopr.check.sh" "$state/nopr.pr-poll" "$state/nopr.pr-poll-registration"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/nopr.meta"
+  printf 'done: implemented and committed\n' > "$state/nopr.status"
+  printf '%s' "$(seen_sig "$state/nopr.status")" > "$state/.seen-nopr_status"
+  export FM_FAKE_CREW_STATE='state: done · source: status-log · reported done'
+
+  merge_watch_bg "$dir" "$window" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 \
+    || fail "a done: task with no recorded PR was absorbed instead of surfaced: $(cat "$out")"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the no-PR done: pane did not print a stale wake: $(cat "$out")"
+  [ ! -e "$state/.paused-$key" ] \
+    || fail "a done: task with no recorded PR must not be filed under any bounded cadence"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the no-PR surface failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null \
+    || fail "the no-PR done: surface was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a done: task with no recorded PR still surfaces at once - done is not landed"
+}
+
+# A fake gh answering every `pr view` with FM_TEST_GH_STATE, the one call both the
+# merge poll and the closed probe make.
+make_fake_gh() {  # <fakebin>
+  cat > "$1/gh" <<'SH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  'pr view') printf '%s\n' "${FM_TEST_GH_STATE:-OPEN}"; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$1/gh"
+}
+
+# Closed-unmerged: the merge poll is silent on a closed PR by design, so without
+# its own probe a closure would surface only on the long reminder. It surfaces
+# once, promptly, as a check result; is not re-announced on every probe; is named
+# by the long reminder; clears when the PR reads open again; and never outranks
+# the merge poll, which still fires on merge.
+test_closed_unmerged_pr_surfaces_once() {
+  local dir state out drain_out window statusf pid c
+  dir=$(make_merge_wait_case merge-wait-closed closedpr test:fm-closedpr 'PR open, awaiting the captain')
+  state="$dir/state"; out="$dir/watch.out"; drain_out="$dir/drain.out"; window="test:fm-closedpr"
+  statusf="$state/closedpr.status"; c="$state/closedpr.check.sh"
+  make_fake_gh "$dir/fakebin"
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review'
+  rm -f "$state/.last-check"
+
+  # Phase A: the PR closes without merging. One check wake, naming the closure.
+  merge_watch_bg "$dir" "$window" "$out" FM_CHECK_INTERVAL=0 FM_PR_CLOSED_PROBE_SECS=0 FM_TEST_GH_STATE=CLOSED
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a PR closed without merging never surfaced: $(cat "$out")"
+  grep -F "check: $c: closed" "$out" >/dev/null || fail "the closure was not reported as a check result: $(cat "$out")"
+  grep -F "closed without merging" "$out" >/dev/null || fail "the closure wake did not say what happened: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the closure wake failed"
+  grep "$(printf '\tcheck\t')" "$drain_out" | grep -F "closed" >/dev/null \
+    || fail "the closure wake was not queued"
+  [ "$(cat "$state/.pr-closed-closedpr" 2>/dev/null || true)" = "https://github.com/o/r/pull/7" ] \
+    || fail "the surfaced closure was not recorded against the task's PR"
+
+  # Phase B: still closed on every later probe. Absorbed, not re-announced.
+  : > "$out"
+  merge_watch_bg "$dir" "$window" "$out" FM_CHECK_INTERVAL=0 FM_PR_CLOSED_PROBE_SECS=0 FM_TEST_GH_STATE=CLOSED
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "an already-surfaced closure was re-announced: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "an already-surfaced closure printed a wake: $(cat "$out")"
+  reap "$pid"
+
+  # Phase C: the long reminder names the closure rather than calling it unmerged.
+  backdate "$statusf" 500
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-closedpr_status"
+  : > "$out"
+  merge_watch_bg "$dir" "$window" "$out" FM_MERGE_RESURFACE_SECS=240
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "the merge reminder never fired for a closed PR: $(cat "$out")"
+  grep -F "was closed without merging" "$out" >/dev/null \
+    || fail "the reminder for a closed PR did not name the closure: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > /dev/null 2>&1 || true
+
+  # Phase D: reopened. The record clears, so a later close surfaces afresh.
+  rm -f "$state/.last-check"
+  : > "$out"
+  merge_watch_bg "$dir" "$window" "$out" FM_CHECK_INTERVAL=0 FM_PR_CLOSED_PROBE_SECS=0 FM_TEST_GH_STATE=OPEN
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "an open PR woke firstmate: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "an open PR printed a wake: $(cat "$out")"
+  [ ! -e "$state/.pr-closed-closedpr" ] || fail "a reopened PR kept its closure record"
+  reap "$pid"
+
+  # Phase E: the merge poll still fires on merge, and the probe never runs ahead of it.
+  : > "$out"
+  merge_watch_bg "$dir" "$window" "$out" FM_CHECK_INTERVAL=0 FM_PR_CLOSED_PROBE_SECS=0 FM_TEST_GH_STATE=MERGED
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a merged PR never woke firstmate: $(cat "$out")"
+  grep -F "check: $c: merged" "$out" >/dev/null || fail "the merge poll did not report the merge: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > /dev/null 2>&1 || true
+
+  # Phase F: a task that is not parked on its merge is never probed, so a closure
+  # of a PR a worker is still changing is left to that worker.
+  printf 'done: PR https://github.com/o/r/pull/7 checks green\nworking: captain asked for one more change\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-closedpr_status"
+  rm -f "$state/.pr-closed-closedpr"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  : > "$out"
+  merge_watch_bg "$dir" "$window" "$out" FM_CHECK_INTERVAL=0 FM_PR_CLOSED_PROBE_SECS=0 FM_TEST_GH_STATE=CLOSED
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a closed PR on a task still being worked was surfaced by the probe: $(cat "$out")"
+  fi
+  [ ! -e "$state/.pr-closed-closedpr" ] || fail "a task not parked on its merge was probed"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a PR closed without merging surfaces once as a check result, is named by the long reminder, clears on reopen, and never outranks the merge poll"
+}
+
+# The probe script alone: closed, open, and silence for everything else -
+# including a merged PR (the merge poll's wake) and an invalid URL, which never
+# reaches the forge CLI at all.
+test_pr_closed_poll_contract() {
+  local dir fakebin out
+  dir=$(make_case pr-closed-poll); fakebin="$dir/fakebin"
+  make_fake_gh "$fakebin"
+  out=$(PATH="$fakebin:$PATH" FM_TEST_GH_STATE=CLOSED "$ROOT/bin/fm-pr-closed-poll.sh" https://github.com/o/r/pull/7)
+  [ "$out" = closed ] || fail "a closed PR did not read closed: $out"
+  out=$(PATH="$fakebin:$PATH" FM_TEST_GH_STATE=OPEN "$ROOT/bin/fm-pr-closed-poll.sh" https://github.com/o/r/pull/7)
+  [ "$out" = open ] || fail "an open PR did not read open: $out"
+  out=$(PATH="$fakebin:$PATH" FM_TEST_GH_STATE=MERGED "$ROOT/bin/fm-pr-closed-poll.sh" https://github.com/o/r/pull/7)
+  [ -z "$out" ] || fail "a merged PR must stay silent here - the merge poll owns it: $out"
+  out=$(PATH="$fakebin:$PATH" FM_TEST_GH_STATE=CLOSED "$ROOT/bin/fm-pr-closed-poll.sh" 'https://github.com/o/r/pull/7;id')
+  [ -z "$out" ] || fail "an invalid URL reached the forge: $out"
+  out=$(PATH="$fakebin:$PATH" FM_TEST_GH_STATE=CLOSED "$ROOT/bin/fm-pr-closed-poll.sh")
+  [ -z "$out" ] || fail "a missing URL printed output: $out"
+  pass "fm-pr-closed-poll.sh reads closed or open and stays silent on a merge, an error, or an invalid URL"
 }
 
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
@@ -2130,6 +2396,11 @@ run_case test_done_awaiting_merge_stale_absorbed_then_resurfaced
 run_case test_done_with_no_armed_merge_poll_still_surfaces
 run_case test_done_awaiting_merge_yields_to_an_active_run
 run_case test_merge_wait_still_wedge_escalates_off_its_baseline
+run_case test_merge_wait_unchanged_done_takes_no_hourly_recheck
+run_case test_parked_decision_keeps_its_hourly_recheck
+run_case test_done_without_recorded_pr_still_surfaces
+run_case test_closed_unmerged_pr_surfaces_once
+run_case test_pr_closed_poll_contract
 run_case test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 run_case test_secondmate_paused_resurfaces_in_normal_mode
 run_case test_secondmate_nonpaused_stale_remains_suppressed

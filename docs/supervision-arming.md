@@ -210,12 +210,45 @@ Three conditions hold the class narrow, and the first of them is what keeps the 
 
 That armed poll is also why going quiet here loses nothing: the suppression is conditional on an independent wake source.
 The poll is the thing that ends this wait, the check sweep dispatches it on its own cadence, and it wakes firstmate the moment the PR merges - a poll whose artifacts stop validating is rejected with its own wake rather than skipped silently.
-`handle_paused_stale`'s bounded `FM_PAUSE_RESURFACE_SECS` recheck is the second backstop, and teardown removes the poll with the rest of the task's state, so a landed task returns to ordinary stale handling.
+`handle_paused_stale`'s bounded reminder is the second backstop, on its own long `FM_MERGE_RESURFACE_SECS` cadence ("A finished task awaiting its merge" below), and teardown removes the poll with the rest of the task's state, so a landed task returns to ordinary stale handling.
 Authoritative state still wins ahead of all of it: a crew steered back into a run reports `working` through `pause_state_class`'s run-step precedence and is absorbed on the ordinary wedge timer, never as a merge wait.
 
 One consequence is deliberate: a finished task parked on a merge is now absorbed whether its agent is alive or gone.
 A crew that exited after finishing changes nothing about what firstmate can do next - the merge needs the captain's word and teardown is refused until the work lands - so the dead-agent reading is not new information here, and it re-surfaces on the same bounded cadence as everything else in this class.
 Away mode is unchanged too: while `state/.afk` exists the daemon owns triage and the watcher hands it every distinct stale hash exactly as before.
+
+### A finished task awaiting its merge
+
+Written 2026-10-01 for `arming-done-unmerged-gap-g1`.
+
+The absorb above stopped the per-hash wakes, but it left two hourly rechecks running on every merge wait, and they said the same nothing.
+`handle_paused_stale` re-surfaced the task once per `FM_PAUSE_RESURFACE_SECS` as "this task finished and the PR recorded for it is still unmerged", and the wedge timer underneath took its own unchanged-state recheck on the same cadence as "reconciled state unchanged at done|run-step".
+Measured on 2026-10-01: with several PRs open and every worker finished, the primary was woken roughly hourly per PR by those two reasons, each costing a full turn to dismiss, while the merge poll - the wake that actually matters - worked as designed.
+
+The fix is not in the arming verdict, and that is deliberate.
+`done` already maps to idle in `fm_progress_token_verdict`, and arming was never the waste: an armed merge poll forces the gate to arm through `fm_progress_has_pollable_work`, which it must, because the poll can only run inside a watcher.
+The wakes came from inside that running watcher, so that is where they are removed, without a second notion of "deliberately quiet".
+
+Three changes, all in `bin/fm-watch.sh`:
+
+- **One reminder, on its own cadence.** The merge wait's resurface uses `FM_MERGE_RESURFACE_SECS`, one day by default, instead of the hourly pause cadence.
+- **No second recheck.** The wedge timer's unchanged-state recheck skips a merge wait whose reading is still its healthy `done` baseline, because that reading does not read as progressing and the reminder above already owns the one resurface.
+  Any other reading still follows the ordinary rule, and any move off the baseline still escalates with the count advancing.
+- **A closure still surfaces promptly.** The merge poll is silent on a PR closed without merging, so before this change a closure was noticed only by the hourly reminder.
+  `bin/fm-pr-closed-poll.sh` now answers that question from the check sweep, at most once per `FM_PR_CLOSED_PROBE_SECS` and only for a task in this class, and a closure wakes firstmate once as `check: <poll>: closed`.
+  `state/.pr-closed-<id>` holds the closed URL so later probes do not re-announce it, the long reminder names the closure instead of calling the PR unmerged, and a PR read open again clears the record.
+  It is a separate trusted script rather than a change to `bin/fm-pr-poll.sh` so that poll stays byte-static and every already-armed poll stays valid.
+
+**Why a reminder at all, and why a day.** No reminder would make a PR the captain forgot vanish until it merged, and the merge poll cannot help with a PR nobody is going to merge.
+An hourly one is the measured noise.
+A day is long enough that a PR sitting overnight costs at most one wake, short enough that a forgotten one comes back at the next working session, and bounded so the class cannot rot invisibly - the same promise the pause cadence makes, at the length this class can afford because two independent wakes already cover the events that end it.
+
+What this deliberately does not touch:
+
+- A `done:` task with no `pr=` in its metadata is not in this class at all, so it surfaces at once on ordinary stale handling; `done` is not landed, and without a recorded PR nothing independent will ever wake firstmate about it.
+- A task parked on a decision keeps its hourly reminder and its hourly unchanged-state recheck, because nothing independent wakes firstmate when the captain decides.
+- The merge poll still fires on merge, ahead of the closed probe, which runs only when the poll stayed silent.
+- Away mode is unchanged: the daemon already self-handles a finished task's repeat stale panes once its `done:` line was escalated.
 
 ## Escalation requires a state change
 
@@ -224,6 +257,7 @@ The count is the urgency signal, so bumping it without new evidence is misinform
 
 An escalation now requires the task's reconciled state to differ from the state recorded at the previous escalation.
 An unchanged state still gets a bounded recheck on the long `FM_PAUSE_RESURFACE_SECS` cadence, deliberately not counted as an escalation, because a wedged crew reconciles as `working` and suppression must never fully swallow a task that reads as progressing.
+The one exception is a merge wait still at its healthy `done` baseline, whose single reminder `handle_paused_stale` owns ("A finished task awaiting its merge" above).
 
 That rule needs a starting point, and on the decision-wait timer the missing one used to escalate.
 There is no previous escalation to compare against at the first expiry, so every crew that raised a decision and waited on the captain was called a possible wedge about four minutes in, on a reading (`parked`) the verdict mapping positively classifies as idle.
@@ -290,3 +324,4 @@ t3 should also cover `state/.progress-*` records as *untrusted input* rather tha
 `bin/fm-crew-state.sh` remains the single owner of reconciled current state; this design reads it and never re-derives it.
 `bin/fm-classify-lib.sh` remains the single owner of status vocabulary, including the awaiting-firstmate predicate the watcher's stale suppression uses.
 `bin/fm-supervision-lib.sh` exposes the progressing count to the three guards so they share one predicate rather than three copies.
+`bin/fm-watch.sh` owns the watcher-local merge-wait class, its long reminder, and the closed-PR probe cadence; `bin/fm-pr-closed-poll.sh` owns only the forge read.

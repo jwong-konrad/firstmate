@@ -54,6 +54,8 @@
 #                          a long-cadence recheck that does not bump the count.
 #                          Unless afk is active.
 #   check: <script>: <out> authenticated check output, always actionable
+#                          (including `closed` from the closed-PR probe for a
+#                          finished task parked on its merge)
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
@@ -175,6 +177,20 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+# A finished task parked on its armed, unmerged PR (task_done_awaiting_merge) is
+# the one awaiting-firstmate class with an independent wake source: the merge poll
+# wakes firstmate when the PR lands, and fm-pr-closed-poll.sh wakes it once if the
+# PR is closed instead. So its reminder runs on its own much longer cadence - one a
+# day by default - rather than the hourly pause cadence, which re-woke firstmate
+# for every open PR with nothing new to say. Bounded rather than off, so a PR the
+# captain forgot still comes back (docs/supervision-arming.md).
+MERGE_RESURFACE_SECS=${FM_MERGE_RESURFACE_SECS:-86400}
+case "$MERGE_RESURFACE_SECS" in ''|*[!0-9]*) MERGE_RESURFACE_SECS=86400 ;; esac
+# How often the check sweep asks the forge whether such a task's PR was closed
+# without merging. Only merge-wait tasks are probed, so the cost is one extra
+# forge read per parked PR per window.
+PR_CLOSED_PROBE_SECS=${FM_PR_CLOSED_PROBE_SECS:-900}
+case "$PR_CLOSED_PROBE_SECS" in ''|*[!0-9]*) PR_CLOSED_PROBE_SECS=900 ;; esac
 TRIAGE_LOG="$STATE/.watch-triage.log"
 TRIAGE_LOG_MAX_BYTES=${FM_WATCH_TRIAGE_LOG_MAX_BYTES:-262144}
 # Consecutive event-path failures (fm_backend_wait_transition returning 2 -
@@ -310,6 +326,49 @@ task_done_awaiting_merge() {  # <task>
   [ -f "$STATE/$task.pr-poll" ] || return 1
   [ "$(status_line_verb "$(last_status_line "$STATE/$task.status")")" = 'done' ] || return 1
   grep -q '^pr=' "$STATE/$task.meta" 2>/dev/null
+}
+
+# The merge poll is silent on a PR closed without merging, so a merge wait could
+# otherwise learn of a closure only from its long reminder. The check sweep calls
+# pr_closed_probe for each merge-wait task after that task's merge poll stayed
+# silent: at most once per PR_CLOSED_PROBE_SECS it runs fm-pr-closed-poll.sh and
+# wakes firstmate ONCE for a closure. .pr-closed-<task> records the closed URL so
+# the closure is not re-announced on every probe, and is cleared when the PR reads
+# open again so a reopen-then-close surfaces afresh. The marker is compared with
+# the task's current pr= so a leftover from another PR can never suppress a
+# closure. Enqueue happens before the marker is written, so a crash between the
+# two re-announces rather than loses the closure.
+pr_closed_surfaced() {  # <task> [<pr-url>]
+  local task=$1 url=${2:-}
+  # fm_pr_poll_artifacts_valid requires meta pr= to equal the poll URL, so the
+  # meta fallback names the same PR the probe was given.
+  [ -n "$url" ] || url=$(grep '^pr=' "$STATE/$task.meta" 2>/dev/null | tail -1 | cut -d= -f2-)
+  [ -n "$url" ] && [ "$(cat "$STATE/.pr-closed-$task" 2>/dev/null || true)" = "$url" ]
+}
+
+pr_closed_probe() {  # <task> <pr-url> <check-path>
+  local task=$1 url=$2 c=$3 reason
+  task_done_awaiting_merge "$task" || return 0
+  [ "$(age_of "$STATE/.pr-closed-probed-$task")" -ge "$PR_CLOSED_PROBE_SECS" ] || return 0
+  run_check_capture "$SCRIPT_DIR/fm-pr-closed-poll.sh" "$url" || exit 1
+  touch "$STATE/.pr-closed-probed-$task"
+  case "$FM_CHECK_RESULT" in
+    closed)
+      if pr_closed_surfaced "$task" "$url"; then
+        triage_log "absorbed closed PR (already surfaced): $task"
+        return 0
+      fi
+      reason="check: $c: closed - the PR recorded for this finished task was closed without merging; reopen it, re-scope the work, or get the captain's word to discard it"
+      fm_wake_append check "$c" "$reason" || exit 1
+      printf '%s' "$url" > "$STATE/.pr-closed-$task"
+      touch "$STATE/.last-check"
+      wake "$reason"
+      ;;
+    open)
+      rm -f "$STATE/.pr-closed-$task"
+      ;;
+  esac
+  return 0
 }
 
 # The task's reconciled current state as "<state>|<source>", refreshing its
@@ -493,6 +552,15 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         # as progressing. The recheck is explicitly NOT an escalation and does
         # not bump the count.
         date +%s > "$since_file"
+        # A merge wait still sitting on its healthy `done` reading is the one
+        # unchanged state that needs no recheck here: it does not read as
+        # progressing, and handle_paused_stale's merge reminder already owns
+        # its one bounded resurface. Rechecking it here too re-woke firstmate
+        # hourly per open PR to say nothing had changed.
+        if [ "$mode" = finished-baseline ] && [ "${state_now%%|*}" = 'done' ]; then
+          triage_log "absorbed $label (idle ${age}s, still finished at $state_now, merge reminder owns the recheck): $win"
+          return 0
+        fi
         if [ "$(age_of "$recheck_file")" -lt "$PAUSE_RESURFACE_SECS" ]; then
           triage_log "absorbed $label (idle ${age}s, reconciled state unchanged at $state_now, no new escalation): $win"
           return 0
@@ -526,7 +594,8 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # Absorb a stale pane under a declared external-wait pause (paused:), a
 # dead-agent captain-held transfer, an open decision firstmate itself owes the
 # task, or a pending merge firstmate owes a finished one, and re-surface it once every
-# PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
+# PAUSE_RESURFACE_SECS (MERGE_RESURFACE_SECS for a pending merge) for a recheck so
+# it cannot rot invisibly. Called on any
 # stale poll once pause_state_class permits the bounded cadence, so it must be
 # cheap: on the external-wait path it NEVER re-reads crew state. The re-surface
 # age is anchored on the
@@ -549,7 +618,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # baseline. A declared paused: external wait and a verified captain-held: transfer
 # are legitimately indefinite, so they keep clearing that bookkeeping as before.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason wait_kind baseline
+  local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason wait_kind baseline window
   key=$(printf '%s' "$win" | tr ':/.' '___')
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
@@ -587,13 +656,22 @@ handle_paused_stale() {  # <window> <task> <hash>
   age=$(( $(date +%s) - mtime ))
   rf="$STATE/.paused-resurfaced-$key"
   rf_age=$(age_of "$rf")   # 999999 when no prior re-surface
-  if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
+  # The merge wait has its own, much longer reminder cadence (MERGE_RESURFACE_SECS):
+  # the merge poll and the closed probe already wake firstmate on the two events
+  # that end it, so this reminder exists only so a forgotten PR cannot vanish.
+  window=$PAUSE_RESURFACE_SECS
+  [ "$wait_kind" = merge-wait ] && window=$MERGE_RESURFACE_SECS
+  if [ "$age" -ge "$window" ] && [ "$rf_age" -ge "$window" ]; then
     case "$wait_kind" in
       decision-wait)
         reason="stale: $win (awaiting firstmate ${age}s - the last decision this task raised has no recorded resolution, rechecked on a long cadence not a wedge; decide it, record why it is still held, or record the resolution if it was already steered)"
         ;;
       merge-wait)
-        reason="stale: $win (awaiting firstmate ${age}s - this task finished and the PR recorded for it is still unmerged, rechecked on a long cadence not a wedge; merge it, get the captain's word, or record why it is still held)"
+        if pr_closed_surfaced "$task"; then
+          reason="stale: $win (awaiting firstmate ${age}s - this task finished and the PR recorded for it was closed without merging, rechecked on the long merge-wait cadence not a wedge; reopen it, re-scope the work, or get the captain's word to discard it)"
+        else
+          reason="stale: $win (awaiting firstmate ${age}s - this task finished and the PR recorded for it is still unmerged, rechecked on the long merge-wait cadence not a wedge; merge it, get the captain's word, or record why it is still held)"
+        fi
         ;;
       *)
         reason="stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)"
@@ -1091,6 +1169,8 @@ while :; do
           run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
             "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
+          # A merge wins; only a still-unmerged PR is asked whether it closed.
+          [ -n "$out" ] || pr_closed_probe "$id" "$url" "$c"
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
           run_check_capture "$custom_snapshot" || exit 1
