@@ -436,9 +436,17 @@ test_context_reset_markers_ride_existing_classification() {
   if status_is_captain_relevant "$line"; then
     fail "an open in-flight marker must not be captain-relevant"
   fi
-  if status_task_awaits_firstmate "$sfile"; then
+  # The watcher's suppression predicate. A missing name would make the negative
+  # check below vacuous (command-not-found is just another false), so its presence
+  # is asserted first and a positive control proves it can say yes at all.
+  declare -F status_task_awaits_firstmate_unterminated >/dev/null \
+    || fail "bin/fm-classify-lib.sh no longer defines status_task_awaits_firstmate_unterminated"
+  if status_task_awaits_firstmate_unterminated "$sfile"; then
     fail "an open in-flight marker must not read as waiting on firstmate"
   fi
+  printf '%s\n' "$line" 'needs-decision [key=control]: pick one' > "$sdir/control.status"
+  status_task_awaits_firstmate_unterminated "$sdir/control.status" \
+    || fail "an open keyed decision must read as waiting on firstmate (positive control)"
   open=$(status_open_activities "$sfile")
   assert_contains "$open" "push-fix" "a marker open must appear in the keyed activity fold"
 
