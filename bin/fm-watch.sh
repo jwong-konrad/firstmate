@@ -384,13 +384,66 @@ pr_closed_probe() {  # <task> <pr-url> <check-path>
 # An empty task id is a window with no matching meta, not a task: reconciling it
 # would write a state/.progress- record no teardown path ever removes, so it
 # reads as a fixed unknown instead.
+#
+# Sets CREW_RECONCILED to that pair and CREW_RECONCILED_DETAIL to the full
+# crew-state line, rather than printing, so the one caller that needs the detail
+# (the merge wait's unpushed reading) gets it without a second costly read.
 crew_reconciled_state() {  # <task>
+  CREW_RECONCILED_DETAIL=''
   if [ -z "$1" ]; then
-    printf 'unknown|none'
+    CREW_RECONCILED='unknown|none'
     return 0
   fi
   fm_progress_reconcile "$STATE" "$1" >/dev/null
-  printf '%s|%s' "$FM_PROGRESS_TOKEN" "$FM_PROGRESS_SOURCE"
+  CREW_RECONCILED="$FM_PROGRESS_TOKEN|$FM_PROGRESS_SOURCE"
+  CREW_RECONCILED_DETAIL=$FM_PROGRESS_DETAIL
+}
+
+# The commit count an `unpushed` crew-state detail carries, or nothing when it
+# carries none. bin/fm-crew-state.sh's done_claim_landing_check owns that wording
+# ("not landed: N commit(s) ...").
+unpushed_commit_count() {  # <crew-state detail>
+  local d=$1
+  case "$d" in *'not landed: '*' commit(s)'*) ;; *) return 0 ;; esac
+  d=${d#*not landed: }
+  d=${d%% *}
+  case "$d" in ''|*[!0-9]*) return 0 ;; esac
+  printf '%s' "$d"
+}
+
+# A finished task whose recorded PR is still unmerged but whose branch has gained
+# commits no remote holds reads `unpushed` (bin/fm-crew-state.sh), not the merge
+# wait's healthy `done`. That is real news - the PR does not hold the work - but
+# it is news ONCE: re-waking hourly to say it again is the noise the merge wait's
+# own long reminder replaced. So the first such reading wakes firstmate with a
+# reason that names the cause, and an unchanged one after that is absorbed, the
+# merge reminder (which then mentions the commits) owning the bounded recheck.
+#
+# "Unchanged" is the task's own evidence, not the wedge-state record: a pane
+# redraw wipes the wedge bookkeeping, so a marker keyed on it would re-announce on
+# every redraw. .unpushed-surfaced-<task> instead records the commit count plus the
+# task's meta/status/turn-end signature, so more commits, a new status line, or a
+# turn the crew took surfaces afresh. A push that clears it reads `done` again,
+# and wedge_timer_check removes the marker and restores the quiet baseline.
+# Enqueue happens before the marker is written, so a crash re-announces rather
+# than loses the wake.
+merge_wait_unpushed() {  # <window> <task> <state-now> <since-file> <state-file> <recheck-file> <label> <age>
+  local win=$1 task=$2 state_now=$3 since_file=$4 state_file=$5 recheck_file=$6 label=$7 age=$8
+  local marker count sig reason
+  marker="$STATE/.unpushed-surfaced-$task"
+  count=$(unpushed_commit_count "$CREW_RECONCILED_DETAIL")
+  sig="${count}|$(fm_progress_signature "$STATE" "$task")"
+  printf '%s' "$state_now" > "$state_file"
+  date +%s > "$recheck_file"
+  date +%s > "$since_file"
+  if [ "$(cat "$marker" 2>/dev/null || true)" = "$sig" ]; then
+    triage_log "absorbed $label (idle ${age}s, still unpushed at $state_now, already surfaced, merge reminder owns the recheck): $win"
+    return 0
+  fi
+  reason="stale: $win ($task: ${count:-some} local commit(s) not on the remote - push or discard before merge; surfaced once, then the long merge-wait reminder)"
+  fm_wake_append stale "$win" "$reason" || exit 1
+  printf '%s' "$sig" > "$marker"
+  wake "$reason"
 }
 
 # window_is_busy: 0 (busy) iff the task's harness is actively working. Prefers
@@ -517,8 +570,24 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       # only advances when the pane's RECONCILED state differs from the state
       # recorded at the previous escalation - pane content, which churns on a
       # ticking clock or a token counter, is deliberately not the comparand.
-      state_now=$(crew_reconciled_state "$task")
+      crew_reconciled_state "$task"
+      state_now=$CREW_RECONCILED
       state_prev=$(cat "$state_file" 2>/dev/null || true)
+      # The merge wait's two finished readings (merge_wait_unpushed): `unpushed`
+      # wakes once by name and is then absorbed, and `done` after it is the push
+      # that cleared it, so it re-takes the quiet first-expiry baseline below.
+      if [ "$mode" = finished-baseline ]; then
+        case "${state_now%%|*}" in
+          unpushed)
+            merge_wait_unpushed "$win" "$task" "$state_now" "$since_file" "$state_file" "$recheck_file" "$label" "$age"
+            return 0
+            ;;
+          done)
+            rm -f "$STATE/.unpushed-surfaced-$task"
+            [ "${state_prev%%|*}" = unpushed ] && state_prev=''
+            ;;
+        esac
+      fi
       # Baseline modes (the awaiting-firstmate timers only): a crew waiting on
       # firstmate reconciles as positively idle, which is its HEALTHY shape, not
       # evidence of a wedge. There is no earlier escalation to compare against on
@@ -618,7 +687,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # baseline. A declared paused: external wait and a verified captain-held: transfer
 # are legitimately indefinite, so they keep clearing that bookkeeping as before.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason wait_kind baseline window
+  local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason wait_kind baseline window unpushed
   key=$(printf '%s' "$win" | tr ':/.' '___')
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
@@ -669,6 +738,10 @@ handle_paused_stale() {  # <window> <task> <hash>
       merge-wait)
         if pr_closed_surfaced "$task"; then
           reason="stale: $win (awaiting firstmate ${age}s - this task finished and the PR recorded for it was closed without merging, rechecked on the long merge-wait cadence not a wedge; reopen it, re-scope the work, or get the captain's word to discard it)"
+        elif [ -e "$STATE/.unpushed-surfaced-$task" ]; then
+          unpushed=$(cat "$STATE/.unpushed-surfaced-$task" 2>/dev/null || true)
+          unpushed=${unpushed%%|*}
+          reason="stale: $win (awaiting firstmate ${age}s - this task finished and the PR recorded for it is still unmerged, but ${unpushed:-some} local commit(s) on its branch are still not on the remote, rechecked on the long merge-wait cadence not a wedge; push or discard them, then merge, get the captain's word, or record why it is still held)"
         else
           reason="stale: $win (awaiting firstmate ${age}s - this task finished and the PR recorded for it is still unmerged, rechecked on the long merge-wait cadence not a wedge; merge it, get the captain's word, or record why it is still held)"
         fi
