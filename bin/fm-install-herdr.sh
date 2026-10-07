@@ -60,7 +60,10 @@ trap 'rm -rf "$TMP"' EXIT
 
 printf 'fm-install-herdr.sh: downloading %s from %s\n' "$ASSET" "$URL" >&2
 # --fail: HTTP errors; --location: follow redirects; --max-filesize: bound.
-curl -fsSL --max-filesize "$FM_HERDR_CI_MAX_BYTES" "$URL" -o "$TMP/$ASSET" \
+# GitHub's release CDN answers 5xx transiently, so retry; the SHA-256 pin below
+# is what makes the download trustworthy.
+curl -fsSL --retry 6 --retry-delay 5 --retry-connrefused \
+  --max-filesize "$FM_HERDR_CI_MAX_BYTES" "$URL" -o "$TMP/$ASSET" \
   || die "download failed for $URL (bounded at $FM_HERDR_CI_MAX_BYTES bytes)"
 
 if command -v sha256sum >/dev/null 2>&1; then

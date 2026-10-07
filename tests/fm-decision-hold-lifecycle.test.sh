@@ -550,6 +550,51 @@ test_resolve_matches_quoted_blocked_by_edges() {
   pass "resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id"
 }
 
+# Done retention prunes an answered hold into the archive; verify must still pass
+# for a closed archived hold and keep refusing open-archived or missing holds.
+test_archived_closed_hold_satisfies_verify() {
+  local home origin hold archive
+  home=$(make_home archived-hold)
+  origin=sample-archive-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Archive review" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create archive origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Archive review\n' > "$home/data/$origin/report.md"
+  hold=$(run_decisions "$home" hold "$origin" pick \
+    --title "Pick one" --reason "captain pick pending" --repo sample) \
+    || fail "could not register hold"
+  run_decisions "$home" complete "$origin" pick >/dev/null || fail "completion failed"
+  tasks_in "$home" add sample-route "Routed work" --kind ship --repo sample >/dev/null \
+    || fail "could not add routed work"
+  tasks_in "$home" block sample-route --by "$hold" >/dev/null || fail "could not block routed work"
+  printf 'Chosen.\n' > "$home/d.txt"
+  run_decisions "$home" resolve "$origin" pick --decision-file "$home/d.txt" --routed-to sample-route >/dev/null \
+    || fail "could not resolve hold"
+  tasks_in "$home" prune --keep 0 >/dev/null || fail "could not prune done section"
+  archive="$home/data/done-archive.md"
+  ! tasks_in "$home" show "$hold" >/dev/null 2>&1 || fail "hold was not pruned out of the backlog"
+  assert_grep "- [x] $hold - " "$archive" "hold was not archived"
+  run_decisions "$home" verify "$origin" >/dev/null 2> "$home/arch.err" \
+    || fail "archived closed hold refused verify: $(cat "$home/arch.err")"
+
+  # Archived but not closed must still refuse.
+  sed -i.bak "s/^- \[x\] $hold - /- [ ] $hold - /" "$archive"
+  if run_decisions "$home" verify "$origin" >/dev/null 2> "$home/open.err"; then
+    fail "archived-but-open hold passed verify"
+  fi
+  assert_grep "absent from" "$home/open.err" "archived-open refusal missing"
+
+  # Absent everywhere must still refuse.
+  : > "$archive"
+  if run_decisions "$home" verify "$origin" >/dev/null 2> "$home/gone.err"; then
+    fail "hold missing everywhere passed verify"
+  fi
+  assert_grep "absent from" "$home/gone.err" "missing-everywhere refusal missing"
+  pass "archived closed hold satisfies verify; archived-open and missing holds still refuse"
+}
+
 run_case test_uninventoried_report_decision_refuses_completion
 
 run_case test_scout_teardown_always_requires_inventory_verification
@@ -560,4 +605,5 @@ run_case test_none_inventory_and_resolved_prose_do_not_create_holds
 run_case test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 run_case test_secondmate_hold_stays_in_authoritative_home
 run_case test_resolve_matches_quoted_blocked_by_edges
+run_case test_archived_closed_hold_satisfies_verify
 fm_case_summary "fm-decision-hold-lifecycle"

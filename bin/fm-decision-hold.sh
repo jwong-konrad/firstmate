@@ -184,9 +184,33 @@ verify_hold_resolved() {  # <hold-id>
   return 1
 }
 
+# Done retention prunes a closed hold from the backlog into the archive named by
+# the home's .tasks.toml; tasks-axi cannot show archived items, so read that file
+# read-only. Only a closed (`[x]`) kind-captain entry counts as resolved.
+archive_path() {
+  local rel=''
+  [ -f "$FM_HOME/.tasks.toml" ] \
+    && rel=$(sed -n 's/^archive[[:space:]]*=[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$FM_HOME/.tasks.toml" | head -1)
+  [ -n "$rel" ] || rel=data/done-archive.md
+  case "$rel" in
+    /*) printf '%s\n' "$rel" ;;
+    *) printf '%s/%s\n' "$FM_HOME" "$rel" ;;
+  esac
+}
+
+hold_archived_closed() {  # <hold-id>
+  local file
+  file=$(archive_path)
+  [ -f "$file" ] || return 1
+  grep -F -- "- [x] $1 - " "$file" 2>/dev/null | grep -F -- '(kind: captain)' >/dev/null
+}
+
 verify_hold_durable() {  # <hold-id>
   local id=$1 show state held kind hold_kind body
-  show=$(task_show "$id") || fail "captain decision $id is absent from $FM_HOME/data/backlog.md"
+  if ! show=$(task_show "$id"); then
+    hold_archived_closed "$id" && return 0
+    fail "captain decision $id is absent from $FM_HOME/data/backlog.md"
+  fi
   state=$(show_field "$show" state)
   held=$(show_field "$show" held)
   kind=$(show_field "$show" kind)
