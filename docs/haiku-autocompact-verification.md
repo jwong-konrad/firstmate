@@ -40,3 +40,8 @@ Equivalent knobs, same result as the env var at 100000 (36k): `--autocompact 100
   `CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000 claude --model sonnet` compacted at 81494.
   A Haiku session that ran `/model sonnet` and then filled context kept the cap and compacted at 81555 on `claude-sonnet-5-5`.
   Subagents spawned in the same process inherit the environment.
+
+## Decision
+
+On 2026-10-09 the captain chose option B: no compaction knob is injected into any worker.
+Firstmate instead watches a matching worker's context fill and sends `/compact` itself between turns (`config/compact-at`, `bin/fm-compact-at.sh`, docs/configuration.md), because the process-wide leak above cannot be contained per model.

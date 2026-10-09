@@ -1288,6 +1288,17 @@ while :; do
 $pending
 EOF
     reason="signal:$files"
+    # Optional firstmate-driven /compact for matching workers at a turn end
+    # (config/compact-at; bin/fm-compact-at.sh owns the contract). A no-op without
+    # the config, best-effort otherwise, and it never changes the triage below.
+    if [ -f "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/compact-at" ]; then
+      compact_ids=""
+      for f in $files; do
+        case "$f" in *.turn-ended) compact_ids="$compact_ids $(basename "$f" .turn-ended)" ;; esac
+      done
+      # shellcheck disable=SC2086  # ids carry no spaces
+      [ -z "$compact_ids" ] || "$SCRIPT_DIR/fm-compact-at.sh" $compact_ids >/dev/null 2>&1 || true
+    fi
     # Triage: a signal is ACTIONABLE when any of these holds (cheapest first):
     #   - the away-mode daemon owns triage (afk) and wants every wake;
     #   - any status file carries a captain-relevant verb;

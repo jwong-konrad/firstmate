@@ -313,6 +313,22 @@ A malformed entry on the spawned project's own line - not a `NAME=VALUE` assignm
 Only the spawned project's line is validated; another project's bad line is that project's spawn to refuse.
 It never applies to a `--secondmate` spawn, because a secondmate is a firstmate home rather than a project, and it is deliberately not inherited into secondmate homes for the same reason `config/spawn-env-allow` is not.
 
+## Firstmate-driven worker compaction (config/compact-at)
+
+Optional, LOCAL, gitignored: one line per model, `<model-glob> <tokens>`, with full-line `#` comments, the first matching line winning, and `k`/`m` suffixes accepted on the token count.
+The glob is matched against the `model=` that `bin/fm-spawn.sh` recorded in `state/<id>.meta`.
+Absent file is the normal state and changes nothing; so does an unset or `default` model, a non-claude harness, or a secondmate, none of which ever match.
+Typical content for Haiku workers: `haiku 99000` and `claude-haiku-* 99000`.
+
+When a matching worker's turn ends, the supervision watcher calls `bin/fm-compact-at.sh`, which reads the worker's context fill from its own transcript (`bin/fm-context-fill-lib.sh`) and, at or above the threshold, sends `/compact` through `bin/fm-send.sh`.
+It sends only when the worker has no active or parked validation step and its composer is empty, at most once per climb (re-armed when a later read shows the fill below the threshold), and logs each send to `state/.compact-at.log`.
+An unreadable fill does nothing.
+
+This is firstmate-driven rather than a Claude Code setting because every auto-compact knob is process-wide: a cap injected for Haiku also caps a Sonnet reached by `/model` or a subagent.
+[`haiku-autocompact-verification.md`](haiku-autocompact-verification.md) owns that evidence.
+Known limit: it acts only between turns, so one long turn can overshoot the threshold, up to Haiku's own auto-compaction near 200k tokens.
+The file is not inherited into secondmate homes.
+
 ## App-source refresh at spawn (config/app-checkouts)
 
 A worker sometimes reads a checkout that is not its project clone - the application source its project exercises, held elsewhere on the captain's disk and read through an absolute path.
