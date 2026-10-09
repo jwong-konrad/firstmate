@@ -18,6 +18,7 @@ config/cmux-socket-password
 config/wedge-alarm
 config/idle-handoff
 config/context-handoff
+config/compact-at
 config/auto-afk
 config/herdr-presentation-spaces
 config/spawn-env-allow
