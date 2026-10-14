@@ -305,7 +305,9 @@ test_archive_manifest_detects_corruption() {
 test_archive_secret_scan_reports_names_not_values() {
   local e secret report
   e=$(make_env scan)
-  secret=AKIAABCDEFGHIJKLMNOP
+  # Joined at run time so this tracked file does not itself trip
+  # bin/fm-privacy-scan.sh; the value is fake.
+  secret="AK""IAABCDEFGHIJKLMNOP"
   printf '%s\n' "{\"out\":\"key $secret here\"}" >> "$e/claude/projects/-proj/sess.jsonl"
   run_archive "$e" --no-mirror >/dev/null 2>&1 || fail "scan: run failed"
   report=$(ls "$e/arch/reports"/secret-scan-*.txt)

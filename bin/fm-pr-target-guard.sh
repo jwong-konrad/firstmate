@@ -13,9 +13,9 @@
 #           that is not a git work tree is NOT an error: it has no pull-request
 #           target at all, so it passes.
 #
-# THE INCIDENT THIS ENFORCES (data/learnings-archive/no-mistakes-pipeline.md and
-# data/access-ledger.md section 1). `kunchenguid/firstmate`, the upstream
-# firstmate template, is strictly pull-only for this home. Four pull requests
+# THE INCIDENT THIS ENFORCES (evidence kept in a private operator record).
+# `kunchenguid/firstmate`, the upstream firstmate template, is strictly
+# pull-only for this home. Four pull requests
 # were nevertheless opened against it - #856 on 2026-07-22, then #1318, #1319 and
 # #1320 on 2026-07-30 - and every one had to be closed within minutes.
 #

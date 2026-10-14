@@ -3,7 +3,7 @@
 Design record for `supervision-deadlock-guard-d1`, written 2026-08-06.
 It builds directly on `arming-conditional-fix-m1` and lands on the same branch; read [`supervision-arming.md`](supervision-arming.md) first, because this change reuses its progressing predicate rather than adding a second notion of a deliberately quiet task.
 
-The incident evidence is `data/learnings.md` under 2026-08-05 and `data/handoffs/2026-08-05-ten-worker-restart-and-supervision-deadlock/handoff.md` (both captain-private).
+The incident evidence is kept in a private operator record.
 
 ## The failure
 

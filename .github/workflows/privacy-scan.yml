@@ -1,0 +1,42 @@
+name: Privacy scan
+
+# Refuses captain-private details and secret-shaped values in what this public
+# repository publishes. Rules, patterns, and allowlist: bin/fm-privacy-scan.sh.
+# A separate workflow so an edited PR description re-runs only this check.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  privacy-scan:
+    name: Privacy scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Scan tracked files
+        run: bin/fm-privacy-scan.sh --tracked
+      # Event text reaches the shell only through env, never interpolated into
+      # the script, so a crafted title or body cannot run as code.
+      - name: Scan pull request commits and description
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -u
+          rc=0
+          bin/fm-privacy-scan.sh --range "$PR_BASE_SHA..$PR_HEAD_SHA" || rc=1
+          printf '%s\n%s\n' "$PR_TITLE" "$PR_BODY" \
+            | bin/fm-privacy-scan.sh --stdin --label 'pull request description' || rc=1
+          exit "$rc"

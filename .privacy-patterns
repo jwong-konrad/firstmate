@@ -1,0 +1,39 @@
+# Publishing-scan patterns for bin/fm-privacy-scan.sh.
+#
+# Every line here is PUBLIC, so this file holds generic shapes only.
+# Never add a real user name, hostname, client, or project name: put
+# site-specific terms in the untracked config/privacy-patterns.local instead
+# (docs/configuration.md owns that file).
+#
+# Format, one entry per line, blank lines and # comments ignored:
+#   <name> <extended-regex>
+#       A finding. The name is [a-z0-9-]; a name ending in /i matches
+#       case-insensitively. The regex is the rest of the line (POSIX ERE).
+#   allow <name> <extended-regex>
+#       A value exception that applies everywhere: a match for <name> whose
+#       matched text also matches this regex is not a finding. Use it only for
+#       generic placeholder values; scope a real fixture to its file in
+#       .privacy-allow instead.
+
+# Absolute home directories with a real-looking user name. The leading class
+# keeps "$TMP/home/state"-style fixture paths from matching.
+home-path-macos (^|[^A-Za-z0-9_.$}>-])/Users/[a-z][a-z0-9._-]*
+home-path-linux (^|[^A-Za-z0-9_.$}>-])/home/[a-z][a-z0-9._-]*
+allow home-path-macos /Users/(x|me|you|test|user|username|name|someone|example|runner)$
+allow home-path-linux /home/(x|me|you|test|user|username|name|someone|example|runner|ubuntu|project|linuxbrew)$
+
+# macOS per-user temporary directories embed a per-account identifier.
+macos-temp-path /var/folders/[A-Za-z0-9_+-][A-Za-z0-9_+-]/[A-Za-z0-9_+-]+
+
+# Common credential prefixes.
+linear-api-key lin_api_[A-Za-z0-9]{8,}
+github-token (^|[^A-Za-z0-9_])gh[pousr]_[A-Za-z0-9]{20,}
+github-pat github_pat_[A-Za-z0-9_]{20,}
+sk-api-key (^|[^A-Za-z0-9_-])sk-[A-Za-z0-9_-]{20,}
+slack-token xox[abposr]-[A-Za-z0-9-]{10,}
+aws-access-key-id (^|[^A-Za-z0-9])(AKIA|ASIA)[0-9A-Z]{16}
+private-key-block -----BEGIN ([A-Z0-9]+ )*PRIVATE KEY( BLOCK)?-----
+
+# KEY=value environment dumps of secret-named variables. A value that starts
+# with $, <, { or ( is a reference or placeholder, not a value, and is skipped.
+secret-env-value (^|[^A-Za-z0-9_])[A-Z0-9_]*(TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL|CREDENTIALS)[A-Z0-9_]*=["']?[^[:space:]"'`$<{(]{8,}

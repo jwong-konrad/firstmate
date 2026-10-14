@@ -3,8 +3,9 @@
 The base-swap port rebuilds this fork on upstream's base rather than merging with it.
 This page is the per-phase ledger of what was actually ported, what was deliberately left behind, and where the next phase picks up.
 
-[`upstream-port-parallel-home.md`](upstream-port-parallel-home.md) owns the vehicle the phases run in, and `data/upstream-rebase-strategy-s5/report.md` is the plan of record that owns the phase sequence.
+[`upstream-port-parallel-home.md`](upstream-port-parallel-home.md) owns the vehicle the phases run in, and the port's plan of record, a private operator record, owns the phase sequence.
 This page owns neither, and records only outcomes.
+Paths use the placeholders defined on the parallel-home page, with `<user-home>` for the operator's home directory.
 
 Baselines used throughout: merge-base `673b6ad39d01183a19c5bd8a52675a2ee8ea06e6`, fork head `8f8a475ba5778d88684426a95fc1c8cb59517f81`, upstream pin `3eb5b6334a80e06083e3837f0032a5cec39b8e52`.
 
@@ -15,7 +16,7 @@ Every genuinely-new fork-only file now sits on upstream's tree, and nothing is w
 
 | | |
 | --- | --- |
-| Branch | `fm/port-p2-free-files` in `/Users/jacksonwong/Code/github/firstmate-upstream` |
+| Branch | `fm/port-p2-free-files` in `<upstream-checkout>` |
 | Commit | `864bcb75c09f6c8a46b2ef516c45d64d89224da9` |
 | Parent | `3eb5b6334a80e06083e3837f0032a5cec39b8e52` |
 | Files added | 25 |
@@ -156,9 +157,9 @@ The brief stated that the live repo has no `upstream` remote and that the port t
 The live repo does have one, fetch-only, and `upstream/main` there already resolves to the pin.
 
 ```
-$ git -C /Users/jacksonwong/Code/github/firstmate remote -v
-no-mistakes  /Users/jacksonwong/.no-mistakes/repos/7fd9988b1391.git (fetch)
-no-mistakes  /Users/jacksonwong/.no-mistakes/repos/7fd9988b1391.git (push)
+$ git -C <live-home> remote -v
+no-mistakes  <user-home>/.no-mistakes/repos/7fd9988b1391.git (fetch)
+no-mistakes  <user-home>/.no-mistakes/repos/7fd9988b1391.git (push)
 origin       git@github.com:jwong-konrad/firstmate.git (fetch)
 origin       git@github.com:jwong-konrad/firstmate.git (push)
 upstream     https://github.com/kunchenguid/firstmate.git (fetch)
@@ -173,7 +174,7 @@ They are four files across three upstream commits as the brief counted them, and
 
 ### What Phase 3 picks up
 
-Check out `fm/port-p2-free-files` at `864bcb75` in `/Users/jacksonwong/Code/github/firstmate-upstream` and build on it.
+Check out `fm/port-p2-free-files` at `864bcb75` in `<upstream-checkout>` and build on it.
 The checkout is left on that branch, with `main` still at the pin and `treehouse.toml` still untracked.
 
 This log is itself a new fork-only file and is not on the ported branch, so whichever phase next syncs fork documentation onto upstream's tree should carry it across with any other docs written since `8f8a475b`.

@@ -2,16 +2,14 @@
 # Behavior tests for the worker launch-environment boundary: bin/fm-env-clean.sh
 # and the way bin/fm-spawn.sh wraps every launch in it.
 #
-# Motivating incident (2026-07-31): fm-spawn typed the launch command into a pane
-# whose login shell held the captain's whole environment, so a worker inherited
-# every exported secret. `LINEAR_API_KEY` reached a worker that way and the
-# pipeline's PR-body step serialized it verbatim into a public fork PR
-# description, tripping GitHub secret scanning. The leaked variable was the
-# symptom; blanket inheritance was the defect.
+# Motivation: fm-spawn types the launch command into a pane whose login shell
+# holds the captain's whole environment, so without this boundary a worker
+# inherits every exported secret, and a pipeline step can serialize it into
+# outward-facing text. Blanket inheritance is the defect.
 #
 # The load-bearing test here is test_launch_drops_unexpected_launching_env: it
 # takes the EXACT command line fm-spawn would type into the pane, runs it in a
-# shell that has an unexpected variable set (exactly the 2026-07-31 condition),
+# shell that has an unexpected variable set (exactly the blanket-inheritance condition),
 # and asserts the launched agent's own environment does not contain it. That
 # assertion fails on the pre-fix fm-spawn.
 #
@@ -134,7 +132,7 @@ run_captured_launch() {  # <launch-line> <fakebin>
     bash -c "$launch"
 }
 
-# --- the 2026-07-31 regression ----------------------------------------------
+# --- the blanket-inheritance regression ------------------------------------
 
 test_launch_drops_unexpected_launching_env() {
   local rec id out status launch agent_env
@@ -251,8 +249,8 @@ test_injection_seam_reaches_the_agent() {
   # The seam fm-spawn uses is an explicit NAME=VALUE argument, not a pane export.
   # Pin that it crosses the boundary and that a set-but-empty assignment keeps that
   # exact shape, which is what the secondmate FM_*_OVERRIDE= prefixes rely on.
-  out=$("$ENV_CLEAN" PW_MCP_AUTH_APP=polaris FM_ROOT_OVERRIDE= FM_HOME=/tmp/home printenv)
-  assert_contains "$out" 'PW_MCP_AUTH_APP=polaris' \
+  out=$("$ENV_CLEAN" PW_MCP_AUTH_APP=example-app FM_ROOT_OVERRIDE= FM_HOME=/tmp/home printenv)
+  assert_contains "$out" 'PW_MCP_AUTH_APP=example-app' \
     "an explicit injection did not reach the launched process"
   assert_contains "$out" 'FM_ROOT_OVERRIDE=' \
     "a set-but-empty injection was dropped instead of passed through empty"
@@ -286,14 +284,14 @@ test_project_env_reaches_the_agent() {
   # "project". PW_MCP_AUTH_APP is the motivating real entry, and it is
   # credential-shaped: config/spawn-env-allow would refuse it by name, so the
   # injection seam is the only path by which it can legitimately reach a worker.
-  printf '# per-project worker environment\nproject      PW_MCP_AUTH_APP=polaris FM_TEST_PROJECT_ENV=on\n' \
+  printf '# per-project worker environment\nproject      PW_MCP_AUTH_APP=example-app FM_TEST_PROJECT_ENV=on\n' \
     > "$HOME_DIR/config/project-env"
 
   run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" >/dev/null 2>&1
   launch=$(cat "$LAUNCH_LOG")
   run_captured_launch "$launch" "$FAKEBIN_DIR"
   assert_present "$AGENT_ENV" "the config/project-env launch did not start the agent at all"
-  assert_grep 'PW_MCP_AUTH_APP=polaris' "$AGENT_ENV" \
+  assert_grep 'PW_MCP_AUTH_APP=example-app' "$AGENT_ENV" \
     "config/project-env did not reach the agent process"
   assert_grep 'FM_TEST_PROJECT_ENV=on' "$AGENT_ENV" \
     "the second config/project-env entry on the line did not reach the agent process"
@@ -310,7 +308,7 @@ test_project_env_ignores_other_projects() {
   id=env-project-env-other-x12
   rec=$(make_env_case env-project-env-other "$id")
   read_env_case "$rec"
-  printf 'someotherproject PW_MCP_AUTH_APP=polaris\n' > "$HOME_DIR/config/project-env"
+  printf 'someotherproject PW_MCP_AUTH_APP=example-app\n' > "$HOME_DIR/config/project-env"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
@@ -332,7 +330,7 @@ test_project_env_skipped_for_secondmate() {
   make_secondmate_home "$sub" "$id"
   # Keyed by the secondmate home's own basename, which is the only key a
   # secondmate spawn could ever match if the project-env path ran for it.
-  printf 'subhome PW_MCP_AUTH_APP=polaris\n' > "$HOME_DIR/config/project-env"
+  printf 'subhome PW_MCP_AUTH_APP=example-app\n' > "$HOME_DIR/config/project-env"
 
   run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sub" claude --secondmate >/dev/null 2>&1
   launch=$(cat "$LAUNCH_LOG")

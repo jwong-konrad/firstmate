@@ -18,11 +18,11 @@
 # ---------------
 # firstmate launches a worker by typing a command line into a pane whose shell is
 # an ordinary login shell. That shell holds the captain's whole environment, so
-# every worker inherited every exported secret. On 2026-07-31 `LINEAR_API_KEY`
-# reached a worker that way and its pipeline serialized the value verbatim into a
-# public PR description. The leaked variable was the symptom; blanket inheritance
-# was the defect. docs/worker-environment.md owns the incident record, the
-# verification evidence, and the residual risks this control does NOT cover.
+# every worker inherited every exported secret, and a pipeline step can serialize
+# whatever a worker holds into outward-facing text such as a PR description.
+# Blanket inheritance is the defect. docs/worker-environment.md owns the design
+# rationale, the verification evidence, and the residual risks this control does
+# NOT cover.
 #
 # WHAT IT DOES
 # ------------

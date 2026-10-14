@@ -41,6 +41,10 @@
 # precondition of invoking the pipeline, because `no-mistakes init` is the only
 # thing that rewrites the recorded pull-request target and a worker may run it
 # after the spawn-time check already passed.
+# no-mistakes and direct-PR ship briefs carry a publishing-hygiene section: no
+# raw captures, personal paths, hostnames, or secret-shaped values in PR text,
+# commits, or docs, and bin/fm-privacy-scan.sh over the PR description and
+# commits before done. local-only publishes nothing, so it omits the section.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
@@ -343,6 +347,7 @@ EOF
 case "$MODE" in
   direct-PR)
     SETUP2=""
+    PUBLISH=1
     RESET_EXAMPLES="a push, opening or commenting on a PR, anything destructive"
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
     DOD=$(cat <<EOF
@@ -356,6 +361,7 @@ EOF
     ;;
   local-only)
     SETUP2=""
+    PUBLISH=0
     RESET_EXAMPLES="posting or editing anything on GitHub, changing an external service or dataset, anything destructive"
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
     DOD=$(cat <<EOF
@@ -369,6 +375,7 @@ EOF
 )
     ;;
   *)  # no-mistakes (default)
+    PUBLISH=1
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`.
 3. Run \`$FM_ROOT/bin/fm-pr-target-guard.sh --explain\` and STOP if it refuses: it prints the repository the pipeline would open this repo's pull request against, and a refusal means that repository is one this home must never reach. Append \`blocked:\` with its refusal line and stop - never work around it. Run it again just before you invoke /no-mistakes if you re-initialized no-mistakes at any point after this step, because \`no-mistakes init\` is the only thing that rewrites that target."
@@ -396,6 +403,17 @@ EOF
     ;;
 esac
 RESET_SECTION=$(reset_section "$RESET_EXAMPLES")
+
+PUBLISH_SECTION=
+if [ "$PUBLISH" = 1 ]; then
+PUBLISH_SECTION=$(cat <<EOF
+# Publishing hygiene
+Treat every PR description, comment, commit message, and doc you write as public: the repository may be visible to collaborators or to anyone.
+Never paste raw environment dumps, terminal captures, absolute personal paths, hostnames, or secret-shaped values into them; summarise the evidence and keep raw captures in private records.
+Before reporting the PR done, run \`$FM_ROOT/bin/fm-privacy-scan.sh --range origin/<default-branch>..HEAD\` in the worktree and pipe the PR title and description into \`$FM_ROOT/bin/fm-privacy-scan.sh --stdin\`; fix every finding first.
+EOF
+)
+fi
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -447,6 +465,8 @@ Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+
+$PUBLISH_SECTION
 
 $DOD
 EOF

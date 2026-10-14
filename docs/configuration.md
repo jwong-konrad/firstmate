@@ -296,8 +296,8 @@ The boundary described here is a filesystem-write boundary only: the worker's la
 
 A spawned worker does not inherit the captain's shell environment.
 `bin/fm-spawn.sh` wraps every launch in `bin/fm-env-clean.sh`, which runs in the worker's own pane and starts the agent with a deny-by-default environment: allowlisted names that are actually set there, plus the explicit assignments firstmate passes it.
-This closed a real leak - on 2026-07-31 an exported `LINEAR_API_KEY` reached a worker and its pipeline wrote the value into a public PR description.
-[`worker-environment.md`](worker-environment.md) owns the incident record, the verification evidence, and the residual risks; `bin/fm-env-clean.sh`'s header owns the built-in allowlist and the exact mechanics.
+Without it, any exported secret could reach a worker and be serialized into outward-facing text such as a PR description.
+[`worker-environment.md`](worker-environment.md) owns the design rationale, the verification evidence, and the residual risks; `bin/fm-env-clean.sh`'s header owns the built-in allowlist and the exact mechanics.
 
 `config/spawn-env-allow` is this home's optional widening of that allowlist: one environment variable NAME per line, `#` comments and blank lines ignored, LOCAL and gitignored.
 Absent means the built-in allowlist alone, which is the normal state.
@@ -361,6 +361,21 @@ Absent is the normal state for a home with nothing to forbid, and the guard stil
 
 Each entry is a standing rule rather than a preference, so the file is in `FM_INHERITABLE_CONFIG` and propagates to every secondmate home.
 The list is deliberately not shipped in tracked material: firstmate is a shared template whose `CONTRIBUTING.md` describes pull requests to the upstream repo as the normal contribution route, so a denylist baked into the repo would refuse the very work most users came to do.
+
+## Publishing privacy scan (config/privacy-patterns.local)
+
+`bin/fm-privacy-scan.sh` refuses captain-private details and secret-shaped values in tracked files, a commit range, or text on stdin such as a PR description.
+Its header owns the modes, the allowlist format, the output, and the opt-in pre-push hook; this section owns only the files it reads.
+`.github/workflows/privacy-scan.yml` runs it on every pull request over tracked files, the PR's commits, and the PR title and description.
+
+`.privacy-patterns` is the tracked pattern set, and because it is public it holds generic shapes only: absolute home paths, macOS per-user temp paths, common credential prefixes, private-key headers, and secret-named `KEY=value` assignments.
+`.privacy-allow` is the tracked allowlist for deliberate fixtures, each entry scoped to a path glob and, where possible, to the exact value.
+
+`config/privacy-patterns.local` is this home's optional extension, LOCAL and gitignored, in the same format as `.privacy-patterns`.
+It holds the site-specific terms that must never appear in tracked material themselves, such as the machine's hostname, the operator's user name, and client or project names.
+The scan reads it from `$FM_HOME/config/`, or the code root's `config/` when `FM_HOME` is unset, and `FM_PRIVACY_LOCAL` or `--local` names another file.
+Absent means the generic set alone, which is what CI always runs.
+It is not in `FM_INHERITABLE_CONFIG`; a secondmate home that publishes needs its own copy.
 
 ## Toolchain
 
@@ -502,6 +517,7 @@ FM_ZELLIJ_SESSION=firstmate  # zellij-only: named session for normal backend ops
 FM_BACKEND_CMUX_COMPOSER_LINES=20  # cmux-only: tail lines scanned to locate the composer row for submit verification
 FM_BACKEND_CMUX_IDLE_RE='^Type a message\.\.\.$'  # cmux-only: empty-composer placeholder regex after border/prompt stripping
 CMUX_SOCKET_PASSWORD=   # cmux-only: socket password fallback when config/cmux-socket-password is absent (docs/cmux-backend.md)
+FM_PRIVACY_LOCAL=        # site-specific pattern file for bin/fm-privacy-scan.sh; unset means $FM_HOME/config/privacy-patterns.local when present
 FM_SESSION_START_STATUS_TAIL=5   # state/*.status lines printed per task in the session-start digest
 FM_BOOTSTRAP_DETECT_ONLY=0   # internal/read-only session-start mode: skip bootstrap's mutating sweeps and print advisory TANGLE wording
 FM_GUARD_READ_ONLY=0    # internal/read-only guard mode: keep alarms but suppress drain, supervision repair, and checkout repair commands

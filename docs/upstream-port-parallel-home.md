@@ -4,7 +4,7 @@ The base-swap port rebuilds this fork on upstream's base rather than merging wit
 Phase 1 of that port stands up a second firstmate home that runs upstream's code against its own state, empty, beside the live fleet.
 This page is the setup record, the isolation evidence, and the teardown procedure for that home.
 
-`data/upstream-rebase-strategy-s5/report.md` is the plan of record and owns the phase sequence and the porting decisions.
+The port's plan of record is a private operator record, and it owns the phase sequence and the porting decisions.
 This page owns only the vehicle those phases run in.
 [`upstream-port-log.md`](upstream-port-log.md) is the per-phase ledger of what each phase actually ported and where the next phase picks up.
 
@@ -18,13 +18,16 @@ Firstmate's own scripts are what supervise in-flight tasks, so a half-ported `fm
 
 ## The two locations
 
-| Purpose | Path |
+| Purpose | Placeholder used on this page |
 | --- | --- |
-| Upstream code root | `/Users/jacksonwong/Code/github/firstmate-upstream` |
-| Parallel `FM_HOME` | `/Users/jacksonwong/Code/github/firstmate-upstream-home` |
-| Parallel worktree pool | `/Users/jacksonwong/Code/github/firstmate-upstream-home/treehouse` |
+| Upstream code root | `<upstream-checkout>` |
+| Parallel `FM_HOME` | `<parallel-home>` |
+| Parallel worktree pool | `<treehouse-pool>`, which is `<parallel-home>/treehouse` |
+| Live home | `<live-home>` |
+| Operator's home directory | `<user-home>` |
 
-Both sit outside the live home at `/Users/jacksonwong/Code/github/firstmate`, and neither is nested inside it.
+The upstream checkout and the parallel home both sit outside the live home, and neither is nested inside it.
+The real absolute paths are machine-local and are kept out of this page.
 
 The upstream checkout is pinned at `3eb5b6334a80e06083e3837f0032a5cec39b8e52`, committed `2026-09-17T03:21:19-07:00`, which was `upstream/main` on 2026-09-17.
 It was cloned directly from `https://github.com/kunchenguid/firstmate.git` rather than from the live repo's `upstream` remote, so standing it up never wrote to the live repo's git state.
@@ -35,7 +38,7 @@ Running unvetted upstream code in an isolated empty home is what makes the revie
 The checkout is pull-only, matching the live repo's convention.
 
 ```
-$ git -C /Users/jacksonwong/Code/github/firstmate-upstream remote -v
+$ git -C <upstream-checkout> remote -v
 upstream	https://github.com/kunchenguid/firstmate.git (fetch)
 upstream	DISABLED-PULL-ONLY (push)
 ```
@@ -45,8 +48,8 @@ upstream	DISABLED-PULL-ONLY (push)
 One environment variable selects the parallel home.
 
 ```
-FM_HOME=/Users/jacksonwong/Code/github/firstmate-upstream-home \
-  /Users/jacksonwong/Code/github/firstmate-upstream/bin/fm-session-start.sh
+FM_HOME=<parallel-home> \
+  <upstream-checkout>/bin/fm-session-start.sh
 ```
 
 `FM_HOME` is the only variable needed, and it must be set on every call.
@@ -76,7 +79,7 @@ Task ids in the parallel home are reserved with the prefix `upx-`, short for "up
 Run this before any spawn in the parallel home, and stop if it returns anything other than `0`.
 
 ```
-$ ls -1 /Users/jacksonwong/Code/github/firstmate/state/*.meta \
+$ ls -1 <live-home>/state/*.meta \
     | sed 's#.*/##; s#\.meta$##' | grep -c '^upx-'
 0
 ```
@@ -107,9 +110,9 @@ The id prefix is the mechanism to rely on.
 The pool root comes from `treehouse.toml` in the checkout, not from the environment.
 
 ```
-$ cat /Users/jacksonwong/Code/github/firstmate-upstream/treehouse.toml
+$ cat <upstream-checkout>/treehouse.toml
 max_trees = 8
-root = "/Users/jacksonwong/Code/github/firstmate-upstream-home/treehouse"
+root = "<treehouse-pool>"
 ```
 
 Setting `TREEHOUSE_DIR` alone does not work, and this is worth stating plainly because the strategy report implies otherwise.
@@ -120,8 +123,8 @@ A later phase that relies on the environment variable would silently share the l
 With `root` set, an acquisition lands inside the parallel pool and the live pool inventory is unchanged.
 
 ```
-$ cd /Users/jacksonwong/Code/github/firstmate-upstream && treehouse get --lease
-/Users/jacksonwong/Code/github/firstmate-upstream-home/treehouse/.treehouse/firstmate-upstream-7607a4/1/firstmate-upstream
+$ cd <upstream-checkout> && treehouse get --lease
+<treehouse-pool>/.treehouse/firstmate-upstream-7607a4/1/firstmate-upstream
 ```
 
 The live pool held 65 entries before and after, with no slot created for the upstream checkout.
@@ -143,7 +146,7 @@ Identity is the check, not liveness, because a restarted daemon is also running.
 
 ```
 $ ps -eo pid,lstart,etime,comm | awk '$NF ~ /no-mistakes$/'
-967 Mon 31 Aug 21:51:47 2026  16-15:30:06 /Users/jacksonwong/.local/bin/no-mistakes
+<pid> <start-time>  16-15:30:06 <user-home>/.local/bin/no-mistakes
 ```
 
 The same pid and the same start timestamp were recorded before the work began and after it finished.
@@ -159,21 +162,12 @@ The operative layer today is that the parallel home has no project clones and no
 `projects/` is empty and `data/projects.md` is absent, so there is no dispatch target and nothing that can reach a real origin.
 
 ```
-$ ls -A /Users/jacksonwong/Code/github/firstmate-upstream-home/projects | wc -l
+$ ls -A <parallel-home>/projects | wc -l
 0
 ```
 
-The second layer is `config/pr-target-deny`, which covers all six projects registered in the live home's `data/projects.md` plus the fork itself and the upstream template.
-
-```
-claude-qa            jwong-konrad/claude-qa             covered
-api-probe-kit        jwong-konrad/api-probe-kit         covered
-engagement-toolkit   jwong-konrad/engagement-toolkit    covered
-konrad               jwong-konrad/konrad-qa             covered
-brainstation         jwong-konrad/brainstation_web_qa   covered
-polaris              jwong-konrad/polaris-qa            covered
-uncovered: 0
-```
+The second layer is `config/pr-target-deny`, which covers every project registered in the live home's registry plus the fork itself and the upstream template.
+A coverage check listed each registered project against the denylist and reported `uncovered: 0`.
 
 That file is currently inert, and the honesty matters more than the coverage.
 Upstream's base ships no `bin/fm-pr-target-guard.sh` and contains no reference to `pr-target-deny` anywhere, which is exactly what the strategy report records as item B.
@@ -220,18 +214,18 @@ The live home's `data/`, `config/`, `state/`, and `projects/` were captured befo
 The live fleet's own watcher writes there continuously, and this task appends to its own status file by instruction.
 
 A byte-identity check is not the durable control, because the live fleet keeps working while a phase runs.
-A later re-measurement showed `data/` and `projects/` had moved as well, and the cause was the live fleet dispatching its own brainstation scout `bstn-pr102-scope-check-k4`: a new brief under `data/`, a new backlog entry, and one new ref in the brainstation clone.
+A later re-measurement showed `data/` and `projects/` had moved as well, and the cause was the live fleet dispatching one of its own scouts: a new brief under `data/`, a new backlog entry, and one new ref in that project's clone.
 That is the live fleet operating normally, which is what an isolated parallel home is supposed to permit.
 
 Attribution is therefore the control, and it is mechanical rather than assumed.
 Every changed path resolves to the live fleet's own watcher and dispatch or to this task's status file, and the watcher records its own home in its lock.
 
 ```
-$ cat /Users/jacksonwong/Code/github/firstmate/state/.watch.lock.owner.*/fm-home
-/Users/jacksonwong/Code/github/firstmate
-/Users/jacksonwong/Code/github/firstmate
+$ cat <live-home>/state/.watch.lock.owner.*/fm-home
+<live-home>
+<live-home>
 
-$ grep -rl 'firstmate-upstream' /Users/jacksonwong/Code/github/firstmate/state/ | wc -l
+$ grep -rl 'firstmate-upstream' <live-home>/state/ | wc -l
 0
 ```
 
@@ -249,7 +243,7 @@ First return and destroy anything in the parallel pool, so no worktree is left h
 Name the checkout rather than the pool directory, because `treehouse` resolves the pool through that checkout's own `treehouse.toml`.
 
 ```
-treehouse destroy /Users/jacksonwong/Code/github/firstmate-upstream --all --yes
+treehouse destroy <upstream-checkout> --all --yes
 ```
 
 Run it without `--yes` first, because destroy is a dry run by default and prints what it would remove.
@@ -258,8 +252,8 @@ A leased worktree is never removed by `--all`, so return it by path first if one
 Then remove both trees.
 
 ```
-rm -rf /Users/jacksonwong/Code/github/firstmate-upstream-home
-rm -rf /Users/jacksonwong/Code/github/firstmate-upstream
+rm -rf <parallel-home>
+rm -rf <upstream-checkout>
 ```
 
 Then confirm the live fleet is intact.
@@ -267,7 +261,7 @@ Then confirm the live fleet is intact.
 ```
 ls -1 ~/.treehouse/.treehouse/ | wc -l
 ps -eo pid,lstart,comm | awk '$NF ~ /no-mistakes$/'
-git -C /Users/jacksonwong/Code/github/firstmate status --porcelain
+git -C <live-home> status --porcelain
 ```
 
 The pool count should match what it was before the home existed, the daemon pid and start time should be unchanged, and the live repo should be clean.

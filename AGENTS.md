@@ -40,7 +40,7 @@ Hard rules, in priority order:
    When work needs to reach outside the boundary and the override is not currently granted, escalate to the captain rather than widening the allowlist or dropping the sandbox; section 4 and `docs/configuration.md` own the standing posture and the override's exact mechanism.
 
 You may maintain this repo's private operational state directly.
-Shared tracked material is `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.upstream-pin`, `.github/workflows/`, `bin/`, `.agents/skills/`, and public `skills/`.
+Shared tracked material is `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.upstream-pin`, `.privacy-patterns`, `.privacy-allow`, `.github/workflows/`, `bin/`, `.agents/skills/`, and public `skills/`.
 When any crewmate is live, delegate changes to shared tracked material rather than competing with supervision; when the fleet is empty, firstmate may change it directly.
 This repo is a shared template, while `.env`, `data/`, `state/`, `config/`, `projects/`, and `.no-mistakes/` are captain-private and gitignored.
 Ship shared tracked changes through this repo's no-mistakes pipeline and PR path, with the same merge authority as any other project.
@@ -60,6 +60,7 @@ AGENTS.md            this file (CLAUDE.md is a symlink to it)
 CONTRIBUTING.md      contributor workflow and repo conventions
 README.md            public overview and development notes
 .github/workflows/   shared CI and PR enforcement, committed
+.privacy-patterns .privacy-allow  tracked generic publishing-scan patterns and fixture allowlist for bin/fm-privacy-scan.sh; never put site-specific terms here
 .tasks.toml          tracked tasks-axi markdown backend config for the default backlog backend (section 10)
 .upstream-pin        tracked record of how far the pull-only upstream template has been reviewed; committed. Its own comments and bin/fm-upstream-pin.sh own the format; bin/fm-upstream-gate.sh enforces it in CI and bootstrap reports drift from it
 .agents/skills/      firstmate-loaded internal skills, committed; each carries metadata.internal=true for installers
@@ -71,6 +72,7 @@ config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "de
 config/crew-dispatch.json  optional crewmate dispatch profiles; LOCAL, gitignored; firstmate-maintained but human-editable natural-language rules that choose a per-task harness/model/effort profile (section 4). Inherited by secondmate homes
 config/spawn-env-allow  optional widening of the worker launch-environment allowlist; LOCAL, gitignored; one exact variable NAME per line; absent means the built-in allowlist alone (section 4, docs/configuration.md). NOT inherited into secondmate homes
 config/project-env  optional per-project worker environment; LOCAL, gitignored; "<project> KEY=VALUE ..." keyed by the projects/<name> clone basename, delivered through fm-spawn's injection seam (section 4, docs/configuration.md). Never applies to a secondmate spawn; NOT inherited into secondmate homes
+config/privacy-patterns.local  optional site-specific publishing-scan terms (hostname, user, client and project names); LOCAL, gitignored; NOT inherited into secondmate homes (docs/configuration.md)
 config/pr-target-deny  optional list of repositories this home must never open a pull request against; LOCAL, gitignored; one full URL, host/owner/name, or bare owner/name per line, enforced by bin/fm-pr-target-guard.sh at every non-secondmate spawn and as a precondition of the no-mistakes ship brief (docs/configuration.md). Inherited by secondmate homes
 config/compact-at  optional per-model context threshold at which firstmate sends `/compact` to a matching claude worker between turns; LOCAL, gitignored; "<model-glob> <tokens>" lines matched against meta `model=`; absent = no behavior change; NOT inherited into secondmate homes (docs/configuration.md)
 config/app-checkouts  optional map of a project to an absolute app-source checkout outside this home, fast-forward-pulled at spawn; LOCAL, gitignored; fail-open, kill switch FM_NO_CHECKOUT_PULL=1, bounded by FM_APP_PULL_TIMEOUT, and a path firstmate itself owns is refused rather than pulled (section 4, docs/configuration.md). Never applies to a secondmate spawn; NOT inherited into secondmate homes
@@ -323,6 +325,7 @@ A ship `done:` is a claim, not landing evidence: `bin/fm-crew-state.sh` reports 
 
 For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
 Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
+Before telling the captain a PR is ready, run `bin/fm-privacy-scan.sh` over its description (`--stdin`) and its commits (`--range`), and have the worker fix any finding.
 Tell the captain the PR's full URL, always the complete `https://...` link rather than a bare `#number`, a concise outcome summary, and the no-mistakes risk level when applicable.
 A captain instruction to merge is explicit authority; `yolo` is the only standing routine authority.
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.

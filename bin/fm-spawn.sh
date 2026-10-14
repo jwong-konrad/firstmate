@@ -85,7 +85,7 @@
 #   provisioned firstmate home; the default is kind=ship.
 #   Worker environment: every launch is wrapped in bin/fm-env-clean.sh, so the agent
 #   starts with a deny-by-default environment instead of the captain's whole login
-#   shell (which is how a secret reached a public PR body on 2026-07-31). The pane
+#   shell (so an exported secret cannot ride into a generated PR body). The pane
 #   keeps its own environment; only what the agent process inherits is restricted.
 #   This home may widen the allowed NAMEs in config/spawn-env-allow; an invalid or
 #   credential-shaped entry there refuses the spawn before anything is created.
@@ -99,7 +99,7 @@
 #   travel through SPAWN_ENV_INJECT like every other injection, and a malformed
 #   entry for the spawned project refuses the spawn before anything is created,
 #   exactly like a bad config/spawn-env-allow name. Never applies to --secondmate.
-#   docs/worker-environment.md owns the incident record, the verification evidence,
+#   docs/worker-environment.md owns the design rationale, the verification evidence,
 #   and the residual risks this does not cover.
 #   App-source refresh: when config/app-checkouts maps this project's name to an
 #   absolute checkout outside this home ("<project> <absolute path>", same comment
