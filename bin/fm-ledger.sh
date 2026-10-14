@@ -41,6 +41,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CLAUDE=${FM_ARCHIVE_CLAUDE_DIR:-$HOME/.claude}
+# shellcheck source=bin/fm-archive-lib.sh
+. "$SCRIPT_DIR/fm-archive-lib.sh"
 umask 077
 
 [ "${FM_NO_LEDGER:-0}" = 1 ] && exit 0
@@ -115,14 +117,27 @@ START_ISO=$(epoch_to_iso "$START_EPOCH")
 WINDOW_START_ISO=$(epoch_to_iso $(( START_EPOCH - 60 )))
 END_ISO=$(epoch_to_iso "$NOW_EPOCH")
 
+# data/<id> is writable by the task's worker, so nothing is ever written through a
+# symlink there: the folder itself must be a real directory we own, every output is
+# written to a fresh temp file made with mktemp (exclusive create) and moved into place
+# (a rename replaces a planted link instead of following it), and scratch/ is recreated.
 OUT="$DATA/$ID"
-mkdir -p "$OUT" || { echo "ledger: cannot create $OUT" >&2; exit 0; }
+if [ -L "$OUT" ]; then
+  echo "ledger: warning: $OUT is a symlink; refusing to write a ledger through it" >&2
+  exit 0
+fi
+mkdir -p "$OUT" 2>/dev/null
+if [ ! -d "$OUT" ] || [ -L "$OUT" ] || [ ! -O "$OUT" ]; then
+  echo "ledger: warning: $OUT is not a directory we own; no ledger written" >&2
+  exit 0
+fi
 
 # ------------------------------------------------------------------ scrollback
 
 SCROLLBACK_STATUS=unavailable
 capture_scrollback() {
-  local out="$OUT/scrollback.txt"
+  local out="$OUT/scrollback.txt" tmp
+  tmp=$(mktemp "$OUT/.tmp.XXXXXX") || { warn "cannot create a temp file for the scrollback"; return 0; }
   export FM_HOME
   # shellcheck disable=SC2016
   FM_STATE_OVERRIDE=$STATE run_bounded "$TIMEOUT" bash -c '
@@ -132,12 +147,11 @@ capture_scrollback() {
     l=$(fm_backend_expected_label_of_selector "$2" "$3")
     fm_backend_capture "$b" "$t" "$4" "$l"' _ \
     "$SCRIPT_DIR/fm-backend.sh" "$ID" "$STATE" "$SCROLLBACK_LINES" 2>/dev/null \
-    | tail -n "$SCROLLBACK_LINES" > "$out.tmp.$$"
-  if [ -s "$out.tmp.$$" ]; then
-    mv "$out.tmp.$$" "$out"
+    | tail -n "$SCROLLBACK_LINES" > "$tmp"
+  if [ -s "$tmp" ] && mv -f "$tmp" "$out"; then
     SCROLLBACK_STATUS=captured
   else
-    rm -f "$out.tmp.$$"
+    rm -f "$tmp"
     SCROLLBACK_STATUS=empty-or-unreachable
     warn "pane scrollback unavailable (endpoint gone or empty)"
   fi
@@ -147,22 +161,127 @@ capture_scrollback() {
 
 SCRATCH_STATUS=skipped
 SCRATCH_NOTES=()
+SCRATCH_DIR=
+SCRATCH_LAST_SIZE=0
+
+# secret_name_rule <relative path>: print the first name rule any path component matches
+# (case-insensitive) and return 0, else return 1.
+secret_name_rule() {
+  local lc comp rule="" hit=1
+  lc=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  set -f
+  local IFS=/
+  for comp in $lc; do
+    case "$comp" in
+      .env*) rule='.env*' ;;
+      *.pem) rule='*.pem' ;;
+      *.key) rule='*.key' ;;
+      *.p12) rule='*.p12' ;;
+      id_*) rule='id_*' ;;
+      *credential*) rule='*credential*' ;;
+      *secret*) rule='*secret*' ;;
+      *.keychain*) rule='*.keychain*' ;;
+      *) continue ;;
+    esac
+    hit=0
+    break
+  done
+  set +f
+  if [ "$hit" -eq 0 ]; then
+    printf '%s' "$rule"
+  fi
+  return "$hit"
+}
+
+# secret_pattern_hit <file>: print the name of the first credential pattern the file
+# matches and return 0, else return 1.
+secret_pattern_hit() {
+  local name pattern
+  while IFS='|' read -r name pattern; do
+    [ -n "$name" ] || continue
+    if grep -aqE -e "$pattern" "$1" 2>/dev/null; then
+      printf '%s' "$name"
+      return 0
+    fi
+  done <<EOF
+$(fm_archive_secret_patterns)
+EOF
+  return 1
+}
+
+# scratch_emit <name> <command...>: run the command with stdout into a fresh temp file in
+# scratch/ and move it into place only when it succeeded. Sets SCRATCH_LAST_SIZE.
+scratch_emit() {
+  local name=$1 tmp
+  shift
+  SCRATCH_LAST_SIZE=0
+  tmp=$(mktemp "$SCRATCH_DIR/.tmp.XXXXXX") || return 1
+  if "$@" > "$tmp" 2>/dev/null && mv -f "$tmp" "$SCRATCH_DIR/$name"; then
+    SCRATCH_LAST_SIZE=$(wc -c < "$SCRATCH_DIR/$name" | tr -d ' ')
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+# scratch_drop_if_secret <name>: drop a scratch output that matches a credential pattern,
+# recording only the file name and the pattern name.
+scratch_drop_if_secret() {
+  local name=$1 hit
+  [ -f "$SCRATCH_DIR/$name" ] || return 0
+  if hit=$(secret_pattern_hit "$SCRATCH_DIR/$name"); then
+    rm -f "$SCRATCH_DIR/$name"
+    SCRATCH_NOTES+=("$name dropped: matches the $hit pattern")
+  fi
+}
+
+# scratch_snapshot: git runs against the worker's copy, whose repository config is
+# worker-controlled, so config-driven command hooks (fsmonitor, hooks) are switched off
+# and diffs never run external diff or textconv programs.
 scratch_snapshot() {
-  local dir="$OUT/scratch" used=0 branch f size n listed
-  if [ -z "$WT" ] || [ ! -d "$WT" ] || ! git -C "$WT" rev-parse --git-dir >/dev/null 2>&1; then
+  local dir="$OUT/scratch" used=0 branch f size n listed rule hit ut
+  local WGIT=(git -C "$WT" -c core.fsmonitor=false -c core.hooksPath=/dev/null -c core.pager=cat)
+  local EXCL=(':(exclude,glob,icase)**/.env*' ':(exclude,glob,icase)**/*.pem' ':(exclude,glob,icase)**/*.key'
+    ':(exclude,glob,icase)**/*.p12' ':(exclude,glob,icase)**/id_*' ':(exclude,glob,icase)**/*credential*'
+    ':(exclude,glob,icase)**/*secret*' ':(exclude,glob,icase)**/*.keychain*'
+    ':(exclude,glob,icase)**/*credential*/**' ':(exclude,glob,icase)**/*secret*/**')
+  if [ -z "$WT" ] || [ ! -d "$WT" ] || ! "${WGIT[@]}" rev-parse --git-dir >/dev/null 2>&1; then
     SCRATCH_STATUS="no worktree to snapshot"
     return 0
   fi
-  mkdir -p "$dir" || { SCRATCH_STATUS=error; return 0; }
-  branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)
+  if [ -L "$dir" ]; then
+    warn "scratch is a symlink; refusing to write through it"
+    SCRATCH_STATUS="refused: scratch is a symlink"
+    return 0
+  fi
+  if [ -e "$dir" ] && ! rm -rf "$OUT/scratch"; then
+    SCRATCH_STATUS="error: could not clear scratch"
+    return 0
+  fi
+  if ! mkdir "$dir" 2>/dev/null || [ ! -d "$dir" ] || [ -L "$dir" ] || [ ! -O "$dir" ]; then
+    warn "scratch is not a fresh directory we own; snapshot skipped"
+    SCRATCH_STATUS="refused: scratch is not a fresh directory"
+    return 0
+  fi
+  SCRATCH_DIR=$dir
+  branch=$("${WGIT[@]}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)
 
-  run_bounded "$TIMEOUT" git -C "$WT" status --porcelain > "$dir/status.txt" 2>/dev/null || warn "git status failed in the worktree"
-  used=$(( used + $(wc -c < "$dir/status.txt" 2>/dev/null || echo 0) ))
+  scratch_emit status.txt run_bounded "$TIMEOUT" "${WGIT[@]}" status --porcelain || warn "git status failed in the worktree"
+  used=$(( used + SCRATCH_LAST_SIZE ))
 
-  run_bounded "$TIMEOUT" git -C "$WT" log --oneline HEAD --not --remotes -- > "$dir/local-commits.txt" 2>/dev/null || warn "git log of local-only commits failed"
+  scratch_emit local-commits.txt run_bounded "$TIMEOUT" "${WGIT[@]}" log --oneline HEAD --not --remotes -- || warn "git log of local-only commits failed"
   if [ -s "$dir/local-commits.txt" ]; then
-    if run_bounded "$TIMEOUT" git -C "$WT" bundle create "$dir/local-commits.bundle" HEAD --not --remotes >/dev/null 2>&1; then
-      size=$(wc -c < "$dir/local-commits.bundle")
+    # The bundle is packed, so it cannot be scanned directly: scan the patch text of the same commits.
+    hit=""
+    if ut=$(mktemp "$dir/.tmp.XXXXXX"); then
+      run_bounded "$TIMEOUT" "${WGIT[@]}" log -p --no-ext-diff --no-textconv HEAD --not --remotes -- 2>/dev/null | head -c 16777216 > "$ut"
+      hit=$(secret_pattern_hit "$ut") || hit=""
+      rm -f "$ut"
+    fi
+    if [ -n "$hit" ]; then
+      SCRATCH_NOTES+=("local-commits.bundle dropped: the commits match the $hit pattern; local-commits.txt lists them")
+    elif run_bounded "$TIMEOUT" "${WGIT[@]}" bundle create "$dir/local-commits.bundle" HEAD --not --remotes >/dev/null 2>&1; then
+      size=$(wc -c < "$dir/local-commits.bundle" | tr -d ' ')
       if [ "$size" -gt "$BUNDLE_CAP" ]; then
         rm -f "$dir/local-commits.bundle"
         SCRATCH_NOTES+=("local-commits.bundle dropped: $size bytes exceeds the cap; local-commits.txt lists the commits")
@@ -177,28 +296,32 @@ scratch_snapshot() {
     rm -f "$dir/local-commits.txt"
   fi
 
-  run_bounded "$TIMEOUT" git -C "$WT" diff HEAD --no-ext-diff > "$dir/tracked.diff.full" 2>/dev/null || true
+  scratch_emit tracked.diff.full run_bounded "$TIMEOUT" "${WGIT[@]}" diff HEAD --no-ext-diff --no-textconv -- . "${EXCL[@]}" || true
   if [ -s "$dir/tracked.diff.full" ]; then
-    size=$(wc -c < "$dir/tracked.diff.full")
+    size=$(wc -c < "$dir/tracked.diff.full" | tr -d ' ')
     if [ "$size" -gt "$SCRATCH_CAP" ]; then
       head -c "$SCRATCH_CAP" "$dir/tracked.diff.full" > "$dir/tracked.diff"
       SCRATCH_NOTES+=("tracked.diff truncated at $SCRATCH_CAP of $size bytes")
     else
-      mv "$dir/tracked.diff.full" "$dir/tracked.diff"
+      mv -f "$dir/tracked.diff.full" "$dir/tracked.diff"
     fi
-    used=$(( used + $(wc -c < "$dir/tracked.diff") ))
+    used=$(( used + $(wc -c < "$dir/tracked.diff" | tr -d ' ') ))
   fi
   rm -f "$dir/tracked.diff.full"
 
-  : > "$dir/untracked.diff"
-  listed=$(run_bounded "$TIMEOUT" git -C "$WT" ls-files --others --exclude-standard -z 2>/dev/null | tr '\0' '\n' | grep -vE '^(\.claude/|\.fm-grok-turnend$)' || true)
+  ut=$(mktemp "$dir/.tmp.XXXXXX") || { SCRATCH_STATUS="error: no temp file"; return 0; }
+  listed=$(run_bounded "$TIMEOUT" "${WGIT[@]}" ls-files --others --exclude-standard -z 2>/dev/null | tr '\0' '\n' | grep -vE '^(\.claude/|\.fm-grok-turnend$)' || true)
   n=0
   if [ -n "$listed" ]; then
     while IFS= read -r f; do
       [ -n "$f" ] || continue
       [ -f "$WT/$f" ] && [ ! -L "$WT/$f" ] || continue
-      size=$(wc -c < "$WT/$f" 2>/dev/null || echo 0)
-      if [ "$size" -gt "$FILE_CAP" ]; then
+      if rule=$(secret_name_rule "$f"); then
+        SCRATCH_NOTES+=("untracked $f skipped: name matches the $rule rule")
+        continue
+      fi
+      size=$(wc -c < "$WT/$f" 2>/dev/null | tr -d ' ')
+      if [ "${size:-0}" -gt "$FILE_CAP" ]; then
         SCRATCH_NOTES+=("untracked $f skipped: $size bytes exceeds the per-file cap")
         continue
       fi
@@ -207,18 +330,31 @@ scratch_snapshot() {
         SCRATCH_NOTES+=("untracked $f skipped: binary")
         continue
       fi
+      if hit=$(secret_pattern_hit "$WT/$f"); then
+        SCRATCH_NOTES+=("untracked $f dropped: matches the $hit pattern")
+        continue
+      fi
       if [ $(( used + size )) -gt "$SCRATCH_CAP" ]; then
         SCRATCH_NOTES+=("untracked $f and later files skipped: scratch cap reached")
         break
       fi
-      ( cd "$WT" && git diff --no-index --no-ext-diff -- /dev/null "$f" ) >> "$dir/untracked.diff" 2>/dev/null
+      ( cd "$WT" && git -c core.fsmonitor=false -c core.hooksPath=/dev/null diff --no-index --no-ext-diff --no-textconv -- /dev/null "$f" ) >> "$ut" 2>/dev/null
       used=$(( used + size ))
       n=$((n + 1))
     done <<EOF
 $listed
 EOF
   fi
-  [ -s "$dir/untracked.diff" ] || rm -f "$dir/untracked.diff"
+  if [ -s "$ut" ]; then
+    mv -f "$ut" "$dir/untracked.diff"
+  else
+    rm -f "$ut"
+  fi
+  # A final scan of every text output catches a credential in a tracked edit or a commit subject.
+  scratch_drop_if_secret tracked.diff
+  scratch_drop_if_secret untracked.diff
+  scratch_drop_if_secret status.txt
+  scratch_drop_if_secret local-commits.txt
   SCRATCH_STATUS="snapshotted branch $branch: $n untracked files, $used bytes"
 }
 
@@ -301,7 +437,10 @@ NOTES_JSON='[]'
 [ "${#SCRATCH_NOTES[@]}" -eq 0 ] || NOTES_JSON=$(printf '%s\n' "${SCRATCH_NOTES[@]}" | jq -R -s -c 'split("\n") | map(select(length > 0))')
 
 LEDGER="$OUT/ledger.json"
-[ ! -e "$LEDGER" ] || LEDGER="$OUT/ledger-$NOW_EPOCH.json"
+if [ -e "$LEDGER" ] || [ -L "$LEDGER" ]; then
+  LEDGER="$OUT/ledger-$NOW_EPOCH.json"
+fi
+LEDGER_TMP=$(mktemp "$OUT/.tmp.XXXXXX") || { echo "ledger: warning: cannot create a temp file in $OUT" >&2; exit 0; }
 
 jq -n \
   --arg id "$ID" --arg kind "$(meta_get kind)" --arg project "$(meta_get project)" \
@@ -335,9 +474,9 @@ jq -n \
      cost_usd: ($sessions | map(.cost_usd // 0) | add // 0)},
    scrollback: {file: "scrollback.txt", status: $scrollback_status, max_lines: $scrollback_lines},
    scratch: {dir: "scratch", status: $scratch_status, notes: $scratch_notes},
-   meta: $meta, warnings: $warnings}' > "$LEDGER.tmp.$$" 2>/dev/null
-if ! mv "$LEDGER.tmp.$$" "$LEDGER" 2>/dev/null; then
-  rm -f "$LEDGER.tmp.$$"
+   meta: $meta, warnings: $warnings}' > "$LEDGER_TMP" 2>/dev/null
+if ! mv -f "$LEDGER_TMP" "$LEDGER" 2>/dev/null; then
+  rm -f "$LEDGER_TMP"
   echo "ledger: warning: could not write $LEDGER" >&2
   exit 0
 fi

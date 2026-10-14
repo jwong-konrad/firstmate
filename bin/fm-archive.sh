@@ -15,28 +15,31 @@
 # file whose size differs from its latest entry, and runs the secret scan once a
 # month (a report of pattern names and counts only; it never prints or stores a match).
 #
-# Then it mirrors staging to <FMVAULT>/secure/archive/ ONLY when the pinned volume
-# is mounted, carries the pinned UUID (~/.config/firstmate/card-volumes), and passes
-# a write test (bin/fm-archive-lib.sh fm_card_ok). Otherwise it prints
-# "card absent, staging only" and exits 0; it never writes under a bare /Volumes
-# path. A card write failure (full, read-only, ejected mid-run) stops the mirror,
+# Then it mirrors staging to <archive volume>/secure/archive/ ONLY when that volume
+# is mounted, carries the UUID pinned in ~/.config/firstmate/card-volumes, and passes
+# a write test (bin/fm-archive-lib.sh fm_card_ok). The volume name has no built-in
+# default: it comes from FM_ARCHIVE_VAULT_VOLUME or the private one-line config file
+# ~/.config/firstmate/archive-volume, and with neither the run stages only. Otherwise
+# it prints "card absent, staging only" and exits 0; it never writes under a bare
+# /Volumes path. A card write failure (full, read-only, ejected mid-run) stops the mirror,
 # reports it, and leaves staging untouched. Text mirrors before file-history and
 # screenshots, so a nearly full card keeps the small, high-value set current.
 #
 # The internal disk is protected by a free-space floor (FM_ARCHIVE_MIN_FREE_GIB,
 # default 15): below it the run refuses with exit 3 and writes nothing, and it is
-# rechecked every FM_ARCHIVE_FLOOR_CHECK_EVERY files (default 100) while staging. Polaris DB
-# dumps are never sources; only the named paths above are read.
+# rechecked every FM_ARCHIVE_FLOOR_CHECK_EVERY files (default 100) while staging. Database
+# dumps are never sources; only the named paths above are read. The staging root is
+# created and kept mode 0700.
 #
 # Usage: fm-archive.sh [--no-mirror] [--no-scan] [--scan] [--verify] [--import <dir>]...
 #   --no-mirror   stage and write manifests only
 #   --no-scan     skip the monthly secret scan even when it is due
 #   --scan        run the secret scan now regardless of the monthly marker
 #   --verify      verify staged files against the manifests, then exit (1 on a problem)
-#   --import <d>  also stage <d>/projects and <d>/file-history, for example the one-off
+#   --import <d>  also stage <d>/projects and <d>/file-history, for example a one-off
 #                 raw clone of ~/.claude; repeatable
 # Environment: FM_HOME (data/ comes from it), FM_ARCHIVE_ROOT, FM_ARCHIVE_CLAUDE_DIR
-# (default ~/.claude), FM_ARCHIVE_VAULT_VOLUME (default FMVAULT),
+# (default ~/.claude), FM_ARCHIVE_VAULT_VOLUME or FM_ARCHIVE_VOLUME_FILE (no default),
 # FM_ARCHIVE_MIRROR_SUBDIR (default secure/archive), FM_ARCHIVE_MIN_FREE_GIB,
 # FM_ARCHIVE_CARD_MIN_FREE_GIB (default 2), FM_CARD_VOLUMES_FILE, FM_CARD_MOUNT_ROOT.
 # Exit: 0 done or card absent, 1 usage or verify problem, 3 refused below the floor.
@@ -52,7 +55,7 @@ umask 077
 
 CLAUDE=${FM_ARCHIVE_CLAUDE_DIR:-$HOME/.claude}
 ROOT=$(fm_archive_root)
-VAULT=${FM_ARCHIVE_VAULT_VOLUME:-FMVAULT}
+VAULT=$(fm_archive_volume_name)
 MIRROR_SUB=${FM_ARCHIVE_MIRROR_SUBDIR:-secure/archive}
 CARD_MIN_GIB=${FM_ARCHIVE_CARD_MIN_FREE_GIB:-2}
 
@@ -340,13 +343,8 @@ secret_scan() {
     done <<EOF
 $files
 EOF
-  done <<'EOF'
-aws-access-key|AKIA[0-9A-Z]{16}
-github-token|gh[pousr]_[A-Za-z0-9]{36,}
-slack-token|xox[baprs]-[A-Za-z0-9-]{10,}
-private-key|-----BEGIN [A-Z ]*PRIVATE KEY-----
-api-key-sk|sk-[A-Za-z0-9_-]{32,}
-bearer-token|Bearer [A-Za-z0-9._-]{30,}
+  done <<EOF
+$(fm_archive_secret_patterns)
 EOF
   : > "$marker"
   SCAN_NOTE="secret scan $month: $total file hits, see reports/secret-scan-$month.txt"
@@ -432,6 +430,11 @@ mirror_manifests() {  # <dest root>
 
 mirror_all() {
   local dest
+  if [ -z "$VAULT" ]; then
+    MIRROR_STATE=absent
+    say "card absent, staging only (no archive volume configured)"
+    return 0
+  fi
   if ! fm_card_ok "$VAULT"; then
     MIRROR_STATE=absent
     say "card absent, staging only (${FM_CARD_REASON})"

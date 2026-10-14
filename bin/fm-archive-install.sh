@@ -16,11 +16,13 @@
 #   fm-archive-install.sh uninstall [--plist-dir DIR]
 #   fm-archive-install.sh status    [--plist-dir DIR]
 #   fm-archive-install.sh print     [same options as install]    render the plist, change nothing
-# install is idempotent: it unloads a loaded agent, rewrites the plist, and loads it again.
+# install creates the archive root owner-only (umask 077, chmod 700). install is idempotent: it unloads a loaded agent, rewrites the plist, and loads it again.
 # --no-load writes the plist without touching launchd.
 # Environment: FM_ARCHIVE_LAUNCHCTL (default launchctl), FM_ARCHIVE_INSTALL_ROOT (checkout
 # root override, used by tests), FM_HOME, FM_ARCHIVE_ROOT.
 set -u
+# The archive holds private transcripts: everything this script creates is owner-only.
+umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${FM_ARCHIVE_INSTALL_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -112,6 +114,7 @@ case "$CMD" in
     validate_options || exit 1
     refuse_worktree || exit 1
     mkdir -p "$PLIST_DIR" "$ARCHIVE_ROOT" || exit 1
+    chmod 700 "$ARCHIVE_ROOT" || { echo "error: could not make $ARCHIVE_ROOT private (mode 700)" >&2; exit 1; }
     if [ "$LOAD" -eq 1 ]; then
       "$LAUNCHCTL" bootout "$(domain)/$LABEL" >/dev/null 2>&1 || true
     fi

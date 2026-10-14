@@ -10,7 +10,7 @@
 #     card absent -> "card absent, staging only", exit 0, nothing created under the mount root;
 #     internal free-space floor -> exit 3, nothing written; idempotent second run; growth appends
 #     only the new bytes; a shrunken source never overwrites; versioned files keep a .bak;
-#     polaris-style dumps are never staged; card mirror with matching UUID; wrong UUID, read-only,
+#     database-dump-style files are never staged; card mirror with matching UUID; wrong UUID, read-only,
 #     nearly full, and a write failure mid-mirror all leave staging intact and exit 0;
 #     manifests verify and flag corruption; the secret scan reports names and counts only.
 #   hook: creates, appends, never duplicates, agrees with the archiver offset, prints nothing,
@@ -30,11 +30,11 @@ INSTALL="$ROOT/bin/fm-archive-install.sh"
 LEDGER="$ROOT/bin/fm-ledger.sh"
 TMP_ROOT=$(fm_test_tmproot fm-archive-tests)
 REAL_CP=$(command -v cp)
-VAULT_UUID=7CD579F4-47C5-44D7-9168-49554746B098
+VAULT_UUID=FAKE0000-0000-4000-8000-0000000000AA
 
 # make_env <name> [mounted]: a sandbox with a fake ~/.claude, a fake firstmate home, a fake
 # /Volumes, and mount/diskutil stubs. Prints the sandbox dir. When "mounted" is given the
-# FMVAULT volume appears mounted with the pinned UUID.
+# ARCHVOL volume appears mounted with the pinned UUID.
 make_env() {
   local name=$1 mounted=${2:-} e fb
   e="$TMP_ROOT/$name"
@@ -47,10 +47,10 @@ make_env() {
   printf '%s\n' 'report one' > "$e/home/data/t1/report.md"
   printf '%s\n' 'png-bytes' > "$e/home/data/t1/shots/a.png"
   printf '%s\n' 'handoff one' > "$e/home/data/handoffs/h1/h.md"
-  printf '%s\n' "FMVAULT $VAULT_UUID" > "$e/card-volumes"
+  printf '%s\n' "ARCHVOL $VAULT_UUID" > "$e/card-volumes"
   if [ -n "$mounted" ]; then
-    mkdir -p "$e/volroot/FMVAULT"
-    printf '#!/bin/sh\necho "/dev/fake1 on /System/Volumes/Data (apfs, local)"\necho "/dev/fake2 on %s/FMVAULT (apfs, local)"\n' "$e/volroot" > "$fb/mount"
+    mkdir -p "$e/volroot/ARCHVOL"
+    printf '#!/bin/sh\necho "/dev/fake1 on /System/Volumes/Data (apfs, local)"\necho "/dev/fake2 on %s/ARCHVOL (apfs, local)"\n' "$e/volroot" > "$fb/mount"
   else
     printf '#!/bin/sh\necho "/dev/fake1 on /System/Volumes/Data (apfs, local)"\n' > "$fb/mount"
   fi
@@ -64,7 +64,7 @@ run_archive() {
   local e=$1
   shift
   env FM_ARCHIVE_ROOT="$e/arch" FM_ARCHIVE_CLAUDE_DIR="$e/claude" FM_HOME="$e/home" \
-    FM_CARD_MOUNT_ROOT="$e/volroot" FM_CARD_VOLUMES_FILE="$e/card-volumes" \
+    FM_CARD_MOUNT_ROOT="$e/volroot" FM_CARD_VOLUMES_FILE="$e/card-volumes" FM_ARCHIVE_VAULT_VOLUME=ARCHVOL \
     FM_ARCHIVE_MIN_FREE_GIB=0 FM_ARCHIVE_CARD_MIN_FREE_GIB=0 \
     PATH="$e/fakebin:$PATH" "$ARCHIVE" "$@"
 }
@@ -105,7 +105,7 @@ test_archive_card_absent_stages_and_exits_zero() {
   expect_code 0 "$rc" "card-absent: must exit 0"
   assert_contains "$out" "card absent, staging only" "card-absent: missing the staging-only notice"
   assert_present "$e/arch/transcripts/-proj/sess.jsonl" "card-absent: staging must still be written"
-  assert_absent "$e/volroot/FMVAULT" "card-absent: must never create the volume path"
+  assert_absent "$e/volroot/ARCHVOL" "card-absent: must never create the volume path"
   [ -z "$(ls -A "$e/volroot")" ] || fail "card-absent: something was written under the mount root"
   pass "card absent: stages, says staging only, exits 0, writes nothing under the mount root"
 }
@@ -180,7 +180,7 @@ test_archive_never_stages_database_dumps() {
   mkdir -p "$e/home/data/db-checkpoints/c1" "$e/home/data/t1/db"
   printf '%s\n' 'dump' > "$e/home/data/db-checkpoints/c1/dump.sql.gz"
   printf '%s\n' 'dump' > "$e/home/data/t1/dump.sql.gz"
-  printf '%s\n' 'dump' > "$e/home/data/t1/db/polaris.sql"
+  printf '%s\n' 'dump' > "$e/home/data/t1/db/app.sql"
   run_archive "$e" >/dev/null 2>&1 || fail "no-dumps: run failed"
   [ -z "$(find "$e/arch" \( -name '*.sql*' -o -path '*db-checkpoints*' \) -print)" ] || fail "no-dumps: a database dump was staged"
   pass "database dumps are never staged"
@@ -204,13 +204,13 @@ test_archive_mirrors_to_a_verified_card() {
   printf '%s\n' '{"line":2}' >> "$e/claude/projects/-proj/sess.jsonl"
   out=$(run_archive "$e" 2>&1) || fail "mirror: run failed: $out"
   assert_contains "$out" "mirror ok" "mirror: no success line"
-  cmp -s "$e/claude/projects/-proj/sess.jsonl" "$e/volroot/FMVAULT/secure/archive/transcripts/-proj/sess.jsonl" || fail "mirror: transcript differs on the card"
-  assert_present "$e/volroot/FMVAULT/secure/archive/evidence/t1/shots/a.png" "mirror: screenshot not mirrored"
-  assert_present "$e/volroot/FMVAULT/secure/archive/tasks/t1/report.md" "mirror: report not mirrored"
-  ls "$e/volroot/FMVAULT/secure/archive"/MANIFEST-*.sha256 >/dev/null 2>&1 || fail "mirror: manifest not mirrored"
+  cmp -s "$e/claude/projects/-proj/sess.jsonl" "$e/volroot/ARCHVOL/secure/archive/transcripts/-proj/sess.jsonl" || fail "mirror: transcript differs on the card"
+  assert_present "$e/volroot/ARCHVOL/secure/archive/evidence/t1/shots/a.png" "mirror: screenshot not mirrored"
+  assert_present "$e/volroot/ARCHVOL/secure/archive/tasks/t1/report.md" "mirror: report not mirrored"
+  ls "$e/volroot/ARCHVOL/secure/archive"/MANIFEST-*.sha256 >/dev/null 2>&1 || fail "mirror: manifest not mirrored"
   printf '%s\n' '{"line":3}' >> "$e/claude/projects/-proj/sess.jsonl"
   run_archive "$e" >/dev/null 2>&1 || fail "mirror: second run failed"
-  cmp -s "$e/claude/projects/-proj/sess.jsonl" "$e/volroot/FMVAULT/secure/archive/transcripts/-proj/sess.jsonl" || fail "mirror: growth not carried to the card"
+  cmp -s "$e/claude/projects/-proj/sess.jsonl" "$e/volroot/ARCHVOL/secure/archive/transcripts/-proj/sess.jsonl" || fail "mirror: growth not carried to the card"
   out=$(run_archive "$e" 2>&1)
   assert_contains "$out" "mirror ok (0 files copied" "mirror: an unchanged archive should copy nothing"
   pass "a pinned, unlocked, writable card receives an exact mirror, and growth follows"
@@ -226,7 +226,7 @@ test_archive_wrong_volume_is_treated_as_absent() {
   expect_code 0 "$rc" "wrong-uuid: must exit 0"
   assert_contains "$out" "card absent, staging only" "wrong-uuid: should stage only"
   assert_contains "$out" "wrong volume" "wrong-uuid: should say the volume is wrong"
-  assert_absent "$e/volroot/FMVAULT/secure" "wrong-uuid: nothing may be written to the wrong volume"
+  assert_absent "$e/volroot/ARCHVOL/secure" "wrong-uuid: nothing may be written to the wrong volume"
   pass "a volume with the wrong UUID is never written to"
 }
 
@@ -234,12 +234,12 @@ test_archive_read_only_card_stays_in_staging() {
   local e out rc
   [ "$(id -u)" != 0 ] || { pass "skip: read-only card test needs a non-root user"; return 0; }
   e=$(make_env readonly mounted)
-  chmod 555 "$e/volroot/FMVAULT"
+  chmod 555 "$e/volroot/ARCHVOL"
   set +e
   out=$(run_archive "$e" 2>&1)
   rc=$?
   set -e
-  chmod 755 "$e/volroot/FMVAULT"
+  chmod 755 "$e/volroot/ARCHVOL"
   expect_code 0 "$rc" "readonly: must exit 0"
   assert_contains "$out" "card absent, staging only" "readonly: should stage only"
   assert_contains "$out" "not writable" "readonly: should say the card is not writable"
@@ -252,14 +252,14 @@ test_archive_nearly_full_card_is_not_written() {
   e=$(make_env card-full mounted)
   set +e
   out=$(env FM_ARCHIVE_ROOT="$e/arch" FM_ARCHIVE_CLAUDE_DIR="$e/claude" FM_HOME="$e/home" \
-    FM_CARD_MOUNT_ROOT="$e/volroot" FM_CARD_VOLUMES_FILE="$e/card-volumes" \
+    FM_CARD_MOUNT_ROOT="$e/volroot" FM_CARD_VOLUMES_FILE="$e/card-volumes" FM_ARCHIVE_VAULT_VOLUME=ARCHVOL \
     FM_ARCHIVE_MIN_FREE_GIB=0 FM_ARCHIVE_CARD_MIN_FREE_GIB=99999999 \
     PATH="$e/fakebin:$PATH" "$ARCHIVE" 2>&1)
   rc=$?
   set -e
   expect_code 0 "$rc" "card-full: must exit 0"
   assert_contains "$out" "staging only" "card-full: should stage only"
-  assert_absent "$e/volroot/FMVAULT/secure/archive/transcripts" "card-full: nothing may be mirrored below the card floor"
+  assert_absent "$e/volroot/ARCHVOL/secure/archive/transcripts" "card-full: nothing may be mirrored below the card floor"
   pass "a nearly full card is left alone"
 }
 
@@ -284,7 +284,7 @@ SH
   expect_code 0 "$rc" "card-fails: must exit 0"
   assert_contains "$out" "card write failed" "card-fails: failure not reported"
   cmp -s "$e/claude/projects/-proj/sess.jsonl" "$e/arch/transcripts/-proj/sess.jsonl" || fail "card-fails: staging was disturbed"
-  [ -z "$(find "$e/volroot/FMVAULT" -name '*.tmp.*' -print)" ] || fail "card-fails: temp files left on the card"
+  [ -z "$(find "$e/volroot/ARCHVOL" -name '*.tmp.*' -print)" ] || fail "card-fails: temp files left on the card"
   pass "a card that fails mid-mirror stops the mirror, reports it, and leaves staging intact"
 }
 
@@ -381,14 +381,38 @@ test_hook_exits_zero_on_bad_input() {
   pass "the hook exits 0 and prints nothing on bad input"
 }
 
-test_hook_outside_claude_dir_is_filed_under_other() {
-  local e src
-  e=$(make_env hook-other)
-  src="$e/elsewhere.jsonl"
-  printf '%s\n' '{"x":1}' > "$src"
-  run_hook "$e" "{\"transcript_path\":\"$src\"}" >/dev/null 2>&1
-  [ -n "$(find "$e/arch/transcripts/_other" -name '*-elsewhere.jsonl' 2>/dev/null)" ] || fail "hook-other: transcript outside ~/.claude not filed under _other"
-  pass "a transcript outside ~/.claude is filed under _other"
+test_hook_refuses_untrusted_paths() {
+  local e p reason n=0
+  e=$(make_env hook-refuse)
+  mkdir -p "$e/outsidedir" "$e/claude/projects/-proj"
+  printf '%s\n' 'TOPSECRETCONTENT' > "$e/elsewhere.jsonl"
+  printf '%s\n' 'TOPSECRETCONTENT' > "$e/outside.jsonl"
+  printf '%s\n' 'TOPSECRETCONTENT' > "$e/outsidedir/x.jsonl"
+  printf '%s\n' 'TOPSECRETCONTENT' > "$e/claude/projects/-proj/key.pem"
+  ln -s "$e/elsewhere.jsonl" "$e/claude/projects/-proj/link.jsonl"
+  ln -s "$e/outsidedir" "$e/claude/projects/-linked"
+  for p in \
+    "$e/elsewhere.jsonl" \
+    "$e/claude/projects/-proj/../../../outside.jsonl" \
+    "$e/claude/projects/-proj/./sess.jsonl" \
+    "$e/claude/projects/-proj/key.pem" \
+    "$e/claude/projects/-proj/link.jsonl" \
+    "$e/claude/projects/-linked/x.jsonl" \
+    "claude/projects/-proj/sess.jsonl" \
+    "$e/claude/projects"; do
+    run_hook "$e" "{\"transcript_path\":\"$p\",\"agent_transcript_path\":\"$p\"}" >/dev/null 2>&1
+    n=$((n + 1))
+  done
+  [ -z "$(find "$e/arch/transcripts" -type f 2>/dev/null)" ] || fail "hook-refuse: a refused path was archived: $(find "$e/arch/transcripts" -type f)"
+  assert_absent "$e/arch/transcripts/_other" "hook-refuse: nothing may be filed outside the projects tree"
+  [ -z "$(find "$e/arch" -name '*outside*' -o -name '*elsewhere*' 2>/dev/null)" ] || fail "hook-refuse: a path escaped the transcripts directory"
+  [ "$(grep -c 'hook refused a transcript path' "$e/arch/archive.log")" -ge "$n" ] || fail "hook-refuse: refusals were not all logged"
+  for reason in "not absolute" "dot component" "not a .jsonl file" "path is a symlink" "outside the projects directory"; do
+    assert_grep "$reason" "$e/arch/archive.log" "hook-refuse: the log should name the reason '$reason'"
+  done
+  assert_no_grep "TOPSECRETCONTENT" "$e/arch/archive.log" "hook-refuse: file content reached the log"
+  assert_no_grep "$e" "$e/arch/archive.log" "hook-refuse: a path reached the log"
+  pass "the hook refuses relative, dotted, non-jsonl, symlinked, and out-of-tree paths and logs only the reason"
 }
 
 test_hook_never_overwrites_with_a_shorter_source() {
@@ -634,12 +658,190 @@ test_ledger_degrades_without_worktree_or_pane() {
   pass "the ledger still writes, with warnings, when the worktree and pane are gone"
 }
 
+test_ledger_refuses_a_planted_symlink_file() {
+  local e
+  e=$(make_ledger_env ledger-link-file)
+  printf '%s\n' keep > "$e/victim"
+  mkdir -p "$e/data/t1/scratch"
+  ln -s "$e/victim" "$e/data/t1/scratch/local-commits.txt"
+  ln -s "$e/victim" "$e/data/t1/scratch/status.txt"
+  ln -s "$e/victim" "$e/data/t1/scrollback.txt"
+  run_ledger "$e" >/dev/null 2>&1 || fail "ledger-link-file: ledger must stay fail-soft"
+  [ "$(cat "$e/victim")" = keep ] || fail "ledger-link-file: a planted symlink was written through"
+  [ ! -L "$e/data/t1/scratch/status.txt" ] || fail "ledger-link-file: the planted link was kept"
+  [ ! -L "$e/data/t1/scrollback.txt" ] || fail "ledger-link-file: the planted scrollback link was kept"
+  assert_grep "pane 2" "$e/data/t1/scrollback.txt" "ledger-link-file: the scrollback was not written over the link"
+  pass "a symlink planted at a ledger output is replaced, never written through"
+}
+
+test_ledger_refuses_a_symlinked_scratch_directory() {
+  local e
+  e=$(make_ledger_env ledger-link-dir)
+  mkdir -p "$e/victimdir"
+  printf '%s\n' keep > "$e/victimdir/sentinel"
+  mkdir -p "$e/data/t1"
+  ln -s "$e/victimdir" "$e/data/t1/scratch"
+  printf '%s\n' 'untracked text' > "$e/wt/note.txt"
+  run_ledger "$e" >/dev/null 2>&1 || fail "ledger-link-dir: ledger must stay fail-soft"
+  [ "$(ls -A "$e/victimdir")" = sentinel ] || fail "ledger-link-dir: files were written into the link target: $(ls -A "$e/victimdir")"
+  [ "$(cat "$e/victimdir/sentinel")" = keep ] || fail "ledger-link-dir: the link target was modified"
+  [ -L "$e/data/t1/scratch" ] || fail "ledger-link-dir: the planted link was altered"
+  assert_grep "symlink" "$e/data/t1/ledger.json" "ledger-link-dir: the refusal was not recorded"
+  pass "a symlinked scratch directory is refused and its target left untouched"
+}
+
+test_ledger_refuses_a_symlinked_task_folder() {
+  local e
+  e=$(make_ledger_env ledger-link-task)
+  mkdir -p "$e/realdata"
+  ln -s "$e/realdata" "$e/data/t1"
+  run_ledger "$e" >/dev/null 2>&1 || fail "ledger-link-task: ledger must stay fail-soft"
+  [ -z "$(ls -A "$e/realdata")" ] || fail "ledger-link-task: wrote through a symlinked task folder: $(ls -A "$e/realdata")"
+  pass "a symlinked task folder is refused"
+}
+
+test_ledger_replaces_stale_scratch_contents() {
+  local e
+  e=$(make_ledger_env ledger-fresh)
+  mkdir -p "$e/data/t1/scratch"
+  printf '%s\n' old > "$e/data/t1/scratch/planted.txt"
+  run_ledger "$e" >/dev/null 2>&1 || fail "ledger-fresh: ledger failed"
+  assert_absent "$e/data/t1/scratch/planted.txt" "ledger-fresh: scratch was not recreated fresh"
+  [ -d "$e/data/t1/scratch" ] && [ ! -L "$e/data/t1/scratch" ] || fail "ledger-fresh: scratch is not a real directory"
+  pass "scratch is recreated fresh on every run"
+}
+
+test_ledger_excludes_secret_named_files() {
+  local e led f
+  e=$(make_ledger_env ledger-secret-names)
+  for f in .env.local server.pem id_rsa my-credentials.json app.key cert.p12 client_secret.txt login.keychain-db; do
+    printf '%s\n' "PLAINVALUE in $f" > "$e/wt/$f"
+  done
+  printf '%s\n' 'harmless text' > "$e/wt/ok.txt"
+  run_ledger "$e" >/dev/null 2>&1 || fail "ledger-secret-names: ledger failed"
+  led="$e/data/t1/ledger.json"
+  assert_grep "ok.txt" "$e/data/t1/scratch/untracked.diff" "ledger-secret-names: an ordinary file was dropped"
+  assert_no_grep "PLAINVALUE" "$e/data/t1/scratch/untracked.diff" "ledger-secret-names: a secret-named file was captured"
+  if grep -rF "PLAINVALUE" "$e/data/t1" >/dev/null 2>&1; then fail "ledger-secret-names: a secret value reached data/<id>"; fi
+  for f in .env.local server.pem id_rsa my-credentials.json app.key cert.p12 client_secret.txt login.keychain-db; do
+    assert_grep "$f" "$led" "ledger-secret-names: $f was not recorded as skipped"
+  done
+  pass "secret-named files are left out of the scratch snapshot by name and recorded by name only"
+}
+
+test_ledger_drops_files_matching_secret_patterns() {
+  local e led token
+  e=$(make_ledger_env ledger-secret-content)
+  token="AKIA$(printf 'ABCDEFGHIJKLMNOP')"
+  printf '%s\n' "aws = $token" > "$e/wt/notes.txt"
+  printf '%s\n' 'harmless text' > "$e/wt/ok.txt"
+  printf '%s\n' tracked > "$e/wt/tracked.txt"
+  git -C "$e/wt" add tracked.txt
+  git -C "$e/wt" -c user.email=t@t -c user.name=t commit -q -m "add tracked"
+  printf '%s\n' "edited $token" >> "$e/wt/tracked.txt"
+  run_ledger "$e" >/dev/null 2>&1 || fail "ledger-secret-content: ledger failed"
+  led="$e/data/t1/ledger.json"
+  assert_grep "ok.txt" "$e/data/t1/scratch/untracked.diff" "ledger-secret-content: an ordinary file was dropped"
+  if grep -rF "$token" "$e/data/t1" >/dev/null 2>&1; then fail "ledger-secret-content: the credential reached data/<id>"; fi
+  assert_absent "$e/data/t1/scratch/tracked.diff" "ledger-secret-content: a tracked diff holding a credential was kept"
+  assert_grep "notes.txt" "$led" "ledger-secret-content: the dropped file was not named"
+  assert_grep "aws-access-key" "$led" "ledger-secret-content: the pattern name was not recorded"
+  pass "files and diffs matching a credential pattern are dropped and only the name and pattern are recorded"
+}
+
+test_ledger_drops_a_local_commit_bundle_holding_a_secret() {
+  local e token
+  e=$(make_ledger_env ledger-secret-commit)
+  token="AKIA$(printf 'ABCDEFGHIJKLMNOP')"
+  printf '%s\n' "aws = $token" > "$e/wt/committed.txt"
+  git -C "$e/wt" add committed.txt
+  git -C "$e/wt" -c user.email=t@t -c user.name=t commit -q -m "oops"
+  run_ledger "$e" >/dev/null 2>&1 || fail "ledger-secret-commit: ledger failed"
+  assert_absent "$e/data/t1/scratch/local-commits.bundle" "ledger-secret-commit: a bundle holding a credential was kept"
+  assert_grep "local-commits.bundle dropped" "$e/data/t1/ledger.json" "ledger-secret-commit: the drop was not recorded"
+  if grep -rF "$token" "$e/data/t1" >/dev/null 2>&1; then fail "ledger-secret-commit: the credential reached data/<id>"; fi
+  pass "a local-commit bundle whose commits hold a credential is dropped"
+}
+
+test_ledger_neutralises_worker_controlled_git_config() {
+  local e
+  e=$(make_ledger_env ledger-git-config)
+  printf '%s\n' base > "$e/wt/tracked.txt"
+  git -C "$e/wt" add tracked.txt
+  git -C "$e/wt" -c user.email=t@t -c user.name=t commit -q -m "add tracked"
+  printf '%s\n' changed >> "$e/wt/tracked.txt"
+  printf '#!/bin/sh\ntouch "%s/ran-marker"\nexit 0\n' "$e" > "$e/evil.sh"
+  chmod +x "$e/evil.sh"
+  git -C "$e/p" config core.fsmonitor "$e/evil.sh"
+  git -C "$e/p" config diff.external "$e/evil.sh"
+  git -C "$e/p" config core.hooksPath "$e/hooks"
+  run_ledger "$e" >/dev/null 2>&1 || fail "ledger-git-config: ledger failed"
+  assert_absent "$e/ran-marker" "ledger-git-config: a worker-controlled git config command ran"
+  assert_grep "changed" "$e/data/t1/scratch/tracked.diff" "ledger-git-config: the tracked diff was not captured"
+  pass "git runs in the worker's copy with fsmonitor, hooks, and external diff programs disabled"
+}
+
 test_ledger_kill_switch() {
   local e
   e=$(make_ledger_env ledger-off)
   env FM_NO_LEDGER=1 FM_HOME="$e" FM_STATE_OVERRIDE="$e/state" FM_DATA_OVERRIDE="$e/data" "$LEDGER" t1 >/dev/null 2>&1
   assert_absent "$e/data/t1" "ledger-off: FM_NO_LEDGER=1 must write nothing"
   pass "FM_NO_LEDGER=1 skips the ledger"
+}
+
+perm_of() {  # <path>: octal permission bits
+  if [ "$(uname)" = Darwin ]; then stat -f %Lp "$1"; else stat -c %a "$1"; fi
+}
+
+test_archive_without_a_configured_volume_stays_in_staging() {
+  local e out rc
+  e=$(make_env no-volume mounted)
+  set +e
+  out=$(env FM_ARCHIVE_ROOT="$e/arch" FM_ARCHIVE_CLAUDE_DIR="$e/claude" FM_HOME="$e/home" \
+    FM_CARD_MOUNT_ROOT="$e/volroot" FM_CARD_VOLUMES_FILE="$e/card-volumes" FM_ARCHIVE_VOLUME_FILE="$e/absent-volume-file" \
+    FM_ARCHIVE_MIN_FREE_GIB=0 PATH="$e/fakebin:$PATH" "$ARCHIVE" 2>&1)
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "no-volume: must exit 0"
+  assert_contains "$out" "no archive volume configured" "no-volume: the notice should say no volume is configured"
+  assert_present "$e/arch/transcripts/-proj/sess.jsonl" "no-volume: staging must still be written"
+  assert_absent "$e/volroot/ARCHVOL/secure" "no-volume: nothing may be mirrored without a configured volume"
+  pass "with no archive volume configured the run stays in staging and there is no built-in volume name"
+}
+
+test_archive_reads_the_volume_from_private_config() {
+  local e out
+  e=$(make_env volume-file mounted)
+  printf '%s\n' '# private config' 'ARCHVOL' > "$e/volume-file"
+  out=$(env FM_ARCHIVE_ROOT="$e/arch" FM_ARCHIVE_CLAUDE_DIR="$e/claude" FM_HOME="$e/home" \
+    FM_CARD_MOUNT_ROOT="$e/volroot" FM_CARD_VOLUMES_FILE="$e/card-volumes" FM_ARCHIVE_VOLUME_FILE="$e/volume-file" \
+    FM_ARCHIVE_MIN_FREE_GIB=0 FM_ARCHIVE_CARD_MIN_FREE_GIB=0 PATH="$e/fakebin:$PATH" "$ARCHIVE" 2>&1) || fail "volume-file: archiver failed: $out"
+  assert_present "$e/volroot/ARCHVOL/secure/archive/transcripts/-proj/sess.jsonl" "volume-file: the mirror did not use the configured volume"
+  pass "the archive volume name is read from the private config file"
+}
+
+test_installer_creates_a_private_root() {
+  local e
+  e=$(make_env install-perms)
+  make_launchctl_stub "$e"
+  (umask 022; run_install "$e" install --plist-dir "$e/agents" --no-load --allow-worktree >/dev/null 2>&1) || fail "install-perms: install failed"
+  [ "$(perm_of "$e/arch")" = 700 ] || fail "install-perms: archive root is mode $(perm_of "$e/arch"), want 700"
+  mkdir -p "$e/loose"
+  chmod 755 "$e/loose"
+  (umask 022; env HOME="$e/fakehome" FM_ARCHIVE_LAUNCHCTL="$e/launchctl" "$INSTALL" install --plist-dir "$e/agents" --no-load --allow-worktree --archive-root "$e/loose" >/dev/null 2>&1) || fail "install-perms: install over an existing root failed"
+  [ "$(perm_of "$e/loose")" = 700 ] || fail "install-perms: an existing root was left at mode $(perm_of "$e/loose")"
+  pass "the installer creates the archive root private and tightens one that exists"
+}
+
+test_archiver_tightens_an_existing_root() {
+  local e
+  e=$(make_env root-perms)
+  mkdir -p "$e/arch"
+  chmod 755 "$e/arch"
+  (umask 022; run_archive "$e" --no-mirror >/dev/null 2>&1) || fail "root-perms: archiver failed"
+  [ "$(perm_of "$e/arch")" = 700 ] || fail "root-perms: archive root is mode $(perm_of "$e/arch"), want 700"
+  [ "$(perm_of "$e/arch/transcripts/-proj/sess.jsonl")" = 600 ] || fail "root-perms: a staged file is mode $(perm_of "$e/arch/transcripts/-proj/sess.jsonl"), want 600"
+  pass "the archiver makes the root private and stages files mode 600"
 }
 
 test_archive_rewritten_source_is_saved_beside_the_archive() {
@@ -741,7 +943,7 @@ run_case test_hook_creates_appends_and_stays_silent
 run_case test_hook_archives_subagent_transcript
 run_case test_hook_and_archiver_share_one_offset
 run_case test_hook_exits_zero_on_bad_input
-run_case test_hook_outside_claude_dir_is_filed_under_other
+run_case test_hook_refuses_untrusted_paths
 run_case test_hook_never_overwrites_with_a_shorter_source
 run_case test_hook_skips_behind_a_live_lock_and_steals_a_dead_one
 run_case test_hook_parallel_runs_do_not_duplicate_or_lose_lines
@@ -756,4 +958,16 @@ run_case test_ledger_caps_untracked_diff
 run_case test_ledger_rerun_keeps_the_first_ledger
 run_case test_ledger_degrades_without_worktree_or_pane
 run_case test_ledger_kill_switch
+run_case test_ledger_refuses_a_planted_symlink_file
+run_case test_ledger_refuses_a_symlinked_scratch_directory
+run_case test_ledger_refuses_a_symlinked_task_folder
+run_case test_ledger_replaces_stale_scratch_contents
+run_case test_ledger_excludes_secret_named_files
+run_case test_ledger_drops_files_matching_secret_patterns
+run_case test_ledger_drops_a_local_commit_bundle_holding_a_secret
+run_case test_ledger_neutralises_worker_controlled_git_config
+run_case test_archive_without_a_configured_volume_stays_in_staging
+run_case test_archive_reads_the_volume_from_private_config
+run_case test_installer_creates_a_private_root
+run_case test_archiver_tightens_an_existing_root
 fm_case_summary "fm-archive"

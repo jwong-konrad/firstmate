@@ -8,11 +8,15 @@
 #
 # Test and operator seams (all optional):
 #   FM_ARCHIVE_ROOT          staging root (default ~/Code/firstmate-archive)
+#   FM_ARCHIVE_VAULT_VOLUME  name of the archive volume to mirror to; no default
+#   FM_ARCHIVE_VOLUME_FILE   private config whose first word is that name when the variable is unset
+#                            (default ~/.config/firstmate/archive-volume)
 #   FM_CARD_VOLUMES_FILE     pinned "<NAME> <Volume UUID>" lines (default ~/.config/firstmate/card-volumes)
 #   FM_CARD_MOUNT_ROOT       where card volumes mount (default /Volumes)
 #   FM_ARCHIVE_MIN_FREE_GIB  internal free-space floor in GiB (default 15)
 #
-# FM_ARCHIVE_FREE_GIB, FM_CARD_MOUNT, FM_CARD_REASON, and FM_ARCHIVE_SYNC are
+# FM_ARCHIVE_FREE_GIB, FM_CARD_MOUNT, FM_CARD_REASON, FM_ARCHIVE_SYNC, FM_ARCHIVE_REL, and
+# FM_ARCHIVE_REJECT are
 # output variables read by the sourcing script.
 
 # shellcheck disable=SC2034
@@ -22,6 +26,30 @@ fm_archive_root() {
 
 fm_archive_now_iso() {
   date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+# fm_archive_volume_name: the configured archive volume name, or empty when none is
+# configured. There is deliberately no built-in default: the name is private configuration.
+fm_archive_volume_name() {
+  local name=${FM_ARCHIVE_VAULT_VOLUME:-} f
+  if [ -z "$name" ]; then
+    f=${FM_ARCHIVE_VOLUME_FILE:-$HOME/.config/firstmate/archive-volume}
+    name=$(awk 'NF && $1 !~ /^#/ { print $1; exit }' "$f" 2>/dev/null)
+  fi
+  printf '%s\n' "$name"
+}
+
+# fm_archive_secret_patterns: "<name>|<extended regex>" lines for the credential
+# patterns the monthly archive scan and the ledger's scratch snapshot both use.
+fm_archive_secret_patterns() {
+  cat <<'PATTERNS'
+aws-access-key|AKIA[0-9A-Z]{16}
+github-token|gh[pousr]_[A-Za-z0-9]{36,}
+slack-token|xox[baprs]-[A-Za-z0-9-]{10,}
+private-key|-----BEGIN [A-Z ]*PRIVATE KEY-----
+api-key-sk|sk-[A-Za-z0-9_-]{32,}
+bearer-token|Bearer [A-Za-z0-9._-]{30,}
+PATTERNS
 }
 
 # fm_archive_log <message>: append one line to <root>/archive.log when the root
@@ -205,14 +233,15 @@ fm_archive_lock_release() {  # <lock-dir>
 }
 
 # fm_archive_clone_copy <src> <dst>: copy-on-write clone where the filesystem
-# supports it (APFS), plain copy otherwise.
+# supports it (APFS), plain copy otherwise. The copy is always made mode 0600,
+# because a clone would otherwise keep the source's permissions.
 fm_archive_clone_copy() {
   if [ "$(uname)" = Darwin ]; then
-    cp -c "$1" "$2" 2>/dev/null && return 0
+    cp -c "$1" "$2" 2>/dev/null || cp "$1" "$2" || return 1
   else
-    cp --reflink=auto "$1" "$2" 2>/dev/null && return 0
+    cp --reflink=auto "$1" "$2" 2>/dev/null || cp "$1" "$2" || return 1
   fi
-  cp "$1" "$2"
+  chmod 600 "$2" 2>/dev/null || true
 }
 
 # fm_archive_prefix_ok <src> <dst> <dst-size>: 0 when the first and last 4 KiB of
@@ -309,16 +338,42 @@ fm_archive_sync_append() {
   [ "$FM_ARCHIVE_SYNC" != error ]
 }
 
-# fm_archive_transcript_rel <transcript-path> [claude-dir]: the staged path of a
-# transcript relative to <root>/transcripts. A file under <claude-dir>/projects
-# keeps its relative path; anything else is filed under _other by checksum.
+# fm_archive_transcript_rel <transcript-path> [claude-dir]: set FM_ARCHIVE_REL to the
+# staged path of a transcript relative to <root>/transcripts and return 0, or return 1
+# with FM_ARCHIVE_REJECT set to a short reason. It is called directly, never inside
+# $(...), so both variables survive. A path is accepted only
+# when it is absolute, contains no ".." component, is not a symlink itself, ends in
+# .jsonl, and resolves (symlinked directories included) to a file under
+# <claude-dir>/projects. Everything else is refused, so a hook payload cannot make
+# the archive read an arbitrary file or write outside transcripts/.
 fm_archive_transcript_rel() {
-  local path=$1 claude=${2:-${FM_ARCHIVE_CLAUDE_DIR:-$HOME/.claude}} base
+  local path=$1 claude=${2:-${FM_ARCHIVE_CLAUDE_DIR:-$HOME/.claude}} dir base rroot rdir
+  FM_ARCHIVE_REJECT=
+  FM_ARCHIVE_REL=
   case "$path" in
-    "$claude/projects/"*) printf '%s\n' "${path#"$claude/projects/"}" ;;
-    *)
-      base=$(basename "$path")
-      printf '_other/%s-%s\n' "$(printf '%s' "$path" | cksum | cut -d' ' -f1)" "$base"
-      ;;
+    /*) ;;
+    *) FM_ARCHIVE_REJECT="path is not absolute"; return 1 ;;
   esac
+  case "/$path/" in
+    */../*|*/./*) FM_ARCHIVE_REJECT="path contains a dot component"; return 1 ;;
+  esac
+  case "$path" in
+    *.jsonl) ;;
+    *) FM_ARCHIVE_REJECT="not a .jsonl file"; return 1 ;;
+  esac
+  if [ -L "$path" ]; then
+    FM_ARCHIVE_REJECT="path is a symlink"
+    return 1
+  fi
+  [ -f "$path" ] || { FM_ARCHIVE_REJECT="not a regular file"; return 1; }
+  rroot=$(cd "$claude/projects" 2>/dev/null && pwd -P) || { FM_ARCHIVE_REJECT="no projects directory"; return 1; }
+  dir=$(dirname "$path")
+  base=$(basename "$path")
+  rdir=$(cd "$dir" 2>/dev/null && pwd -P) || { FM_ARCHIVE_REJECT="directory not resolvable"; return 1; }
+  case "$rdir/" in
+    "$rroot/"*) ;;
+    *) FM_ARCHIVE_REJECT="outside the projects directory"; return 1 ;;
+  esac
+  FM_ARCHIVE_REL="${rdir#"$rroot"}/$base"
+  FM_ARCHIVE_REL=${FM_ARCHIVE_REL#/}
 }

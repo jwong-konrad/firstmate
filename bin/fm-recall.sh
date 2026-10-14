@@ -4,11 +4,15 @@
 # network, nothing leaves the machine. docs/archive.md owns where the corpus lives and
 # its privacy rules; this header owns the commands.
 #
+# For firstmate and the captain only. The corpus is private (transcripts and notes hold real
+# names and possibly credentials), so workers are not given this tool and briefs do not
+# point them at the archive.
+#
 # Corpus (reports, handoffs, decisions, learnings and captain notes, and ledgers) comes
 # from this home's data/ and from the archive staging root (tasks/ and handoffs/), with
 # an archive copy skipped when data/ already holds the same file. Markdown is split into
 # chunks at "#"-"###" headings, at most about 3000 characters each, and indexed with
-# porter stemming; a hit prints the heading and a snippet, so a worker opens the one
+# porter stemming; a hit prints the heading and a snippet, so the reader opens the one
 # section that matters. Ledgers are indexed as a short summary (task, model, PR, status
 # history). With --transcripts, each archived transcript is also indexed as a digest of
 # the user prompts and assistant text (never tool output), capped per message.

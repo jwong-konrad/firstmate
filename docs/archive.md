@@ -18,7 +18,7 @@ The archive copies the record out before either happens, and `bin/fm-recall.sh` 
 | `data/handoffs/` | `bin/fm-archive.sh` | `handoffs/` |
 | Task screenshots, `data/<id>/shots/` | `bin/fm-archive.sh` | `evidence/<id>/shots/` |
 
-Not captured: tool-result files and other `~/.claude` scratch (a transcript already holds the tool output it produced), the captain's `history.jsonl` (Claude Code never sweeps it), and Polaris DB dumps, which are excluded by name and by construction because only the paths above are ever read.
+Not captured: tool-result files and other `~/.claude` scratch (a transcript already holds the tool output it produced), the captain's `history.jsonl` (Claude Code never sweeps it), and database dumps, which are excluded by construction because only the paths above are ever read.
 
 ## Layout
 
@@ -39,8 +39,8 @@ firstmate-archive/
   archive.log  .state/  .locks/                      run log, last-run record, per-file locks
 ```
 
-The mirror is `<FMVAULT>/secure/archive/`, the same tree minus `index/`, the log, and the locks.
-The one-off safety clone `raw-2026-10-14/` taken on 2026-10-14 sits beside these directories; `bin/fm-archive.sh --import ~/Code/firstmate-archive/raw-2026-10-14` folds its transcripts and file-history into staging.
+The mirror is `<archive volume>/secure/archive/`, the same tree minus `index/`, the log, and the locks.
+A one-off raw copy of `~/.claude` taken by hand can sit beside these directories; `bin/fm-archive.sh --import <dir>` folds its transcripts and file-history into staging.
 
 Transcripts are stored raw, not compressed, so the Stop hook can append to them and a search can read them with no decompression step.
 New files are copy-on-write clones on APFS, so a file costs almost no extra disk until its original changes.
@@ -63,33 +63,41 @@ The captain runs the installer, `status` shows what launchd and the last run rec
 ## The transcript hook
 
 Register the hook once at user level so every Claude session on the machine is covered.
-Merge these entries into the existing `hooks` object of `~/.claude/settings.json`, adding to any `Stop`, `SubagentStop`, or `SessionEnd` array already there rather than replacing it, and use the absolute path of the primary checkout:
+Merge these entries into the existing `hooks` object of `~/.claude/settings.json`, adding to any `Stop`, `SubagentStop`, or `SessionEnd` array already there rather than replacing it, and use the absolute path of the primary checkout in place of `<checkout>`:
 
 ```json
 {
   "hooks": {
     "Stop": [
-      { "hooks": [ { "type": "command", "command": "/Users/jacksonwong/Code/github/firstmate/bin/fm-transcript-archive-hook.sh", "timeout": 10 } ] }
+      { "hooks": [ { "type": "command", "command": "<checkout>/bin/fm-transcript-archive-hook.sh", "timeout": 10 } ] }
     ],
     "SubagentStop": [
-      { "hooks": [ { "type": "command", "command": "/Users/jacksonwong/Code/github/firstmate/bin/fm-transcript-archive-hook.sh", "timeout": 10 } ] }
+      { "hooks": [ { "type": "command", "command": "<checkout>/bin/fm-transcript-archive-hook.sh", "timeout": 10 } ] }
     ],
     "SessionEnd": [
-      { "hooks": [ { "type": "command", "command": "/Users/jacksonwong/Code/github/firstmate/bin/fm-transcript-archive-hook.sh", "timeout": 10 } ] }
+      { "hooks": [ { "type": "command", "command": "<checkout>/bin/fm-transcript-archive-hook.sh", "timeout": 10 } ] }
     ]
   }
 }
 ```
 
 The hook reads the event JSON on stdin (`transcript_path`, and `agent_transcript_path` on a subagent stop), prints nothing, and always exits 0, so it can never block or fail a session.
+The event JSON is untrusted input, so the hook copies only a path that passes every check: absolute, no `.` or `..` component, ending in `.jsonl`, a regular file and not a symlink, and resolving (symlinks in its directory included) to a place under `~/.claude/projects/`.
+Anything else is skipped and the log records only the reason, never the path or the content.
 Set `FM_ARCHIVE_HOOK=off` in the environment to disable it without editing settings.
 With the hook registered the nightly job is a safety net, not the only capture.
+Uninstalling the nightly job does not remove the hook; delete its three entries from `~/.claude/settings.json` by hand.
 
 ## The teardown ledger
 
 `bin/fm-teardown.sh` calls `bin/fm-ledger.sh` after the landed-work checks have passed and before any destructive step, for ship and scout tasks but not secondmates.
 It writes `data/<id>/ledger.json` (task, kind, project, harness, model, effort, mode, PR, worktree, start and end, the full status history, and each Claude session found for the worktree with token and cost totals counted once per API message), `scrollback.txt` (the pane's last 2000 lines), and `scratch/` (`git status --porcelain`, a git bundle of commits no remote has, `git diff HEAD`, and a size-capped diff of untracked text files).
 A forced teardown that discards work therefore leaves that work recoverable from `scratch/`.
+
+The task folder is writable by the worker, so the ledger treats it as untrusted.
+It refuses when `data/<id>` or `scratch/` is a symlink, recreates `scratch/` fresh and checks that it is a real directory owned by the user, and writes every output to a new temporary file inside it before moving it into place, so a planted link can neither redirect a write nor have its target overwritten.
+Git runs against the worker's copy with the file-system monitor, hooks, external diff drivers, and text conversion switched off.
+The snapshot never keeps secrets: files named `.env*`, `*.pem`, `*.key`, `*.p12`, `id_*`, `*credential*`, `*secret*`, or `*.keychain*` are left out by name, the same credential patterns the monthly scan uses are run over what remains, and a matching file is dropped, with only its name and the pattern name recorded.
 Steer history is not recorded anywhere today, and the ledger says so rather than leaving it blank.
 
 The ledger is fail-soft by construction: it runs as a separate bounded process, every step is best effort, and a failure is a warning that never changes whether teardown proceeds.
@@ -116,8 +124,9 @@ The archive is private to the captain's machine and the encrypted card volume.
 It is never synced, uploaded, attached, shared with a collaborator, or placed in a cloud-synced folder or in git, and nothing in this repo sends it anywhere.
 
 - Transcripts and screenshots contain real names, internal data, and possibly credentials, and they are stored unredacted, because redaction destroys forensic value and misses secrets.
-- The mirror target is `FMVAULT`, the captain-only encrypted volume, and staging sits on the FileVault-encrypted internal disk; files are created mode 0600 and the root mode 0700.
-- Transcripts may go to the card by the captain's decision of 2026-10-14; that decision does not cover Polaris DB dumps, which stay on the internal disk and are never archived.
+- The mirror target is the encrypted volume named in private configuration (`FM_ARCHIVE_VAULT_VOLUME` or `~/.config/firstmate/archive-volume`; there is no built-in name), and staging sits on the encrypted internal disk; files are created mode 0600 and the root mode 0700, which the installer and the archiver both enforce, so an archive made earlier with looser permissions is tightened on the next run.
+- Database dumps stay on the internal disk and are never archived.
+- Exclude the archive from any backup, or confirm the backup is encrypted, because a backup that copies it unencrypted defeats the rest of this section.
 - Once a month the archiver scans the archive for credential patterns and writes `reports/secret-scan-YYYY-MM.txt`, which lists the pattern name, the match count, and the file, and never the match.
   The scan is a report only; acting on a hit, such as rotating a credential, is the captain's call.
 - Any outward use of archived material needs a separately produced, redacted extract.
@@ -127,7 +136,7 @@ It is never synced, uploaded, attached, shared with a collaborator, or placed in
 | Failure | What the scripts do |
 | --- | --- |
 | Card absent, locked, or the wrong volume | The mount check needs the pinned volume mounted, carrying the UUID in `~/.config/firstmate/card-volumes`, and passing a write test; otherwise the run prints `card absent, staging only`, exits 0, and writes nothing under any `/Volumes` path |
-| Card mounted read-only (MDM) | The write test fails, the run stays in staging and names the reason in the log |
+| Card mounted read-only | The write test fails, the run stays in staging and names the reason in the log |
 | Card nearly full (`FM_ARCHIVE_CARD_MIN_FREE_GIB`, default 2) | Text mirrors first, so file-history and screenshots are skipped before the small, high-value set stops syncing |
 | Card write fails or the card is pulled mid-run | The mirror stops, reports `card write failed`, leaves staging intact, and removes the partial file; the next run resumes |
 | Card dies | Staging holds a complete copy; restore by copying staging to a new volume and running the archiver |
@@ -136,7 +145,8 @@ It is never synced, uploaded, attached, shared with a collaborator, or placed in
 | Source rewritten (longer, but no longer starts with the archived bytes) | The archived copy is kept, the new source is saved as a single `<name>.rewritten-<UTC time>` copy kept current by appending, and the log and `rewritten=` count name it |
 | Hook and archiver run together | A per-file lock serialises them; the hook waits two seconds then skips, and the next event or run catches up; a lock whose process is dead, or that never got a pid and is older than `FM_ARCHIVE_LOCK_STALE_SECS` (30), is stolen under a guard so two waiters cannot remove a freshly taken lock |
 
-The card mount check is `fm_card_ok` in `bin/fm-archive-lib.sh`, the scripted form of the check in the SD-card storage plan.
+The card mount check is `fm_card_ok` in `bin/fm-archive-lib.sh`.
+With no archive volume configured the run stays in staging and says so.
 
 ## Environment reference
 
@@ -144,7 +154,8 @@ The card mount check is `fm_card_ok` in `bin/fm-archive-lib.sh`, the scripted fo
 | --- | --- | --- |
 | `FM_ARCHIVE_ROOT` | `~/Code/firstmate-archive` | Staging root |
 | `FM_ARCHIVE_CLAUDE_DIR` | `~/.claude` | Where transcripts and file-history are read from |
-| `FM_ARCHIVE_VAULT_VOLUME` | `FMVAULT` | Card volume the mirror targets |
+| `FM_ARCHIVE_VAULT_VOLUME` | none | Card volume the mirror targets; when unset, the first word of `FM_ARCHIVE_VOLUME_FILE` |
+| `FM_ARCHIVE_VOLUME_FILE` | `~/.config/firstmate/archive-volume` | Private file holding that volume name |
 | `FM_ARCHIVE_MIRROR_SUBDIR` | `secure/archive` | Directory on the volume |
 | `FM_ARCHIVE_MIN_FREE_GIB` | `15` | Internal free-space floor |
 | `FM_ARCHIVE_FLOOR_CHECK_EVERY` | `100` | Files staged between free-space rechecks |
