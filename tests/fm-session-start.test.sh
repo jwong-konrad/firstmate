@@ -5,6 +5,8 @@
 #
 # Coverage:
 #   - absent-file markers vs empty-but-present files in the context digest
+#   - a topic MAP.md printed in place of the flat learnings/captain files, and
+#     the flat file when no MAP exists
 #   - the lock-refusal read-only path: banner leads, every mutating step is
 #     skipped (including bootstrap's five mutating sweeps, verified by their
 #     ABSENCE), the digest still completes
@@ -326,6 +328,64 @@ EOF
   assert_contains "$cap_section" "(present, empty)" "empty-but-present captain.md was not distinguished from ABSENT"
 
   pass "context digest distinguishes ABSENT, empty-but-present, and populated files"
+}
+
+# --- context digest: topic MAP preferred over the flat file ------------------
+
+test_context_digest_prefers_memory_map() {
+  local rec root home fakebin out
+  rec=$(new_world context-map)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  mkdir -p "$home/data/learnings" "$home/data/captain"
+  printf '%s\n' '- FLAT-LEARNINGS-MARKER' > "$home/data/learnings.md"
+  printf '%s\n' '- FLAT-CAPTAIN-MARKER' > "$home/data/captain.md"
+  printf '%s\n' '- [tools](tools.md) - read when: LEARN-MAP-MARKER' > "$home/data/learnings/MAP.md"
+  printf '%s\n' '- TOPIC-BODY-LEARN-MARKER' > "$home/data/learnings/tools.md"
+  printf '%s\n' '- [prefs](prefs.md) - read when: CAPT-MAP-MARKER' > "$home/data/captain/MAP.md"
+  printf '%s\n' '- TOPIC-BODY-CAPT-MARKER' > "$home/data/captain/prefs.md"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "data/learnings/MAP.md" "digest did not label the learnings map"
+  assert_contains "$out" "LEARN-MAP-MARKER" "digest did not print the learnings map"
+  assert_contains "$out" "data/captain/MAP.md" "digest did not label the captain map"
+  assert_contains "$out" "CAPT-MAP-MARKER" "digest did not print the captain map"
+  assert_not_contains "$out" "FLAT-LEARNINGS-MARKER" "digest printed the flat learnings file beside its map"
+  assert_not_contains "$out" "FLAT-CAPTAIN-MARKER" "digest printed the flat captain file beside its map"
+  assert_not_contains "$out" "TOPIC-BODY-LEARN-MARKER" "digest printed a learnings topic file"
+  assert_not_contains "$out" "TOPIC-BODY-CAPT-MARKER" "digest printed a captain topic file"
+
+  pass "session start prints MAP.md in place of the flat files and never the topic files"
+}
+
+test_context_digest_flat_file_without_map() {
+  local rec root home fakebin out
+  rec=$(new_world context-flat)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  # A directory without MAP.md must not count as a map.
+  mkdir -p "$home/data/learnings"
+  printf '%s\n' '- orphan topic body' > "$home/data/learnings/tools.md"
+  printf '%s\n' '- FLAT-LEARNINGS-MARKER' > "$home/data/learnings.md"
+  printf '%s\n' '- FLAT-CAPTAIN-MARKER' > "$home/data/captain.md"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "FLAT-LEARNINGS-MARKER" "digest did not fall back to the flat learnings file"
+  assert_contains "$out" "FLAT-CAPTAIN-MARKER" "digest did not fall back to the flat captain file"
+  assert_not_contains "$out" "orphan topic body" "digest printed a topic file that no MAP lists"
+  assert_not_contains "$out" "(topic map; read a topic file" "digest labeled a map that does not exist"
+
+  pass "session start falls back to the flat files when no MAP exists"
 }
 
 # --- lock refusal: read-only path --------------------------------------------
@@ -904,6 +964,8 @@ EOF
 }
 
 run_case test_context_digest_absent_empty_present
+run_case test_context_digest_prefers_memory_map
+run_case test_context_digest_flat_file_without_map
 run_case test_lock_refusal_read_only_path
 run_case test_output_ordering_diagnostics_lead
 run_case test_herdr_backend_diagnostics_follow_real_session_start

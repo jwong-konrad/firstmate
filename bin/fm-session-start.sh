@@ -5,8 +5,8 @@
 # producing ONE ordered digest, so a session starts in one or two turns
 # instead of the six-plus separate reads the old docs required: run
 # fm-bootstrap.sh, then separately read data/projects.md, data/secondmates.md,
-# data/captain.md, data/captain-shared.md, data/learnings.md, then run
-# fm-lock.sh, fm-wake-drain.sh, then read data/backlog.md, every state/*.meta,
+# data/captain.md (or its MAP), data/captain-shared.md, data/learnings.md (or
+# its MAP), then run fm-lock.sh, fm-wake-drain.sh, then read data/backlog.md, every state/*.meta,
 # and every state/*.status.
 # Every one of those reads is UNCONDITIONAL at every session start, so they
 # belong in a script, not in N agent turns.
@@ -35,7 +35,12 @@
 #                       when locked.
 #   4. context digest - data/projects.md, data/secondmates.md, data/captain.md,
 #                       data/captain-shared.md, data/learnings.md: read-only,
-#                       always safe, always runs.
+#                       always safe, always runs. Where data/captain/MAP.md or
+#                       data/learnings/MAP.md exists, that MAP is printed in
+#                       place of the flat file and the topic files beside it
+#                       are NOT printed (read one only when its trigger
+#                       applies; docs/memory-maps.md owns the format). A home
+#                       with no MAP prints the flat file exactly as before.
 #   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
 #                       state/.afk, and a cheap per-task endpoint read that
@@ -134,6 +139,20 @@ print_file_or_absent() {
     fi
   else
     printf 'ABSENT\n'
+  fi
+}
+
+# print_memory_or_absent <map-path> <flat-path> <flat-label> <map-label>: when
+# the topic MAP exists print it (with its own label) in place of the flat file;
+# otherwise behave exactly like print_file_or_absent on the flat file, so a home
+# that has not migrated to mapping files is unchanged and ABSENT keeps its
+# meaning (neither the MAP nor the flat file exists).
+print_memory_or_absent() {
+  local map=$1 flat=$2 flat_label=$3 map_label=$4
+  if [ -f "$map" ]; then
+    print_file_or_absent "$map" "$map_label"
+  else
+    print_file_or_absent "$flat" "$flat_label"
   fi
 }
 
@@ -332,9 +351,11 @@ fi
 section "CONTEXT"
 print_file_or_absent "$DATA/projects.md" "data/projects.md"
 print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
-print_file_or_absent "$DATA/captain.md" "data/captain.md"
+print_memory_or_absent "$DATA/captain/MAP.md" "$DATA/captain.md" "data/captain.md" \
+  "data/captain/MAP.md (topic map; read a topic file in data/captain/ only when its line applies)"
 print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
-print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+print_memory_or_absent "$DATA/learnings/MAP.md" "$DATA/learnings.md" "data/learnings.md" \
+  "data/learnings/MAP.md (topic map; read a topic file in data/learnings/ only when its line applies)"
 
 # --- 5. fleet-state digest ---------------------------------------------
 section "FLEET STATE"
@@ -437,8 +458,11 @@ fi
 cat <<'EOF'
 The digest above is complete for this session start. Do NOT re-read
 data/projects.md, data/secondmates.md, data/captain.md,
-data/captain-shared.md, data/learnings.md,
+data/captain-shared.md, data/learnings.md (or the data/captain/MAP.md and
+data/learnings/MAP.md that replaced them),
 or state/*.meta now - they were just printed in full.
+A MAP is only an index: open a topic file beside it when its read-when line
+applies.
 Do NOT bulk-read data/backlog.md now either: the compact identity/metadata
 listing was just printed with a pointer for targeted full-body follow-up.
 Do NOT bulk-read state/*.status now either: their bounded tails were just
