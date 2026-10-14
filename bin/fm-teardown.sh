@@ -57,6 +57,10 @@
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
 #
+# Before any destructive step (and only after the checks above have passed), it
+# writes data/<id>/ledger.json, the pane scrollback tail, and a scratch snapshot
+# through bin/fm-ledger.sh; that capture is strictly fail-soft (docs/archive.md).
+#
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
 # non-linked worktree, .git/index.lock) that makes `treehouse return --force` fail
@@ -1123,6 +1127,15 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
       exit 1
     fi
   fi
+fi
+
+# Write the per-task ledger, pane scrollback tail, and scratch snapshot before any
+# destructive step (docs/archive.md). Strictly fail-soft: a ledger problem is a warning
+# and never changes whether teardown proceeds; it runs only after the landed-work checks
+# above have passed, so it can never weaken them.
+if [ "$KIND" != secondmate ] && [ "${FM_NO_LEDGER:-0}" != 1 ] && [ -x "$SCRIPT_DIR/fm-ledger.sh" ]; then
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    "$SCRIPT_DIR/fm-ledger.sh" "$ID" || echo "teardown: warning: ledger capture failed for $ID (continuing)" >&2
 fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.

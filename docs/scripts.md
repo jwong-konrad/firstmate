@@ -33,6 +33,12 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-turnend-guard.sh`    | Shared primary turn-end guard predicate so no turn ends blind (docs/turnend-guard.md) |
 | `fm-captain-idle-handoff.sh` | Capture a handoff and remind the captain to clear after a long quiet stretch or a session close to auto-compacting (docs/captain-idle-handoff.md) |
 | `fm-compact-at.sh` | Send `/compact` to a matching claude worker at a turn end once its context fill passes `config/compact-at` (docs/configuration.md) |
+| `fm-archive.sh`          | Incrementally stage transcripts, file-history, reports, ledgers, handoffs, and screenshots into the cold archive, write monthly manifests, and mirror to the pinned card volume when it is mounted (docs/archive.md) |
+| `fm-archive-lib.sh`      | Shared archive primitives: staging root, pinned-card mount check, free-space floor, per-file locks, append-only transcript sync |
+| `fm-archive-install.sh`  | Install, remove, or inspect the nightly archive LaunchAgent (docs/archive.md); the captain runs it |
+| `fm-transcript-archive-hook.sh` | Claude Code Stop, SubagentStop, and SessionEnd hook that appends new transcript lines to the archive; silent, always exits 0 (docs/archive.md) |
+| `fm-ledger.sh`           | Write a task's teardown ledger, pane scrollback tail, and scratch snapshot before teardown deletes anything; fail-soft (docs/archive.md) |
+| `fm-recall.sh`           | Build and query the SQLite FTS5 index over reports, handoffs, decisions, learnings, and ledgers, with a raw transcript search (docs/archive.md) |
 | `fm-context-fill-lib.sh` | Shared context-fill, window, and compaction-point reader for the auto-handoff's context-fill trigger (docs/captain-idle-handoff.md) |
 | `fm-banner-lib.sh`       | Shared attention-banner shape used by the guards, the read-only notice, and the idle reminder |
 | `fm-turnend-guard-grok.sh` | Grok Stop-hook adapter for the primary turn-end guard                              |
