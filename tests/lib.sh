@@ -35,6 +35,11 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Keep fm-teardown.sh from writing a task ledger into a real or shared data/ dir
+# during unrelated suites; tests/fm-teardown.test.sh and tests/fm-archive.test.sh
+# opt back in with FM_NO_LEDGER=0 and an isolated FM_DATA_OVERRIDE.
+export FM_NO_LEDGER=1
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

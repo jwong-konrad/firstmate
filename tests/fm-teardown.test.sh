@@ -1605,6 +1605,183 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
   pass "herdr projection teardown retains the stale journal and attempts no workspace cleanup when exact-pane close is unconfirmed"
 }
 
+# --- teardown ledger (bin/fm-ledger.sh, docs/archive.md) -----------------------
+#
+# The suite exports FM_NO_LEDGER=1 through tests/lib.sh so no other test writes a
+# ledger; these cases opt back in with an isolated data dir.
+#   (ac) successful teardown writes data/<id>/ledger.json and the scrollback tail
+#   (ac2) forced teardown snapshots local commits, status, and untracked text first
+#   (ad) refused teardown writes nothing and still refuses (landed-work check unchanged)
+#   (ae) ledger cannot write (data path is a file)          -> warning, teardown completes
+#   (af) ledger exits non-zero                              -> warning, teardown completes
+#   (ag) ledger run stopped by its own time bound           -> warning, teardown completes
+
+run_teardown_ledger() {
+  local case_dir=$1; shift
+  FM_NO_LEDGER=0 \
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_DATA_OVERRIDE="${LEDGER_DATA_OVERRIDE:-$case_dir/data}" \
+  FM_ARCHIVE_CLAUDE_DIR="$case_dir/claude" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "${TEARDOWN_UNDER_TEST:-$TEARDOWN}" task-x1 "$@"
+}
+
+fake_pane_tmux() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = capture-pane ]; then
+  printf '%s\n' "pane line one" "pane line two"
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+}
+
+test_teardown_writes_ledger_and_scrollback_before_cleanup() {
+  local case_dir rc led
+  case_dir=$(make_case ledger-ok)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'model=opus' 'effort=low' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  printf '%s\n' 'working: started' 'done: PR https://github.com/example/repo/pull/7 checks green' > "$case_dir/state/task-x1.status"
+  fake_pane_tmux "$case_dir"
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  set +e
+  run_teardown_ledger "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "ledger-ok: teardown should succeed"
+  led="$case_dir/data/task-x1/ledger.json"
+  assert_present "$led" "ledger-ok: ledger.json was not written"
+  [ "$(jq -r .schema "$led")" = fm-ledger.v1 ] || fail "ledger-ok: wrong schema"
+  [ "$(jq -r .task "$led")" = task-x1 ] || fail "ledger-ok: wrong task id"
+  [ "$(jq -r .model "$led")" = opus ] || fail "ledger-ok: model not recorded"
+  [ "$(jq -r .effort "$led")" = low ] || fail "ledger-ok: effort not recorded"
+  [ "$(jq -r .pr "$led")" = https://github.com/example/repo/pull/7 ] || fail "ledger-ok: pr not recorded"
+  [ "$(jq -r '.status_history | length' "$led")" = 2 ] || fail "ledger-ok: status history not recorded"
+  assert_grep "pane line two" "$case_dir/data/task-x1/scrollback.txt" "ledger-ok: scrollback tail missing"
+  grep -F 'teardown task-x1 complete' "$case_dir/stdout" >/dev/null || fail "ledger-ok: teardown did not complete"
+  assert_absent "$case_dir/state/task-x1.meta" "ledger-ok: teardown did not clear state after writing the ledger"
+  pass "teardown writes the ledger and scrollback tail before cleanup"
+}
+
+test_forced_teardown_snapshots_scratch_work_before_discarding_it() {
+  local case_dir rc scratch
+  case_dir=$(make_case ledger-scratch)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" local-only.txt "never pushed" "local only commit"
+  printf '%s\n' 'scratch note' > "$case_dir/wt/untracked-note.txt"
+
+  set +e
+  run_teardown_ledger "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "ledger-scratch: forced teardown should succeed"
+  scratch="$case_dir/data/task-x1/scratch"
+  assert_grep "untracked-note.txt" "$scratch/status.txt" "ledger-scratch: git status snapshot missing"
+  assert_grep "scratch note" "$scratch/untracked.diff" "ledger-scratch: untracked diff missing"
+  assert_grep "local only commit" "$scratch/local-commits.txt" "ledger-scratch: local commit list missing"
+  git -C "$case_dir/project" bundle verify "$scratch/local-commits.bundle" >/dev/null 2>&1 || fail "ledger-scratch: the bundle of local-only commits does not verify"
+  pass "forced teardown snapshots local commits, status, and untracked text before discarding them"
+}
+
+test_teardown_ledger_never_weakens_landed_work_refusal() {
+  local case_dir rc
+  case_dir=$(make_case ledger-refuse)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "unpushed work"
+
+  set +e
+  run_teardown_ledger "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "ledger-refuse: unlanded work must still be refused with the ledger enabled"
+  grep -q REFUSED "$case_dir/stderr" || fail "ledger-refuse: no REFUSED line"
+  assert_absent "$case_dir/data/task-x1" "ledger-refuse: a refused teardown must write no ledger"
+  assert_present "$case_dir/state/task-x1.meta" "ledger-refuse: refused teardown must keep its state"
+  [ -f "$case_dir/wt/feature.txt" ] || fail "ledger-refuse: the worktree was disturbed"
+  pass "a refused teardown still refuses and writes nothing with the ledger enabled"
+}
+
+test_teardown_continues_when_ledger_cannot_write() {
+  local case_dir rc
+  case_dir=$(make_case ledger-unwritable)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  : > "$case_dir/data-is-a-file"
+
+  set +e
+  LEDGER_DATA_OVERRIDE="$case_dir/data-is-a-file" run_teardown_ledger "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "ledger-unwritable: a ledger failure must not change teardown's outcome"
+  grep -F 'teardown task-x1 complete' "$case_dir/stdout" >/dev/null || fail "ledger-unwritable: teardown did not complete"
+  assert_absent "$case_dir/state/task-x1.meta" "ledger-unwritable: teardown did not clear state"
+  pass "teardown completes when the ledger cannot be written"
+}
+
+test_teardown_continues_when_ledger_exits_nonzero() {
+  local case_dir rc
+  case_dir=$(make_case ledger-crash)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  cp -R "$ROOT/bin" "$case_dir/bin"
+  printf '%s\n' '#!/bin/sh' 'echo boom >&2' 'exit 7' > "$case_dir/bin/fm-ledger.sh"
+  chmod +x "$case_dir/bin/fm-ledger.sh"
+
+  set +e
+  TEARDOWN_UNDER_TEST="$case_dir/bin/fm-teardown.sh" run_teardown_ledger "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "ledger-crash: a failing ledger must not change teardown's outcome"
+  grep -F 'ledger capture failed' "$case_dir/stderr" >/dev/null || fail "ledger-crash: no warning about the ledger failure"
+  grep -F 'teardown task-x1 complete' "$case_dir/stdout" >/dev/null || fail "ledger-crash: teardown did not complete"
+  pass "teardown completes with a warning when the ledger exits non-zero"
+}
+
+test_teardown_continues_when_ledger_times_out() {
+  local case_dir rc
+  case_dir=$(make_case ledger-timeout)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  # A git that hangs only inside the ledger (it marks its inner run), never for teardown's own checks.
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "${FM_LEDGER_INNER:-}" = 1 ]; then
+  sleep 30
+fi
+exec "$REAL_GIT_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+
+  set +e
+  FM_LEDGER_TOTAL_TIMEOUT=2 FM_LEDGER_TIMEOUT=30 run_teardown_ledger "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "ledger-timeout: a stuck ledger must not hold up teardown"
+  grep -F 'stopped early' "$case_dir/stderr" >/dev/null || fail "ledger-timeout: no warning that the ledger stopped early"
+  grep -F 'teardown task-x1 complete' "$case_dir/stdout" >/dev/null || fail "ledger-timeout: teardown did not complete"
+  pass "teardown completes when the ledger run is stopped by its own time bound"
+}
+
+
 run_case test_local_only_fork_remote_allows
 run_case test_teardown_prompts_tasks_axi_done_when_compatible
 run_case test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -1642,4 +1819,10 @@ run_case test_persistent_bare_reset_race_exhausts_retries_and_refuses_loudly
 run_case test_real_reset_failure_with_diagnostic_text_aborts_immediately
 run_case test_empty_retry_wait_uses_default_without_aborting
 run_case test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
+run_case test_teardown_writes_ledger_and_scrollback_before_cleanup
+run_case test_forced_teardown_snapshots_scratch_work_before_discarding_it
+run_case test_teardown_ledger_never_weakens_landed_work_refusal
+run_case test_teardown_continues_when_ledger_cannot_write
+run_case test_teardown_continues_when_ledger_exits_nonzero
+run_case test_teardown_continues_when_ledger_times_out
 fm_case_summary "fm-teardown"

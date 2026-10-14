@@ -125,6 +125,7 @@ state/               volatile runtime signals; gitignored
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
 .no-mistakes/        local validation state and evidence; gitignored
+~/Code/firstmate-archive/  cold archive and agent-activity capture (transcripts, ledgers, reports, screenshots) outside the repo and never synced; docs/archive.md owns its layout, privacy, and failure modes
 ```
 
 A `state/<id>.status` line is a wake event, not current-state truth; `bin/fm-crew-state.sh` owns current-state reconciliation.
