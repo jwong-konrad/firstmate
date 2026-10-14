@@ -251,7 +251,7 @@ HITS="$WORK/hits" # lineno<TAB>name<TAB>match
 : > "$HITS"
 while IFS="$(printf '\t')" read -r name flags re; do
   rc=0
-  grep -n -o "$flags" -e "$re" "$TEXT" > "$WORK/matches" || rc=$?
+  grep -a -n -o "$flags" -e "$re" "$TEXT" > "$WORK/matches" || rc=$?
   [ "$rc" -le 1 ] || die "grep failed for pattern '$name' (exit $rc)"
   awk -v name="$name" '{ i = index($0, ":"); print substr($0, 1, i - 1) "\t" name "\t" substr($0, i + 1) }' \
     "$WORK/matches" >> "$HITS"

@@ -55,6 +55,14 @@ EOF
   pass "every generic pattern class is reported by its name"
 }
 
+test_invalid_byte_does_not_hide_findings() {
+  local secret="gh""p_$TOKEN_TAIL"
+  OUT=$(printf 'bad byte \377 here\ntoken %s\n' "$secret" | FM_HOME="$TMP_ROOT/nohome" "$SCAN" --stdin 2>&1); RC=$?
+  expect_code 1 "$RC" "an invalid byte does not turn the scan into a pass"
+  assert_contains "$OUT" "stdin:2: github-token: " "the finding after the invalid byte is still reported"
+  pass "a stray invalid byte cannot hide a finding"
+}
+
 test_findings_are_masked() {
   local secret="gh""p_$TOKEN_TAIL"
   scan_stdin "token $secret" --label "pull request"
@@ -217,6 +225,7 @@ test_repository_is_clean() {
 
 run_case test_each_pattern_class_is_found
 run_case test_findings_are_masked
+run_case test_invalid_byte_does_not_hide_findings
 run_case test_clean_and_placeholder_input_passes
 run_case test_tracked_scan_and_allowlist
 run_case test_allowlist_value_regex_is_narrow
