@@ -749,6 +749,44 @@ test_ledger_drops_files_matching_secret_patterns() {
   pass "files and diffs matching a credential pattern are dropped and only the name and pattern are recorded"
 }
 
+test_ledger_drops_a_scrollback_holding_a_secret() {
+  local e led token
+  e=$(make_ledger_env ledger-secret-scrollback)
+  token="AKIA$(printf 'ABCDEFGHIJKLMNOP')"
+  mkdir -p "$e/data/t1"
+  printf '%s\n' "old pane" > "$e/data/t1/scrollback.txt"
+  cat > "$e/fakebin/tmux" <<SH
+#!/bin/sh
+if [ "\$1" = capture-pane ]; then echo "pane 1"; echo "export KEY=$token"; fi
+SH
+  run_ledger "$e" >/dev/null 2>&1 || fail "ledger-secret-scrollback: ledger failed"
+  led="$e/data/t1/ledger.json"
+  assert_absent "$e/data/t1/scrollback.txt" "ledger-secret-scrollback: a scrollback holding a credential was kept"
+  if grep -rF "$token" "$e/data/t1" >/dev/null 2>&1; then fail "ledger-secret-scrollback: the credential reached data/<id>"; fi
+  assert_grep "scrollback.txt" "$led" "ledger-secret-scrollback: the dropped file was not named"
+  assert_grep "aws-access-key" "$led" "ledger-secret-scrollback: the pattern name was not recorded"
+  pass "a scrollback matching a credential pattern is dropped and only the name and pattern are recorded"
+}
+
+test_lock_acquire_gives_up_when_a_stale_lock_cannot_be_moved() {
+  local e rc
+  e="$TMP_ROOT/lock-stuck"
+  mkdir -p "$e/lock"
+  printf '%s\n' 999999 > "$e/lock/pid"
+  rc=0
+  (
+    . "$ROOT/bin/fm-archive-lib.sh"
+    mv() { return 1; }
+    fm_archive_lock_acquire "$e/lock" 3
+  ) >/dev/null 2>&1 &
+  local pid=$! n=0
+  while kill -0 "$pid" 2>/dev/null && [ "$n" -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
+  if kill -0 "$pid" 2>/dev/null; then kill "$pid" 2>/dev/null; fail "lock-stuck: the acquire loop spun forever"; fi
+  wait "$pid" || rc=$?
+  [ "$rc" -eq 1 ] || fail "lock-stuck: expected a clean give-up (1), got $rc"
+  pass "a stale lock that cannot be moved makes the acquire give up instead of spinning"
+}
+
 test_ledger_drops_a_local_commit_bundle_holding_a_secret() {
   local e token
   e=$(make_ledger_env ledger-secret-commit)
@@ -964,6 +1002,8 @@ run_case test_ledger_refuses_a_symlinked_task_folder
 run_case test_ledger_replaces_stale_scratch_contents
 run_case test_ledger_excludes_secret_named_files
 run_case test_ledger_drops_files_matching_secret_patterns
+run_case test_ledger_drops_a_scrollback_holding_a_secret
+run_case test_lock_acquire_gives_up_when_a_stale_lock_cannot_be_moved
 run_case test_ledger_drops_a_local_commit_bundle_holding_a_secret
 run_case test_ledger_neutralises_worker_controlled_git_config
 run_case test_archive_without_a_configured_volume_stays_in_staging
