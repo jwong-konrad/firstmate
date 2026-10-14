@@ -136,7 +136,7 @@ fi
 
 SCROLLBACK_STATUS=unavailable
 capture_scrollback() {
-  local out="$OUT/scrollback.txt" tmp
+  local out="$OUT/scrollback.txt" tmp hit
   tmp=$(mktemp "$OUT/.tmp.XXXXXX") || { warn "cannot create a temp file for the scrollback"; return 0; }
   export FM_HOME
   # shellcheck disable=SC2016
@@ -148,7 +148,12 @@ capture_scrollback() {
     fm_backend_capture "$b" "$t" "$4" "$l"' _ \
     "$SCRIPT_DIR/fm-backend.sh" "$ID" "$STATE" "$SCROLLBACK_LINES" 2>/dev/null \
     | tail -n "$SCROLLBACK_LINES" > "$tmp"
-  if [ -s "$tmp" ] && mv -f "$tmp" "$out"; then
+  if [ -s "$tmp" ] && hit=$(secret_pattern_hit "$tmp"); then
+    rm -f "$tmp" "$out"
+    SCROLLBACK_STATUS=dropped-secret
+    SCRATCH_NOTES+=("scrollback.txt dropped: matches the $hit pattern")
+    warn "scrollback.txt dropped: matches the $hit pattern"
+  elif [ -s "$tmp" ] && mv -f "$tmp" "$out"; then
     SCROLLBACK_STATUS=captured
   else
     rm -f "$tmp"

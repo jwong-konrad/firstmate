@@ -212,14 +212,15 @@ fm_archive_lock_acquire() {
       if mkdir "$guard" 2>/dev/null; then
         if fm_archive_lock_stale "$dir" && mv "$dir" "$dir.stale.$$" 2>/dev/null; then
           rm -rf "$dir.stale.$$"
+          rmdir "$guard" 2>/dev/null || true
+          continue
         fi
         rmdir "$guard" 2>/dev/null || true
-        continue
-      fi
-      age=$(fm_archive_mtime_age "$guard") || age=0
-      if [ "$age" -ge "${FM_ARCHIVE_LOCK_STALE_SECS:-30}" ]; then
-        rmdir "$guard" 2>/dev/null || true
-        continue
+      else
+        age=$(fm_archive_mtime_age "$guard") || age=0
+        if [ "$age" -ge "${FM_ARCHIVE_LOCK_STALE_SECS:-30}" ]; then
+          rmdir "$guard" 2>/dev/null && continue
+        fi
       fi
     fi
     [ "$tries" -gt 0 ] || return 1
