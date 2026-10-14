@@ -89,6 +89,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   captain.md         this home's domain-local captain preferences and working style; LOCAL, gitignored, canonical even if harness memory mirrors it, and updated with inspect-then-update
   captain-shared.md  main-authoritative shared captain preferences propagated read-only to secondmate homes; LOCAL, gitignored, owned by secondmate-provisioning
   learnings.md       fleet-local operational facts and gotchas; LOCAL, gitignored; dated, evidence-backed, curated, and updated with inspect-then-update - rewrite and prune rather than append forever, the same contract as captain.md; created lazily, absent until this home has a learning to store
+  learnings/ captain/  optional mapping-file form of learnings.md and captain.md: MAP.md (printed at session start instead of the flat file) plus topic files read on demand; format and curation in docs/memory-maps.md, mechanics in bin/fm-memory-map.sh
   projects.md        thin fleet navigation registry; firstmate-private, parsed by fm-project-mode.sh (section 6)
   secondmates.md      secondmate routing table; firstmate-private, maintained by fm-home-seed.sh (section 6)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
@@ -127,6 +128,7 @@ state/               volatile runtime signals; gitignored
 ```
 
 A `state/<id>.status` line is a wake event, not current-state truth; `bin/fm-crew-state.sh` owns current-state reconciliation.
+Where `data/captain/MAP.md` or `data/learnings/MAP.md` exists it replaces the flat file in that role (section 6 and `docs/memory-maps.md`).
 Treat `data/captain.md` as the domain-local record of captain preferences, optional `data/captain-shared.md` as the main-authoritative shared captain-preference file for secondmate inheritance, and `data/learnings.md` as curated home-local knowledge, regardless of harness memory.
 
 ## 3. Session start (run once at every session start)
@@ -151,7 +153,7 @@ A lock-refused session must not spawn, steer, merge, drain the wake queue, repai
    The secondmate liveness sweep deterministically guarantees every registered secondmate is actually running: it probes each live secondmate's endpoint for a real agent process (not just pane presence), respawns only on a confident dead reading, and reports only skipped or failed guarantees as `SECONDMATE_LIVENESS:` lines (`bin/fm-bootstrap.sh`; `bin/fm-backend.sh`'s `fm_backend_agent_alive`).
 3. **Wake queue** - when locked, drains the durable wake queue and prints the raw records prominently as this turn's first work queue; a bounded, clearly labeled historical status-event annotation may follow a valid `signal` record but never replaces it or current-state reconciliation, and a lapsed watcher chain still surfaces here via the same guard alarm.
    When the lock could not be acquired, the queue is left untouched because another session owns it, and the guard's tangle/watcher-liveness alarms still print in read-only advisory mode without drain, supervision repair, or checkout repair commands.
-4. **Context digest** - the full contents of `data/projects.md`, `data/secondmates.md`, `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, each clearly delimited.
+4. **Context digest** - the full contents of `data/projects.md`, `data/secondmates.md`, `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, each clearly delimited; a `data/captain/MAP.md` or `data/learnings/MAP.md` is printed instead of its flat file, and its topic files are not.
    A file that does not exist prints an explicit `ABSENT` marker, never confused with an empty-but-present file: absence is meaningful (`captain.md` absent means use the firstmate repo's built-in defaults, `projects.md` absent means rebuild it from the clones under `projects/`, etc.).
 5. **Fleet-state digest** - the compact backlog listing owned by `bin/fm-session-start.sh`; every `state/<id>.meta`; a bounded tail of each task's `state/<id>.status` (labeled as wake-EVENT history, not current state, with the full log path printed for a deeper read); the `state/.afk` flag; and two cheap reads of each task's recorded backend endpoint, printed as separate `endpoint:` and `agent:` lines.
    Those two lines answer different questions and must not be conflated: `endpoint:` is presence only, while `agent:` reports whether a worker process is actually running in it, because an exited agent leaves a present endpoint holding a bare shell that would execute anything sent to it rather than receive it.
@@ -226,6 +228,7 @@ Route durable knowledge to its most specific owner:
 - Home-domain captain preferences and working style belong in `data/captain.md` after inspect-then-update.
 - Captain preferences shared across secondmate domains belong in the primary home's `data/captain-shared.md` under the `secondmate-provisioning` contract.
 - Fleet-local operational facts belong in curated, home-local `data/learnings.md`.
+- When those two files are split into `data/captain/` and `data/learnings/`, the destination is the one topic file the MAP points to, inspect-then-update applies to that file, and a new topic needs a new MAP line; the digest's `Rules that always apply` section is always loaded, and `docs/memory-maps.md` owns the rest.
 - Task-scoped notes belong with the backlog item, and investigation findings belong in the scout report.
 - Knowledge useful to almost every contributor to one project belongs in that project's committed `AGENTS.md`.
 - Knowledge general to every firstmate user belongs in this repo's shared tracked surface.

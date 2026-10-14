@@ -32,6 +32,8 @@ The goal is a session that is safe to reset or destroy because everything durabl
    - Captain preferences and fleet-local operational facts: hand-write directly to the destination selected by AGENTS.md's knowledge-routing table, using inspect-then-update every time.
      Before writing, inspect the destination, find the existing bullet or section the finding duplicates or supersedes, and rewrite it in place rather than adding a new trailing entry.
      `data/learnings.md` may not exist yet; create it on first local learning, in the same dated, evidence-backed, curated style as the captain-preference files.
+     When `data/learnings/MAP.md` or `data/captain/MAP.md` exists, the destination is one topic file: read the map, open the topic file whose trigger fits, apply inspect-then-update there, and add a map line (validated with `bin/fm-memory-map.sh validate <dir>`) for any new topic.
+     `docs/memory-maps.md` owns the map format, the always-loaded rules section, and the advisory 30 KB per-file prune note.
    - Project-intrinsic knowledge: never hand-write a project's `AGENTS.md`.
      Route it through a normal ship task so a crewmate records it via `bin/fm-ensure-agents-md.sh` and commits it through that project's delivery pipeline, exactly as section 6 describes.
      If the fleet is live, delegate this to a crewmate rather than doing it inline.

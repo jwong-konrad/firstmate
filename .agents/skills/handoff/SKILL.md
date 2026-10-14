@@ -17,7 +17,7 @@ The goal is a session the captain can clear or reset with confidence that the ne
 
 1. **Run the stow sweep first.**
    Perform the stow skill's sweep and routing, steps 1 through 4 of that skill, exactly as written there.
-   Stow stays the single owner of knowledge routing, so do not restate or vary its rules here.
+   Stow stays the single owner of knowledge routing, including the per-topic-file rule for `data/learnings/` and `data/captain/` maps, so do not restate or vary its rules here.
    Capture stow's own verdict for the combined report in step 6.
 
 2. **Capture the session context to a handoff document.**

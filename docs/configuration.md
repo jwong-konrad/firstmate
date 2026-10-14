@@ -148,6 +148,7 @@ Portable shard evidence and coverage rules are in [fm-test-portable-shards.md](f
 
 Domain-local preferences for one captain's fleet live locally in each home's `data/captain.md`; it is gitignored and printed in the session-start context digest after `data/projects.md` and optional `data/secondmates.md`.
 Before changing it, inspect the current file and rewrite or prune the matching bullet in place; add a new bullet only for a genuinely new durable preference.
+A home may instead keep `data/captain/MAP.md` plus topic files, which session start prints in place of the flat file; [memory-maps.md](memory-maps.md) owns that format and its per-topic-file curation.
 Shared captain preferences that apply across secondmate domains live only in the primary home's optional `data/captain-shared.md`.
 `secondmate-provisioning` owns its propagation contract, including the required header, read-only secondmate copies, quarantine diagnostics, and the rollout rule that existing homes trim `data/captain.md` by hand after first propagation rather than deleting private content automatically.
 
@@ -155,6 +156,7 @@ Shared captain preferences that apply across secondmate domains live only in the
 
 Fleet-local operational facts and gotchas live locally in `data/learnings.md`; it is gitignored and printed after the captain-preference files in the session-start context digest.
 The file is created lazily on first learning and follows the same dated, evidence-backed, curated style as `data/captain.md`: inspect the current file first, then rewrite or prune stale entries instead of appending forever.
+A home may instead keep `data/learnings/MAP.md` plus topic files under the same [memory-maps.md](memory-maps.md) contract.
 There is no shared learnings file by captain decision.
 
 ## Secondmate routes (data/secondmates.md)
