@@ -665,9 +665,9 @@ cmp -s "$TMP_ROOT/off.meta.normalized" "$TMP_ROOT/on.meta.normalized" \
 # Their final relative order must match Herdr's actual serialized create order,
 # rather than a task-name or priority guess.
 CONCURRENT_FOCUS_AUDIT_START=$(focus_audit_line_count)
-spawn_task order-a "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/order-a.out" 2> "$TMP_ROOT/order-a.err" &
+FM_HERDR_PRESENTATION_LOCK_ATTEMPTS=1200 spawn_task order-a "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/order-a.out" 2> "$TMP_ROOT/order-a.err" &
 ORDER_A_PID=$!
-spawn_task order-b "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/order-b.out" 2> "$TMP_ROOT/order-b.err" &
+FM_HERDR_PRESENTATION_LOCK_ATTEMPTS=1200 spawn_task order-b "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/order-b.out" 2> "$TMP_ROOT/order-b.err" &
 ORDER_B_PID=$!
 wait "$ORDER_A_PID" || fail "concurrent projected spawn A failed: $(cat "$TMP_ROOT/order-a.err")"
 wait "$ORDER_B_PID" || fail "concurrent projected spawn B failed: $(cat "$TMP_ROOT/order-b.err")"
