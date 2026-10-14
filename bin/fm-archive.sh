@@ -160,7 +160,6 @@ find "$ROOT/transcripts" "$ROOT/file-history" "$ROOT/evidence" "$ROOT/tasks" "$R
 N_TR_NEW=0 N_TR_GROWN=0 N_TR_SHRANK=0 N_TR_REWRITTEN=0 N_TR_BUSY=0 N_TR_ERR=0
 N_FH=0 N_EV=0 N_TASKS=0 N_HAND=0
 
-FLOOR_TICKS=0
 FLOOR_EVERY=${FM_ARCHIVE_FLOOR_CHECK_EVERY:-100}
 case "$FLOOR_EVERY" in ''|*[!0-9]*|0) FLOOR_EVERY=100 ;; esac
 
@@ -169,8 +168,11 @@ case "$FLOOR_EVERY" in ''|*[!0-9]*|0) FLOOR_EVERY=100 ;; esac
 # writing anything more (every copy goes through a temp name, so no partial files).
 floor_tick() {
   [ ! -e "$TMPD/floor.stop" ] || return 1
-  FLOOR_TICKS=$((FLOOR_TICKS + 1))
-  [ $((FLOOR_TICKS % FLOOR_EVERY)) -eq 0 ] || return 0
+  local ticks
+  ticks=$(cat "$TMPD/floor.ticks" 2>/dev/null || echo 0)
+  ticks=$((ticks + 1))
+  echo "$ticks" > "$TMPD/floor.ticks"
+  [ $((ticks % FLOOR_EVERY)) -eq 0 ] || return 0
   if ! fm_archive_floor_ok "$ROOT"; then
     echo "${FM_ARCHIVE_FREE_GIB} GiB free on the internal disk, below the ${FM_ARCHIVE_MIN_FREE_GIB:-15} GiB floor" > "$TMPD/floor.stop"
     return 1

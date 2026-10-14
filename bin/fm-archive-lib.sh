@@ -227,12 +227,25 @@ fm_archive_prefix_ok() {
 }
 
 # fm_archive_save_rewritten <src> <dst>: keep a rewritten source beside the
-# untouched archive, once per distinct content. Sets FM_ARCHIVE_SYNC=rewritten.
+# untouched archive as exactly one <dst>.rewritten-<UTC time> copy, grown by
+# appending under the same prefix check; a new copy starts only when the current
+# one no longer matches the source's prefix. Sets FM_ARCHIVE_SYNC=rewritten.
 fm_archive_save_rewritten() {
-  local src=$1 dst=$2 f tmp
+  local src=$1 dst=$2 f cur='' src_size cur_size tmp
   for f in "$dst".rewritten-*; do
-    [ -f "$f" ] && cmp -s "$src" "$f" && { FM_ARCHIVE_SYNC=rewritten; return 0; }
+    [ -f "$f" ] && case "$f" in *.tmp.*) ;; *) cur=$f ;; esac
   done
+  src_size=$(fm_archive_stat_size "$src") || return 0
+  if [ -n "$cur" ]; then
+    cur_size=$(fm_archive_stat_size "$cur") || cur_size=
+    if [ -n "$cur_size" ] && fm_archive_prefix_ok "$src" "$cur" "$cur_size"; then
+      FM_ARCHIVE_SYNC=rewritten
+      if [ "$src_size" -gt "$cur_size" ]; then
+        tail -c +$((cur_size + 1)) "$src" >> "$cur" 2>/dev/null || FM_ARCHIVE_SYNC=error
+      fi
+      return 0
+    fi
+  fi
   f="$dst.rewritten-$(date -u +%Y%m%dT%H%M%SZ)"
   [ ! -e "$f" ] || f="$f.$$"
   tmp="$f.tmp.$$"
@@ -250,7 +263,8 @@ fm_archive_save_rewritten() {
 # idempotent. A source that shrank never overwrites what is already archived.
 # A source that grew is appended only when the staged bytes are still a prefix of
 # it (first and last 4 KiB compared); otherwise the archived copy is untouched,
-# the new source is saved beside it as <dst>.rewritten-<UTC time>, and the result
+# the new source is saved beside it as one <dst>.rewritten-<UTC time> copy that
+# later growth is appended to, and the result
 # is "rewritten".
 # Sets FM_ARCHIVE_SYNC to one of: new grown same shrank rewritten busy error.
 fm_archive_sync_append() {

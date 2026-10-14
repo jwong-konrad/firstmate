@@ -47,7 +47,7 @@ New files are copy-on-write clones on APFS, so a file costs almost no extra disk
 
 ## Capture rules
 
-- Transcripts are append-only: the staged size is the offset, shared by the archiver and the hook, so each byte is copied once, a still-open session is captured as it grows, a source that shrank never overwrites what is archived, and a source that grew is appended only when the staged bytes are still its prefix (first and last 4 KiB compared); a rewritten source leaves the archive untouched and is saved beside it as `<name>.rewritten-<UTC time>`, logged, and reported as `rewritten=N`.
+- Transcripts are append-only: the staged size is the offset, shared by the archiver and the hook, so each byte is copied once, a still-open session is captured as it grows, a source that shrank never overwrites what is archived, and a source that grew is appended only when the staged bytes are still its prefix (first and last 4 KiB compared); a rewritten source leaves the archive untouched and is saved beside it as one `<name>.rewritten-<UTC time>` copy that later growth is appended to (a new copy starts only if that copy stops matching the source's prefix), logged, and reported as `rewritten=N`.
 - `file-history` and screenshots are copied once and never rewritten.
 - Reports, briefs, ledgers, and handoffs are copied when they differ, and the previous copy stays beside the new one as `<name>.<UTC time>.bak`.
 - Each run appends `sha256 size time path` lines to the month's manifest for every staged file whose size differs from its latest entry; `bin/fm-archive.sh --verify` re-checks them and names a corrupt, truncated, or missing file.
@@ -133,7 +133,7 @@ It is never synced, uploaded, attached, shared with a collaborator, or placed in
 | Card dies | Staging holds a complete copy; restore by copying staging to a new volume and running the archiver |
 | Internal disk full | The archiver refuses below the floor and the hook skips below it; nothing is written, and the Claude originals stay in place |
 | Source shrank | The archived copy is kept and the run log names the file |
-| Source rewritten (longer, but no longer starts with the archived bytes) | The archived copy is kept, the new source is saved as `<name>.rewritten-<UTC time>`, and the log and `rewritten=` count name it |
+| Source rewritten (longer, but no longer starts with the archived bytes) | The archived copy is kept, the new source is saved as a single `<name>.rewritten-<UTC time>` copy kept current by appending, and the log and `rewritten=` count name it |
 | Hook and archiver run together | A per-file lock serialises them; the hook waits two seconds then skips, and the next event or run catches up; a lock whose process is dead, or that never got a pid and is older than `FM_ARCHIVE_LOCK_STALE_SECS` (30), is stolen under a guard so two waiters cannot remove a freshly taken lock |
 
 The card mount check is `fm_card_ok` in `bin/fm-archive-lib.sh`, the scripted form of the check in the SD-card storage plan.

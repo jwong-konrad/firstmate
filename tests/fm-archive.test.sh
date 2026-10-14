@@ -658,14 +658,28 @@ test_archive_rewritten_source_is_saved_beside_the_archive() {
   run_archive "$e" >/dev/null 2>&1 || fail "rewrite: third run failed"
   n=$(find "$e/arch/transcripts/-proj" -maxdepth 1 -name 'sess.jsonl.rewritten-*' | wc -l | tr -d ' ')
   [ "$n" = 1 ] || fail "rewrite: repeated runs duplicated the rewritten copy ($n)"
+  printf '%s\n' '{"line":"more after the rewrite"}' >> "$e/claude/projects/-proj/sess.jsonl"
+  run_hook "$e" "{\"transcript_path\":\"$e/claude/projects/-proj/sess.jsonl\"}" >/dev/null 2>&1
+  run_archive "$e" >/dev/null 2>&1 || fail "rewrite: growth run failed"
+  n=$(find "$e/arch/transcripts/-proj" -maxdepth 1 -name 'sess.jsonl.rewritten-*' | wc -l | tr -d ' ')
+  [ "$n" = 1 ] || fail "rewrite: growth after a rewrite created another copy ($n)"
+  cmp -s "$e/claude/projects/-proj/sess.jsonl" "$e/arch/transcripts/-proj/"sess.jsonl.rewritten-* || fail "rewrite: growth was not appended to the rewritten copy"
   run_hook "$e" "{\"transcript_path\":\"$e/claude/projects/-proj/sess.jsonl\"}" >/dev/null 2>&1
   cmp -s "$e/orig" "$e/arch/transcripts/-proj/sess.jsonl" || fail "rewrite: the hook modified the archived copy"
   pass "a rewritten source keeps the archive untouched and is saved beside it once"
 }
 
 test_archive_floor_is_rechecked_while_staging() {
+  floor_recheck_case floor-mid 1
+}
+
+test_archive_floor_counter_survives_stage_subshells() {
+  floor_recheck_case floor-count 5
+}
+
+floor_recheck_case() {
   local e out rc
-  e=$(make_env floor-mid)
+  e=$(make_env "$1")
   cat > "$e/fakebin/df" <<DFEOF
 #!/bin/sh
 n=\$(cat "$e/df.count" 2>/dev/null || echo 0)
@@ -677,7 +691,7 @@ DFEOF
   chmod +x "$e/fakebin/df"
   set +e
   out=$(env FM_ARCHIVE_ROOT="$e/arch" FM_ARCHIVE_CLAUDE_DIR="$e/claude" FM_HOME="$e/home" \
-    FM_ARCHIVE_MIN_FREE_GIB=1 FM_ARCHIVE_FLOOR_CHECK_EVERY=1 PATH="$e/fakebin:$PATH" "$ARCHIVE" --no-mirror 2>&1)
+    FM_ARCHIVE_MIN_FREE_GIB=1 FM_ARCHIVE_FLOOR_CHECK_EVERY="$2" PATH="$e/fakebin:$PATH" "$ARCHIVE" --no-mirror 2>&1)
   rc=$?
   set -e
   expect_code 3 "$rc" "floor-mid: must stop with exit 3"
@@ -712,6 +726,7 @@ run_case test_archive_shrunken_source_never_overwrites
 run_case test_archive_changed_report_keeps_previous_version
 run_case test_archive_rewritten_source_is_saved_beside_the_archive
 run_case test_archive_floor_is_rechecked_while_staging
+run_case test_archive_floor_counter_survives_stage_subshells
 run_case test_hook_steals_a_pidless_lock_only_when_old
 run_case test_archive_never_stages_database_dumps
 run_case test_archive_imports_a_raw_clone
