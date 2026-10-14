@@ -35,8 +35,11 @@ archive_hook_main() {
     [ -n "$path" ] || continue
     [ -f "$path" ] || continue
     rel=$(fm_archive_transcript_rel "$path")
-    fm_archive_sync_append "$path" "$root/transcripts/$rel" 20 \
-      || fm_archive_log "hook could not archive $path"
+    if fm_archive_sync_append "$path" "$root/transcripts/$rel" 20; then
+      [ "$FM_ARCHIVE_SYNC" != rewritten ] || fm_archive_log "hook: transcript was rewritten, new source saved beside the archive: $path"
+    else
+      fm_archive_log "hook could not archive $path"
+    fi
   done <<EOF
 $(printf '%s' "$input" | jq -r '.transcript_path // empty, .agent_transcript_path // empty' 2>/dev/null)
 EOF

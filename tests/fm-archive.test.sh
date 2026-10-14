@@ -642,6 +642,67 @@ test_ledger_kill_switch() {
   pass "FM_NO_LEDGER=1 skips the ledger"
 }
 
+test_archive_rewritten_source_is_saved_beside_the_archive() {
+  local e out n
+  e=$(make_env rewrite)
+  run_archive "$e" >/dev/null 2>&1 || fail "rewrite: first run failed"
+  cp "$e/arch/transcripts/-proj/sess.jsonl" "$e/orig"
+  printf '%s\n' '{"line":"rewritten and now longer than before"}' > "$e/claude/projects/-proj/sess.jsonl"
+  out=$(run_archive "$e" 2>&1) || fail "rewrite: second run failed"
+  assert_contains "$out" "rewritten=1" "rewrite: not reported as a distinct result"
+  cmp -s "$e/orig" "$e/arch/transcripts/-proj/sess.jsonl" || fail "rewrite: the archived copy was modified"
+  n=$(find "$e/arch/transcripts/-proj" -maxdepth 1 -name 'sess.jsonl.rewritten-*' | wc -l | tr -d ' ')
+  [ "$n" = 1 ] || fail "rewrite: expected one saved rewritten copy, got $n"
+  cmp -s "$e/claude/projects/-proj/sess.jsonl" "$e/arch/transcripts/-proj/"sess.jsonl.rewritten-* || fail "rewrite: saved copy differs from the new source"
+  grep -q "rewritten" "$e/arch/archive.log" || fail "rewrite: not logged"
+  run_archive "$e" >/dev/null 2>&1 || fail "rewrite: third run failed"
+  n=$(find "$e/arch/transcripts/-proj" -maxdepth 1 -name 'sess.jsonl.rewritten-*' | wc -l | tr -d ' ')
+  [ "$n" = 1 ] || fail "rewrite: repeated runs duplicated the rewritten copy ($n)"
+  run_hook "$e" "{\"transcript_path\":\"$e/claude/projects/-proj/sess.jsonl\"}" >/dev/null 2>&1
+  cmp -s "$e/orig" "$e/arch/transcripts/-proj/sess.jsonl" || fail "rewrite: the hook modified the archived copy"
+  pass "a rewritten source keeps the archive untouched and is saved beside it once"
+}
+
+test_archive_floor_is_rechecked_while_staging() {
+  local e out rc
+  e=$(make_env floor-mid)
+  cat > "$e/fakebin/df" <<DFEOF
+#!/bin/sh
+n=\$(cat "$e/df.count" 2>/dev/null || echo 0)
+n=\$((n + 1))
+echo \$n > "$e/df.count"
+echo "Filesystem 1024-blocks Used Available Capacity Mounted"
+if [ \$n -le 1 ]; then echo "/dev/x 99999999 1 99999999 1% /"; else echo "/dev/x 99999999 1 0 100% /"; fi
+DFEOF
+  chmod +x "$e/fakebin/df"
+  set +e
+  out=$(env FM_ARCHIVE_ROOT="$e/arch" FM_ARCHIVE_CLAUDE_DIR="$e/claude" FM_HOME="$e/home" \
+    FM_ARCHIVE_MIN_FREE_GIB=1 FM_ARCHIVE_FLOOR_CHECK_EVERY=1 PATH="$e/fakebin:$PATH" "$ARCHIVE" --no-mirror 2>&1)
+  rc=$?
+  set -e
+  expect_code 3 "$rc" "floor-mid: must stop with exit 3"
+  assert_contains "$out" "stopped" "floor-mid: missing the stop message"
+  [ -z "$(find "$e/arch" -name '*.tmp.*' 2>/dev/null)" ] || fail "floor-mid: partial files were left"
+  if ls "$e/arch"/MANIFEST-*.sha256 >/dev/null 2>&1; then fail "floor-mid: a manifest was written after the stop"; fi
+  pass "the free-space floor is rechecked while staging and stops the run cleanly"
+}
+
+test_hook_steals_a_pidless_lock_only_when_old() {
+  local e src lock
+  e=$(make_env hook-pidless)
+  src="$e/claude/projects/-proj/sess.jsonl"
+  mkdir -p "$e/arch/transcripts/-proj" "$e/arch/.locks"
+  lock="$e/arch/.locks/f-$(printf '%s' "$e/arch/transcripts/-proj/sess.jsonl" | cksum | cut -d' ' -f1)"
+  mkdir "$lock"
+  run_hook "$e" "{\"transcript_path\":\"$src\"}" >/dev/null 2>&1
+  assert_absent "$e/arch/transcripts/-proj/sess.jsonl" "hook-pidless: a fresh pidless lock was stolen"
+  touch -t 200001010000 "$lock"
+  run_hook "$e" "{\"transcript_path\":\"$src\"}" >/dev/null 2>&1
+  cmp -s "$src" "$e/arch/transcripts/-proj/sess.jsonl" || fail "hook-pidless: an old pidless lock was not reclaimed"
+  assert_absent "$lock.steal" "hook-pidless: the steal guard was left behind"
+  pass "a lock whose holder died before writing its pid is reclaimed by age"
+}
+
 run_case test_archive_stages_every_source
 run_case test_archive_card_absent_stages_and_exits_zero
 run_case test_archive_floor_refuses_and_writes_nothing
@@ -649,6 +710,9 @@ run_case test_archive_is_idempotent
 run_case test_archive_growth_appends_only_new_bytes
 run_case test_archive_shrunken_source_never_overwrites
 run_case test_archive_changed_report_keeps_previous_version
+run_case test_archive_rewritten_source_is_saved_beside_the_archive
+run_case test_archive_floor_is_rechecked_while_staging
+run_case test_hook_steals_a_pidless_lock_only_when_old
 run_case test_archive_never_stages_database_dumps
 run_case test_archive_imports_a_raw_clone
 run_case test_archive_mirrors_to_a_verified_card

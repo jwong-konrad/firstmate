@@ -47,11 +47,11 @@ New files are copy-on-write clones on APFS, so a file costs almost no extra disk
 
 ## Capture rules
 
-- Transcripts are append-only: the staged size is the offset, shared by the archiver and the hook, so each byte is copied once, a still-open session is captured as it grows, and a source that shrank never overwrites what is archived.
+- Transcripts are append-only: the staged size is the offset, shared by the archiver and the hook, so each byte is copied once, a still-open session is captured as it grows, a source that shrank never overwrites what is archived, and a source that grew is appended only when the staged bytes are still its prefix (first and last 4 KiB compared); a rewritten source leaves the archive untouched and is saved beside it as `<name>.rewritten-<UTC time>`, logged, and reported as `rewritten=N`.
 - `file-history` and screenshots are copied once and never rewritten.
 - Reports, briefs, ledgers, and handoffs are copied when they differ, and the previous copy stays beside the new one as `<name>.<UTC time>.bak`.
 - Each run appends `sha256 size time path` lines to the month's manifest for every staged file whose size differs from its latest entry; `bin/fm-archive.sh --verify` re-checks them and names a corrupt, truncated, or missing file.
-- The archiver refuses to run below the internal free-space floor (`FM_ARCHIVE_MIN_FREE_GIB`, default 15 GiB, exit 3, nothing written), and the hook skips silently below it.
+- The archiver refuses to run below the internal free-space floor (`FM_ARCHIVE_MIN_FREE_GIB`, default 15 GiB, exit 3, nothing written), rechecks it every `FM_ARCHIVE_FLOOR_CHECK_EVERY` files (default 100) while staging, and stops cleanly with exit 3 and no partial files when it is crossed, and the hook skips silently below it.
 
 ## The nightly job
 
@@ -132,8 +132,9 @@ It is never synced, uploaded, attached, shared with a collaborator, or placed in
 | Card write fails or the card is pulled mid-run | The mirror stops, reports `card write failed`, leaves staging intact, and removes the partial file; the next run resumes |
 | Card dies | Staging holds a complete copy; restore by copying staging to a new volume and running the archiver |
 | Internal disk full | The archiver refuses below the floor and the hook skips below it; nothing is written, and the Claude originals stay in place |
-| Source shrank or was rewritten | The archived copy is kept and the run log names the file |
-| Hook and archiver run together | A per-file lock serialises them; the hook waits two seconds then skips, and the next event or run catches up; a lock whose process is dead is stolen |
+| Source shrank | The archived copy is kept and the run log names the file |
+| Source rewritten (longer, but no longer starts with the archived bytes) | The archived copy is kept, the new source is saved as `<name>.rewritten-<UTC time>`, and the log and `rewritten=` count name it |
+| Hook and archiver run together | A per-file lock serialises them; the hook waits two seconds then skips, and the next event or run catches up; a lock whose process is dead, or that never got a pid and is older than `FM_ARCHIVE_LOCK_STALE_SECS` (30), is stolen under a guard so two waiters cannot remove a freshly taken lock |
 
 The card mount check is `fm_card_ok` in `bin/fm-archive-lib.sh`, the scripted form of the check in the SD-card storage plan.
 
@@ -146,6 +147,8 @@ The card mount check is `fm_card_ok` in `bin/fm-archive-lib.sh`, the scripted fo
 | `FM_ARCHIVE_VAULT_VOLUME` | `FMVAULT` | Card volume the mirror targets |
 | `FM_ARCHIVE_MIRROR_SUBDIR` | `secure/archive` | Directory on the volume |
 | `FM_ARCHIVE_MIN_FREE_GIB` | `15` | Internal free-space floor |
+| `FM_ARCHIVE_FLOOR_CHECK_EVERY` | `100` | Files staged between free-space rechecks |
+| `FM_ARCHIVE_LOCK_STALE_SECS` | `30` | Age after which a pidless lock is reclaimed |
 | `FM_ARCHIVE_CARD_MIN_FREE_GIB` | `2` | Card free-space floor |
 | `FM_CARD_VOLUMES_FILE` | `~/.config/firstmate/card-volumes` | Pinned `<NAME> <Volume UUID>` lines |
 | `FM_ARCHIVE_HOOK` | `on` | `off` disables the transcript hook |

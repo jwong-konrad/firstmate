@@ -24,7 +24,8 @@
 # screenshots, so a nearly full card keeps the small, high-value set current.
 #
 # The internal disk is protected by a free-space floor (FM_ARCHIVE_MIN_FREE_GIB,
-# default 15): below it the run refuses with exit 3 and writes nothing. Polaris DB
+# default 15): below it the run refuses with exit 3 and writes nothing, and it is
+# rechecked every FM_ARCHIVE_FLOOR_CHECK_EVERY files (default 100) while staging. Polaris DB
 # dumps are never sources; only the named paths above are read.
 #
 # Usage: fm-archive.sh [--no-mirror] [--no-scan] [--scan] [--verify] [--import <dir>]...
@@ -156,8 +157,26 @@ find "$ROOT/transcripts" "$ROOT/file-history" "$ROOT/evidence" "$ROOT/tasks" "$R
 
 # -------------------------------------------------------------------- staging
 
-N_TR_NEW=0 N_TR_GROWN=0 N_TR_SHRANK=0 N_TR_BUSY=0 N_TR_ERR=0
+N_TR_NEW=0 N_TR_GROWN=0 N_TR_SHRANK=0 N_TR_REWRITTEN=0 N_TR_BUSY=0 N_TR_ERR=0
 N_FH=0 N_EV=0 N_TASKS=0 N_HAND=0
+
+FLOOR_TICKS=0
+FLOOR_EVERY=${FM_ARCHIVE_FLOOR_CHECK_EVERY:-100}
+case "$FLOOR_EVERY" in ''|*[!0-9]*|0) FLOOR_EVERY=100 ;; esac
+
+# floor_tick: call before staging each file; every FLOOR_EVERY files it rechecks the
+# internal floor, and once crossed records it and returns 1 so loops stop before
+# writing anything more (every copy goes through a temp name, so no partial files).
+floor_tick() {
+  [ ! -e "$TMPD/floor.stop" ] || return 1
+  FLOOR_TICKS=$((FLOOR_TICKS + 1))
+  [ $((FLOOR_TICKS % FLOOR_EVERY)) -eq 0 ] || return 0
+  if ! fm_archive_floor_ok "$ROOT"; then
+    echo "${FM_ARCHIVE_FREE_GIB} GiB free on the internal disk, below the ${FM_ARCHIVE_MIN_FREE_GIB:-15} GiB floor" > "$TMPD/floor.stop"
+    return 1
+  fi
+  return 0
+}
 
 copy_once() {  # <src> <dst>: clone to a temp name and move into place; 0 on success
   local tmp
@@ -189,6 +208,7 @@ stage_transcripts() {  # <claude dir>
   fm_archive_list "$ROOT/transcripts" -type f -name '*.jsonl' > "$TMPD/tr.dst"
   while IFS="$MANIFEST_TAB" read -r rel ssize dsize; do
     [ -n "$rel" ] || continue
+    floor_tick || break
     if fm_archive_sync_append "$cdir/projects/$rel" "$ROOT/transcripts/$rel" 300; then
       case "$FM_ARCHIVE_SYNC" in
         new) N_TR_NEW=$((N_TR_NEW + 1)) ;;
@@ -196,6 +216,10 @@ stage_transcripts() {  # <claude dir>
         shrank)
           N_TR_SHRANK=$((N_TR_SHRANK + 1))
           fm_archive_log "source shrank, kept the archived copy: $rel (source $ssize, archived $dsize)"
+          ;;
+        rewritten)
+          N_TR_REWRITTEN=$((N_TR_REWRITTEN + 1))
+          fm_archive_log "source rewritten, archived copy kept: $rel"
           ;;
         busy) N_TR_BUSY=$((N_TR_BUSY + 1)) ;;
       esac
@@ -217,6 +241,7 @@ stage_missing() {  # <src root> <dst root> <find expression...>
   while IFS="$MANIFEST_TAB" read -r rel ssize dsize; do
     [ -n "$rel" ] || continue
     [ "$dsize" = -1 ] || continue
+    floor_tick || break
     if copy_once "$srcroot/$rel" "$dstroot/$rel"; then
       n=$((n + 1))
     fi
@@ -234,6 +259,7 @@ stage_versioned() {  # <src root> <dst root> <find expression...>
   fm_archive_list "$srcroot" "$@" > "$TMPD/v.src"
   while IFS="$MANIFEST_TAB" read -r ssize rel; do
     [ -n "$rel" ] || continue
+    floor_tick || break
     if copy_versioned "$srcroot/$rel" "$dstroot/$rel"; then
       n=$((n + 1))
     fi
@@ -420,7 +446,7 @@ mirror_all() {
     say "card nearly full (${FM_ARCHIVE_FREE_GIB} GiB free, floor ${CARD_MIN_GIB} GiB), staging only"
     return 0
   fi
-  mirror_phase append "$dest" transcripts -type f -name '*.jsonl'
+  mirror_phase append "$dest" transcripts -type f \( -name '*.jsonl' -o -name '*.jsonl.rewritten-*' \)
   mirror_phase replace "$dest" tasks -type f
   mirror_phase replace "$dest" handoffs -type f
   mirror_phase replace "$dest" reports -type f
@@ -442,6 +468,11 @@ mirror_all() {
 # ----------------------------------------------------------------------- main
 
 stage_all
+if [ -e "$TMPD/floor.stop" ]; then
+  echo "archive: stopped: $(cat "$TMPD/floor.stop"); no partial files were left, the next run resumes" >&2
+  fm_archive_log "stopped below the free-space floor: $(cat "$TMPD/floor.stop")"
+  exit 3
+fi
 update_manifest
 secret_scan
 if [ "$DO_MIRROR" -eq 1 ]; then
@@ -450,7 +481,7 @@ else
   MIRROR_STATE=disabled
 fi
 
-say "transcripts new=$N_TR_NEW grown=$N_TR_GROWN shrank=$N_TR_SHRANK busy=$N_TR_BUSY errors=$N_TR_ERR; file-history new=$N_FH; tasks changed=$N_TASKS; handoffs changed=$N_HAND; screenshots new=$N_EV; manifest +$N_MANIFEST"
+say "transcripts new=$N_TR_NEW grown=$N_TR_GROWN shrank=$N_TR_SHRANK rewritten=$N_TR_REWRITTEN busy=$N_TR_BUSY errors=$N_TR_ERR; file-history new=$N_FH; tasks changed=$N_TASKS; handoffs changed=$N_HAND; screenshots new=$N_EV; manifest +$N_MANIFEST"
 [ -z "$SCAN_NOTE" ] || say "$SCAN_NOTE"
 [ "$MIRROR_STATE" != ok ] || say "mirror ok ($MIRROR_COPIED files copied to $FM_CARD_MOUNT/$MIRROR_SUB)"
 {

@@ -141,21 +141,58 @@ fm_card_ok() {
   return 0
 }
 
+# fm_archive_mtime_age <path>: whole seconds since <path> was last modified, or
+# empty when it cannot be read.
+fm_archive_mtime_age() {
+  local m
+  if [ "$(uname)" = Darwin ]; then
+    m=$(stat -f %m "$1" 2>/dev/null)
+  else
+    m=$(stat -c %Y "$1" 2>/dev/null)
+  fi
+  case "$m" in ''|*[!0-9]*) return 1 ;; esac
+  echo $(( $(date +%s) - m ))
+}
+
+# fm_archive_lock_stale <lock-dir>: 0 when the holder is dead, or when no pid was
+# ever written and the lock is older than FM_ARCHIVE_LOCK_STALE_SECS (default 30).
+fm_archive_lock_stale() {
+  local dir=$1 pid age
+  pid=$(cat "$dir/pid" 2>/dev/null || true)
+  if [ -n "$pid" ]; then
+    kill -0 "$pid" 2>/dev/null && return 1
+    return 0
+  fi
+  age=$(fm_archive_mtime_age "$dir") || return 1
+  [ "$age" -ge "${FM_ARCHIVE_LOCK_STALE_SECS:-30}" ]
+}
+
 # fm_archive_lock_acquire <lock-dir> <tenths-of-seconds-to-wait>: mkdir lock with
-# a pid file; a lock whose pid is dead is stolen atomically. 1 when not acquired.
+# a pid file. A stale lock (see fm_archive_lock_stale) is removed only by the
+# holder of a "<lock-dir>.steal" guard that re-checks staleness under the guard,
+# so two waiters can never remove a lock another process has just taken. 1 when
+# not acquired.
 fm_archive_lock_acquire() {
-  local dir=$1 tries=${2:-0} pid
+  local dir=$1 tries=${2:-0} guard age
+  guard="$dir.steal"
   while :; do
     if mkdir "$dir" 2>/dev/null; then
       printf '%s\n' "$$" > "$dir/pid" 2>/dev/null || true
       return 0
     fi
-    pid=$(cat "$dir/pid" 2>/dev/null || true)
-    if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
-      if mv "$dir" "$dir.stale.$$" 2>/dev/null; then
-        rm -rf "$dir.stale.$$"
+    if fm_archive_lock_stale "$dir"; then
+      if mkdir "$guard" 2>/dev/null; then
+        if fm_archive_lock_stale "$dir" && mv "$dir" "$dir.stale.$$" 2>/dev/null; then
+          rm -rf "$dir.stale.$$"
+        fi
+        rmdir "$guard" 2>/dev/null || true
+        continue
       fi
-      continue
+      age=$(fm_archive_mtime_age "$guard") || age=0
+      if [ "$age" -ge "${FM_ARCHIVE_LOCK_STALE_SECS:-30}" ]; then
+        rmdir "$guard" 2>/dev/null || true
+        continue
+      fi
     fi
     [ "$tries" -gt 0 ] || return 1
     tries=$((tries - 1))
@@ -178,11 +215,44 @@ fm_archive_clone_copy() {
   cp "$1" "$2"
 }
 
+# fm_archive_prefix_ok <src> <dst> <dst-size>: 0 when the first and last 4 KiB of
+# <dst> equal <src> at the same offsets.
+fm_archive_prefix_ok() {
+  local src=$1 dst=$2 size=$3 n=4096 start
+  [ "$size" -ge "$n" ] || n=$size
+  [ "$n" -gt 0 ] || return 0
+  start=$((size - n))
+  cmp -s <(head -c "$n" "$dst") <(head -c "$n" "$src") || return 1
+  cmp -s <(tail -c "$n" "$dst") <(tail -c +$((start + 1)) "$src" | head -c "$n")
+}
+
+# fm_archive_save_rewritten <src> <dst>: keep a rewritten source beside the
+# untouched archive, once per distinct content. Sets FM_ARCHIVE_SYNC=rewritten.
+fm_archive_save_rewritten() {
+  local src=$1 dst=$2 f tmp
+  for f in "$dst".rewritten-*; do
+    [ -f "$f" ] && cmp -s "$src" "$f" && { FM_ARCHIVE_SYNC=rewritten; return 0; }
+  done
+  f="$dst.rewritten-$(date -u +%Y%m%dT%H%M%SZ)"
+  [ ! -e "$f" ] || f="$f.$$"
+  tmp="$f.tmp.$$"
+  if fm_archive_clone_copy "$src" "$tmp" && mv "$tmp" "$f"; then
+    FM_ARCHIVE_SYNC=rewritten
+    fm_archive_log "source rewritten, kept the archived copy and saved the new source as $f"
+  else
+    rm -f "$tmp"
+  fi
+}
+
 # fm_archive_sync_append <src> <dst> [lock-wait-tenths]: make <dst> hold <src>'s
 # bytes by copying only what <dst> lacks. The staged size IS the offset, so the
 # nightly archiver and the Stop hook agree without separate state and both are
 # idempotent. A source that shrank never overwrites what is already archived.
-# Sets FM_ARCHIVE_SYNC to one of: new grown same shrank busy error.
+# A source that grew is appended only when the staged bytes are still a prefix of
+# it (first and last 4 KiB compared); otherwise the archived copy is untouched,
+# the new source is saved beside it as <dst>.rewritten-<UTC time>, and the result
+# is "rewritten".
+# Sets FM_ARCHIVE_SYNC to one of: new grown same shrank rewritten busy error.
 fm_archive_sync_append() {
   local src=$1 dst=$2 wait=${3:-300} root lock src_size dst_size tmp
   FM_ARCHIVE_SYNC=error
@@ -208,8 +278,12 @@ fm_archive_sync_append() {
     if [ -z "$dst_size" ]; then
       :
     elif [ "$src_size" -gt "$dst_size" ]; then
-      if tail -c +$((dst_size + 1)) "$src" >> "$dst" 2>/dev/null; then
-        FM_ARCHIVE_SYNC=grown
+      if fm_archive_prefix_ok "$src" "$dst" "$dst_size"; then
+        if tail -c +$((dst_size + 1)) "$src" >> "$dst" 2>/dev/null; then
+          FM_ARCHIVE_SYNC=grown
+        fi
+      else
+        fm_archive_save_rewritten "$src" "$dst"
       fi
     elif [ "$src_size" -eq "$dst_size" ]; then
       FM_ARCHIVE_SYNC=same
