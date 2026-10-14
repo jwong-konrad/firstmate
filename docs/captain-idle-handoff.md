@@ -149,7 +149,7 @@ Seeded `state/.last-captain-input` to nine hours earlier, then ran `claude -p "W
 Observed, in order, in a single turn:
 
 1. The hook fired and the directive reached the model.
-2. The model ran the capture through the `handoff` skill, writing `data/handoffs/2026-08-20-auth-refresh-status/handoff.md` and `data/handoffs/INDEX.md`.
+2. The model ran the capture through the `handoff` skill, writing a private operator record under `data/handoffs/` and updating `data/handoffs/INDEX.md`.
 3. It printed the banner verbatim as its first output, with `{{HANDOFF_PATH}}` replaced by that real path.
 4. It then answered the captain's actual question normally.
 

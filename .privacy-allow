@@ -1,0 +1,17 @@
+# Deliberate fixtures that bin/fm-privacy-scan.sh would otherwise report.
+# Format and matching rules: bin/fm-privacy-scan.sh --help.
+# Keep each entry as narrow as the fixture allows, and say why it is safe.
+
+# Upstream-authored verification captures and backend fixtures that quote the
+# upstream maintainer's own public home path; kept verbatim to stay mergeable.
+docs/herdr-backend.md home-path-macos /Users/kunchen$
+docs/sessionstart-nudge.md home-path-macos /Users/kunchen$
+tests/fm-backend-cmux.test.sh home-path-macos /Users/kunchen$
+tests/fm-backend-zellij.test.sh home-path-macos /Users/kunchen$
+
+# Fake values the tests write into fixture homes.
+tests/*.test.sh secret-env-value ^FMX_PAIRING_TOKEN=["']?(tok-|test-token)
+tests/fm-backend-cmux.test.sh secret-env-value ^CMUX_SOCKET_PASSWORD=sekret-pw
+
+# A sentinel value, not a credential.
+bin/fm-progress-lib.sh secret-env-value ^FM_PROGRESS_TOKEN=unrecorded$

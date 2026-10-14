@@ -2,7 +2,7 @@
 # Behavior test for bin/fm-pr-target-guard.sh, the refusal that keeps this home's
 # work from opening a pull request against a repository it must never reach.
 #
-# Motivating incidents (data/access-ledger.md section 1): four pull requests
+# Motivating incidents (evidence in a private operator record): four pull requests
 # against the pull-only upstream template - #856 on 2026-07-22, then #1318,
 # #1319 and #1320 on 2026-07-30. The store that actually decides the pipeline's
 # target is no-mistakes' own database, not git or gh config, so every case here

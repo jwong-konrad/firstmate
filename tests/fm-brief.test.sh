@@ -96,6 +96,32 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
 }
 
+# Briefs whose work becomes public text carry the publishing-hygiene section and
+# the privacy-scan step; local-only publishes nothing and omits both.
+test_publishing_hygiene_follows_delivery_mode() {
+  local home id_proj id proj brief
+  home="$TMP_ROOT/publishing-home"
+  write_registry "$home"
+  for id_proj in "brief-pub-nm-p1:no-registry-proj" "brief-pub-direct-p1:direct-proj"; do
+    id=${id_proj%%:*}
+    proj=${id_proj##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" >/dev/null 2>&1 \
+      || fail "fm-brief.sh $id $proj exited non-zero"
+    brief="$home/data/$id/brief.md"
+    assert_grep "# Publishing hygiene" "$brief" "$id: brief missing the publishing-hygiene section"
+    assert_grep "absolute personal paths, hostnames, or secret-shaped values" "$brief" \
+      "$id: brief lost the no-raw-captures rule"
+    assert_grep "/bin/fm-privacy-scan.sh --stdin\`" "$brief" "$id: brief lost the PR description scan"
+    assert_grep "/bin/fm-privacy-scan.sh --range origin/<default-branch>..HEAD\`" "$brief" \
+      "$id: brief lost the commit scan"
+  done
+  id="brief-pub-local-p1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj >/dev/null 2>&1 \
+    || fail "fm-brief.sh $id local-proj exited non-zero"
+  assert_no_grep "fm-privacy-scan" "$home/data/$id/brief.md" "local-only brief must not ask for a PR scan"
+  pass "fm-brief.sh: PR-producing briefs carry publishing hygiene and the privacy scan"
+}
+
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
 # reference must render as plain prose with no dangling apostrophe artifact.
 test_no_mistakes_dod_wording() {
@@ -494,6 +520,7 @@ run_case test_script_parses
 run_case test_help_includes_entire_header
 run_case test_ship_modes_generate_clean_briefs
 run_case test_faster_paths_use_configured_authority_without_stacked_review
+run_case test_publishing_hygiene_follows_delivery_mode
 run_case test_no_mistakes_dod_wording
 run_case test_no_mistakes_checkpoint_names_itself_local
 run_case test_ship_project_memory_wording

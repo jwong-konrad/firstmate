@@ -4,23 +4,14 @@ How much of the captain's environment a spawned worker inherits, why it is now d
 
 `bin/fm-env-clean.sh`'s header and `--help` own the exact mechanics and the built-in allowlist.
 [`configuration.md`](configuration.md) owns the `config/spawn-env-allow` and `config/project-env` schemas.
-This file is the incident record, the verification evidence, and the honest statement of residual risk.
+This file is the design rationale, the verification evidence, and the honest statement of residual risk.
 
-## The incident, 2026-07-31
+## Why blanket inheritance is the defect
 
 `bin/fm-spawn.sh` does not exec the agent directly.
-It types a command line into a pane whose shell is an ordinary login shell, so the agent inherited that shell's entire environment - including every secret the captain had exported.
-
-On 2026-07-31 `LINEAR_API_KEY` was present in the captain's shell environment.
-A spawned worker inherited it, the no-mistakes PR-body generation step serialized the value verbatim into the description of fork PR #3, and GitHub secret scanning raised an alert.
-The key was removed from the environment afterwards.
-
-The leaked variable was the symptom.
-The defect was blanket inheritance: firstmate had no control over what reached a worker, so the next exported secret would have leaked the same way.
-
-A note on a confusing piece of evidence: the 2026-08-04 parity audit found `LINEAR_API_KEY` unset in a worker, unset in a login shell, and absent from every shell profile ([`../data/qa-parity-audit-a6/report.md`](../data/qa-parity-audit-a6/report.md)).
-That does not refute the incident.
-Both readings are true at different times - the key was in the environment on 2026-07-31 and had been removed by 2026-08-04.
+It types a command line into a pane whose shell is an ordinary login shell, so without a control the agent inherits that shell's entire environment - including every secret the captain has exported.
+Anything a worker holds, a pipeline step can serialize into outward-facing text such as a generated PR description.
+The defect is blanket inheritance rather than any one variable: removing a single exported secret leaves the next one exposed the same way.
 The absence of one variable on one date is not evidence that the mechanism is safe.
 
 ## What changed
@@ -83,7 +74,7 @@ Widening an environment boundary should be a per-home act the captain performs d
 [`configuration.md`](configuration.md) owns its schema, its refusal behavior, and why it is not inherited into secondmate homes.
 
 The delivery mechanism is the load-bearing part, and it is worth recording why the obvious implementation is wrong.
-A draft patch (`projects/claude-qa/scripts/firstmate-patches/0002-fm-spawn-project-env-injection.patch`, written before this boundary existed) delivered it by sending `export NAME=VALUE` into the pane, alongside the `GOTMPDIR` export that is still there.
+An earlier draft patch, written before this boundary existed, delivered it by sending `export NAME=VALUE` into the pane, alongside the `GOTMPDIR` export that is still there.
 A pane export does not cross `env -i`, so that would have set the variable in the pane and silently never reached the agent - exactly the mysterious-mid-task-failure shape this boundary exists to avoid, and indistinguishable from working code on inspection.
 The `GOTMPDIR` pane export next to the seam is not a counterexample: the agent gets `GOTMPDIR` from `SPAWN_ENV_INJECT`, and the export exists only so a command the captain later types in that pane shares the task's temp root.
 
@@ -96,7 +87,7 @@ Everything below was run on macOS 25.6.0 (`darwin`), on this fleet, from a worke
 
 **The boundary holds.**
 `tests/fm-spawn-env-allowlist.test.sh` takes the exact command line `fm-spawn` types into the pane, runs it in a shell carrying an unexpected variable, and asserts the launched agent's environment does not contain it.
-Run against a `fm-spawn` with the wrapper disabled, that test fails with `not ok - LINEAR_API_KEY from the launching environment reached the worker`, which is the 2026-07-31 condition.
+Run against a `fm-spawn` with the wrapper disabled, that test fails with `not ok - LINEAR_API_KEY from the launching environment reached the worker`, which is the blanket-inheritance condition.
 
 **The worker can still do its job.**
 Under a clean environment with `SSH_AUTH_SOCK` unset:
@@ -104,7 +95,7 @@ Under a clean environment with `SSH_AUTH_SOCK` unset:
 ```
 $ env -i HOME=... PATH=... USER=... LOGNAME=... SHELL=... TERM=... LANG=... TMPDIR=... gh auth status
 github.com
-  ✓ Logged in to github.com account jwong-konrad (keyring)
+  ✓ Logged in to github.com account <account> (keyring)
   - Git operations protocol: https
 
 $ ... gh-axi repo view
@@ -115,7 +106,7 @@ $ ... git ls-remote --heads origin main
 7558ffbe768884dd079b9c6b1e446b11f60f3303	refs/heads/main
 
 $ ... git credential fill  (protocol=https host=github.com)
-username=jwong-konrad
+username=<account>
 password=<present>
 ```
 
@@ -138,14 +129,14 @@ The `gh auth status`, `gh-axi repo view`, `git ls-remote` over the SSH remote, a
 
 ## Verification, 2026-08-13: per-project environment
 
-Run on macOS 25.6.0 (`darwin`) against a fixture home whose `config/project-env` held one line, `polaris      PW_MCP_AUTH_APP=polaris`, with a fixture project clone named `polaris`.
+Run on macOS 25.6.0 (`darwin`) against a fixture home whose `config/project-env` held one line, `example-app  PW_MCP_AUTH_APP=example-app`, with a fixture project clone named `example-app`.
 The fixture directory is abbreviated below as `<d>` and this repo as `<repo>`; nothing else is edited.
 
 The launch line `fm-spawn` composed carries the value as an explicit assignment to the wrapper, next to `GOTMPDIR`:
 
 ```
 $ cat launch.log
-'<repo>/bin/fm-env-clean.sh' --allow-file '<d>/home/config/spawn-env-allow' 'GOTMPDIR=/tmp/fm-demo-x1/gotmp' 'PW_MCP_AUTH_APP=polaris' FM_MANAGED=1 CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions "$(cat '<d>/home/data/demo-x1/brief.md')"
+'<repo>/bin/fm-env-clean.sh' --allow-file '<d>/home/config/spawn-env-allow' 'GOTMPDIR=/tmp/fm-demo-x1/gotmp' 'PW_MCP_AUTH_APP=example-app' FM_MANAGED=1 CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions "$(cat '<d>/home/data/demo-x1/brief.md')"
 ```
 
 Running that exact line the way the pane's login shell would, in a shell also carrying `LINEAR_API_KEY`, and dumping the launched process's own environment:
@@ -153,7 +144,7 @@ Running that exact line the way the pane's login shell would, in a shell also ca
 ```
 $ env LINEAR_API_KEY=leaked PATH=<fixture-bin>:$PATH bash -c "$(cat launch.log)"
 $ grep -E 'PW_MCP_AUTH_APP|LINEAR_API_KEY' agent-env.txt
-PW_MCP_AUTH_APP=polaris
+PW_MCP_AUTH_APP=example-app
 ```
 
 The per-project value reached the agent process and the launching shell's secret did not, so widening the seam did not widen the boundary.
@@ -177,12 +168,11 @@ But `git push` over SSH still succeeds from a worker without the agent, verified
 
 ```
 $ env -u SSH_AUTH_SOCK ssh -o BatchMode=yes -T git@github.com
-Hi jwong-konrad! You've successfully authenticated, but GitHub does not provide shell access.
+Hi <account>! You've successfully authenticated, but GitHub does not provide shell access.
 ```
 
-Two independent reasons, both filesystem-level:
-`~/.ssh/config` sets `UseKeychain yes` for `github.com`, so `ssh` retrieves the passphrase for the encrypted `~/.ssh/id_ed25519` from the login keychain with no agent involved; and `~/.ssh/id_rsa` (used for the `kg-bastion*` hosts) has no passphrase at all.
-Any process running as the captain with `HOME` set can read those files.
+The reason is filesystem-level: file-based SSH keys under `~/.ssh`, and any passphrase or credential the login keychain hands back without an agent, remain reachable by any process running as the captain.
+An environment allowlist cannot change what a process running as that user can read.
 
 This is good news for the acceptance criterion that `git` keeps working, and it is the honest limit of an environment allowlist: dropping the agent socket removes an inherited *capability*, but it cannot remove access to a key sitting on disk.
 Closing that requires a filesystem boundary, which is the sandbox work (`sandbox-trust-services-spike-t1`, `sandbox-scout-dispatch-s0`), not this control.
@@ -204,7 +194,7 @@ The proxy variables (`HTTPS_PROXY` and friends) are allowed because a worker beh
 None are set on this fleet.
 
 **A pipeline can still serialize whatever the worker does hold.**
-The 2026-07-31 leak needed two things: a secret in the worker's environment, and a step that wrote the environment into outward-facing text.
+A leak through generated text needs two things: a secret in the worker's environment, and a step that writes the environment into outward-facing text.
 This control removes the first for firstmate-launched workers, and it is the load-bearing one because it closes the class rather than one symptom.
 The second lives in `no-mistakes`, which firstmate does not own and cannot enforce.
 Treat any pipeline or agent step that serializes environment into a PR body, issue comment, or log as a second necessary condition worth keeping absent - but not as a substitute for the allowlist.
