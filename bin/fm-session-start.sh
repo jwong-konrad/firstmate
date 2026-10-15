@@ -33,6 +33,24 @@
 #                       when this session actually holds the lock.
 #   3. wake-drain     - mutates the durable wake queue, so it also only runs
 #                       when locked.
+#   3b. outstanding testing - an OUTSTANDING TESTING section placed right after
+#                       the wake queue, ahead of the supervision block and
+#                       context, so the captain's standing session-start duty
+#                       never depends on remembering it. Lists every not-done
+#                       backlog item whose id matches the test patterns, one
+#                       line each (id, state, held/blocked noted, title), or one
+#                       explicit "none outstanding" line. Read-only, so it also
+#                       runs in lock-refused mode. Items are read through
+#                       tasks-axi; when the manual backend is configured or
+#                       tasks-axi is unavailable it prints a visible notice
+#                       instead of a list, never silence.
+#                       PATTERNS: shell globs matched against the whole task id.
+#                       Default is captain-test-* (captain-run tests). A home
+#                       overrides the default by listing one glob per line in
+#                       config/outstanding-test-patterns (blank lines and #
+#                       comments ignored); when that file exists it REPLACES the
+#                       default, so list captain-test-* again to keep it.
+#                       docs/configuration.md owns the file's schema.
 #   4. context digest - data/projects.md, data/secondmates.md, data/captain.md,
 #                       data/captain-shared.md, data/learnings.md: read-only,
 #                       always safe, always runs. Where data/captain/MAP.md or
@@ -262,6 +280,108 @@ pi_extension_loaded() {
   [ "$marker_version" = "$expected_version" ] && [ "$marker_pid" = "$lock_pid" ]
 }
 
+# outstanding_test_patterns: one glob per line, from config/outstanding-test-patterns
+# when present (replacing the default), else the generic default.
+outstanding_test_patterns() {
+  local file="$CONFIG/outstanding-test-patterns" line
+  if [ -f "$file" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      line=${line%%#*}
+      line=$(printf '%s' "$line" | tr -d '[:space:]')
+      [ -n "$line" ] && printf '%s\n' "$line"
+    done < "$file"
+    return 0
+  fi
+  printf '%s\n' 'captain-test-*'
+}
+
+# print_outstanding_testing: one line per not-done backlog item matching the
+# test patterns. Done items are filtered here too, not trusted to tasks-axi.
+print_outstanding_testing() {
+  local backlog="$DATA/backlog.md" out rc rows patterns
+  if [ ! -f "$backlog" ] || [ ! -s "$backlog" ]; then
+    printf 'none outstanding - no backlog items (data/backlog.md %s).\n' "$([ -f "$backlog" ] && printf 'empty' || printf 'absent')"
+    return 0
+  fi
+  if ! fm_tasks_axi_backend_available "$CONFIG"; then
+    if fm_backlog_backend_manual "$CONFIG"; then
+      printf 'UNAVAILABLE - manual backlog backend is configured, so the test list was NOT computed. Scan data/backlog.md by hand for ids matching: %s\n' "$(outstanding_test_patterns | paste -sd' ' -)"
+    else
+      printf 'UNAVAILABLE - tasks-axi is missing or incompatible, so the test list was NOT computed. Scan data/backlog.md by hand for ids matching: %s\n' "$(outstanding_test_patterns | paste -sd' ' -)"
+    fi
+    return 0
+  fi
+  out=$(tasks-axi list --file "$backlog" --limit 100000 --fields held,blocked 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf 'UNAVAILABLE - tasks-axi list failed, so the test list was NOT computed:\n%s\n' "$out"
+    return 0
+  fi
+  patterns=$(outstanding_test_patterns)
+  rows=$(printf '%s\n' "$out" | PATTERNS="$patterns" awk '
+    BEGIN {
+      n = split(ENVIRON["PATTERNS"], pats, "\n")
+    }
+    function globre(g,   r, i, c) {
+      r = "^"
+      for (i = 1; i <= length(g); i++) {
+        c = substr(g, i, 1)
+        if (c == "*") r = r ".*"
+        else if (c == "?") r = r "."
+        else if (c ~ /[][(){}.+^$|\\]/) r = r "\\" c
+        else r = r c
+      }
+      return r "$"
+    }
+    BEGIN { for (i = 1; i <= n; i++) if (pats[i] != "") re[i] = globre(pats[i]) }
+    /^count: / { cnt = $2 }
+    /^tasks\[[0-9]+\]\{id,state,kind,repo,title,held,blocked\}:$/ {
+      hdr = 1; inblk = 1; declared = $0
+      sub(/^tasks\[/, "", declared); sub(/\].*/, "", declared)
+      next
+    }
+    /^[^ ]/ { inblk = 0 }
+    inblk && /^  [^ ]/ {
+      seen++
+      line = substr($0, 3)
+      if (!match(line, /,(yes|no),(yes|no)$/)) { bad++; next }
+      flags = substr(line, RSTART + 1)
+      line = substr(line, 1, RSTART - 1)
+      split(flags, f, ",")
+      id = line; sub(/,.*/, "", id)
+      rest = substr(line, length(id) + 2)
+      state = rest; sub(/,.*/, "", state)
+      rest = substr(rest, length(state) + 2)
+      sub(/^[^,]*,/, "", rest)   # kind
+      sub(/^("[^"]*"|[^,]*),/, "", rest)   # repo
+      title = rest
+      if (title ~ /^".*"$/) title = substr(title, 2, length(title) - 2)
+      if (state == "done") next
+      hit = 0
+      for (i in re) if (id ~ re[i]) hit = 1
+      if (!hit) next
+      note = ""
+      if (f[1] == "yes") note = note " [HELD]"
+      if (f[2] == "yes") note = note " [BLOCKED]"
+      printf "- %s (%s)%s - %s\n", id, state, note, title
+    }
+    END {
+      if (bad > 0 || (hdr && seen != declared + 0) || (!hdr && cnt != "0")) print "@@UNPARSEABLE"
+    }
+  ')
+  if printf '%s\n' "$rows" | grep -qx '@@UNPARSEABLE'; then
+    printf 'UNAVAILABLE - tasks-axi list output could not be parsed, so the test list was NOT computed. Scan data/backlog.md by hand for ids matching: %s\n' "$(printf '%s\n' "$patterns" | paste -sd' ' -)"
+    return 0
+  fi
+  if [ -n "$rows" ]; then
+    printf 'patterns: %s\n' "$(printf '%s\n' "$patterns" | paste -sd' ' -)"
+    printf '%s outstanding test item(s):\n' "$(printf '%s\n' "$rows" | grep -c .)"
+    printf '%s\n' "$rows"
+  else
+    printf 'none outstanding - no not-done backlog item matches: %s\n' "$(printf '%s\n' "$patterns" | paste -sd' ' -)"
+  fi
+}
+
 section "SESSION START - $FM_HOME"
 
 # --- 1. lock -----------------------------------------------------------
@@ -321,6 +441,12 @@ else
     printf '(no queued wakes)\n'
   fi
 fi
+
+# --- 3b. outstanding testing ---------------------------------------------
+# Read-only, so it runs in lock-refused mode too. Placed ahead of the
+# supervision block and context so it is never buried.
+section "OUTSTANDING TESTING"
+print_outstanding_testing
 
 # --- 4. supervision operating instructions ----------------------------------
 AFK_PRESENT=0

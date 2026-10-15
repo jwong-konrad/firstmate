@@ -25,4 +25,5 @@ config/spawn-env-allow
 config/app-checkouts
 config/project-env
 config/pr-target-deny
+config/outstanding-test-patterns
 config/privacy-patterns.local

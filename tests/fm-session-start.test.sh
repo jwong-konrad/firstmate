@@ -17,6 +17,8 @@
 #   - orphan status logs whose task meta has already disappeared
 #   - per-task endpoint-liveness lines for a live and a dead recorded target,
 #     tmux and herdr both
+#   - the OUTSTANDING TESTING section: items, none, held/blocked, config
+#     patterns, visible unavailable backend, placement, read-only mode
 #   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
 #     fm-wake-drain.sh (their real, distinctive output appears verbatim), it
 #     does not reimplement their logic
@@ -772,6 +774,191 @@ EOF
   pass "unavailable or incompatible tasks-axi falls back to compact manual backlog rendering"
 }
 
+
+# make_fake_tasks_axi_tests <fakebin>: a compatible tasks-axi whose `list`
+# prints the rows in $FM_FAKE_TASKS_AXI_ROWS (real `--fields held,blocked`
+# shape) and fails when $FM_FAKE_TASKS_AXI_LIST_FAIL is set.
+make_fake_tasks_axi_tests() {
+  local fakebin=$1
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  --version|-v|-V) printf '%s\n' '0.2.3'; exit 0 ;;
+  update) [ "${2:-}" = --help ] && printf '%s\n' 'usage: tasks-axi update <id> [--archive-body]' && exit 0 ;;
+  mv) [ "${2:-}" = --help ] && printf '%s\n' 'usage: tasks-axi mv <dest> [<id>...]' && exit 0 ;;
+  list)
+    if [ -n "${FM_FAKE_TASKS_AXI_LIST_FAIL:-}" ]; then
+      printf '%s\n' 'error: boom' >&2
+      exit 3
+    fi
+    rows=$(printf '%s\n' "${FM_FAKE_TASKS_AXI_ROWS:-}" | sed '/^$/d')
+    n=$(printf '%s\n' "$rows" | grep -c .)
+    n=${FM_FAKE_TASKS_AXI_COUNT:-$n}
+    printf 'count: %s\ntasks[%s]{id,state,kind,repo,title,held,blocked}:\n' "$n" "$n"
+    printf '%s\n' "$rows"
+    printf 'help[1]:\n  - Run `tasks-axi show <id>` for full notes on a task\n'
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tasks-axi"
+}
+
+# outstanding_world <name>: world with toolchain, test tasks-axi, and a
+# non-empty backlog. Echoes "<root>|<home>|<fakebin>".
+outstanding_world() {
+  local rec root home fakebin
+  rec=$(new_world "$1")
+  IFS='|' read -r root home fakebin <<WORLD
+$rec
+WORLD
+  make_fake_toolchain "$fakebin"
+  make_fake_tasks_axi_tests "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  printf '# Backlog\n\n## Queued\n- [ ] x - y\n' > "$home/data/backlog.md"
+  printf '%s|%s|%s\n' "$root" "$home" "$fakebin"
+}
+
+# outstanding_section <out>: only the OUTSTANDING TESTING section body.
+outstanding_section() {
+  printf '%s\n' "$1" | awk '/^OUTSTANDING TESTING$/{f=1;next} f&&/^====/{c++; if(c==2)exit; next} f'
+}
+
+test_outstanding_testing_lists_items_one_line_each() {
+  local rec root home fakebin out sec
+  rec=$(outstanding_world outstanding-items)
+  IFS='|' read -r root home fakebin <<WORLD
+$rec
+WORLD
+  out=$(FM_FAKE_TASKS_AXI_ROWS='  captain-test-a,queued,task,"-","Run X https://example.invalid/pull/1",no,no
+  other-y,queued,task,"-",unrelated,no,no
+  captain-test-d,done,task,"-",finished,no,no
+  captain-test-z,in_flight,task,"-","has, comma",no,no' \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  sec=$(outstanding_section "$out")
+  assert_contains "$sec" "2 outstanding test item(s):" "count line missing"
+  assert_contains "$sec" "- captain-test-a (queued) - Run X https://example.invalid/pull/1" "queued test line missing or malformed"
+  assert_contains "$sec" "- captain-test-z (in_flight) - has, comma" "comma title not preserved"
+  assert_not_contains "$sec" "other-y" "non-test item leaked into the section"
+  assert_not_contains "$sec" "captain-test-d" "done item listed as outstanding"
+  pass "outstanding testing lists matching items one line each with titles"
+}
+
+test_outstanding_testing_none_is_explicit() {
+  local rec root home fakebin out sec
+  rec=$(outstanding_world outstanding-none)
+  IFS='|' read -r root home fakebin <<WORLD
+$rec
+WORLD
+  out=$(FM_FAKE_TASKS_AXI_ROWS='  other-y,queued,task,"-",unrelated,no,no' run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  sec=$(outstanding_section "$out")
+  assert_contains "$sec" "none outstanding - no not-done backlog item matches: captain-test-*" "explicit none line missing"
+  pass "outstanding testing prints one explicit none line"
+}
+
+test_outstanding_testing_notes_held_and_blocked() {
+  local rec root home fakebin out sec
+  rec=$(outstanding_world outstanding-flags)
+  IFS='|' read -r root home fakebin <<WORLD
+$rec
+WORLD
+  out=$(FM_FAKE_TASKS_AXI_ROWS='  captain-test-h,queued,task,"-",held one,yes,no
+  captain-test-b,queued,task,"-",blocked one,no,yes' run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  sec=$(outstanding_section "$out")
+  assert_contains "$sec" "- captain-test-h (queued) [HELD] - held one" "held note missing"
+  assert_contains "$sec" "- captain-test-b (queued) [BLOCKED] - blocked one" "blocked note missing"
+  pass "outstanding testing notes held and blocked items"
+}
+
+test_outstanding_testing_config_patterns_replace_default() {
+  local rec root home fakebin out sec
+  rec=$(outstanding_world outstanding-config)
+  IFS='|' read -r root home fakebin <<WORLD
+$rec
+WORLD
+  printf '# site tests\n*verify-*\n\ncaptain-test-*  # keep default\n' > "$home/config/outstanding-test-patterns"
+  out=$(FM_FAKE_TASKS_AXI_ROWS='  captain-test-a,queued,task,"-",one,no,no
+  two-verify-x,queued,task,"-",worker half,no,no
+  other-y,queued,task,"-",unrelated,no,no' run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  sec=$(outstanding_section "$out")
+  assert_contains "$sec" "- two-verify-x (queued) - worker half" "configured glob did not match"
+  assert_contains "$sec" "- captain-test-a (queued) - one" "re-listed default glob did not match"
+  assert_not_contains "$sec" "other-y" "unmatched item listed"
+  printf '*verify-*\n' > "$home/config/outstanding-test-patterns"
+  out=$(FM_FAKE_TASKS_AXI_ROWS='  captain-test-a,queued,task,"-",one,no,no' run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$(outstanding_section "$out")" "none outstanding" "config file did not replace the default"
+  pass "config/outstanding-test-patterns replaces the default globs"
+}
+
+test_outstanding_testing_backend_unavailable_is_visible() {
+  local rec root home fakebin out sec
+  rec=$(outstanding_world outstanding-unavailable)
+  IFS='|' read -r root home fakebin <<WORLD
+$rec
+WORLD
+  printf 'manual\n' > "$home/config/backlog-backend"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  sec=$(outstanding_section "$out")
+  assert_contains "$sec" "UNAVAILABLE - manual backlog backend is configured" "manual backend degraded silently"
+  rm -f "$home/config/backlog-backend"
+  out=$(FM_FAKE_TASKS_AXI_LIST_FAIL=1 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$(outstanding_section "$out")" "UNAVAILABLE - tasks-axi list failed" "list failure degraded silently"
+  rm -f "$fakebin/tasks-axi"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$(outstanding_section "$out")" "UNAVAILABLE - tasks-axi is missing or incompatible" "missing tasks-axi degraded silently"
+  pass "outstanding testing reports an unavailable backend visibly"
+}
+
+test_outstanding_testing_unparseable_output_is_unavailable() {
+  local rec root home fakebin out sec
+  rec=$(outstanding_world outstanding-unparseable)
+  IFS='|' read -r root home fakebin <<WORLD
+$rec
+WORLD
+  out=$(FM_FAKE_TASKS_AXI_ROWS='  captain-test-a,queued,task,"-",one,maybe,no' run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  sec=$(outstanding_section "$out")
+  assert_contains "$sec" "UNAVAILABLE - tasks-axi list output could not be parsed" "malformed row degraded to none"
+  assert_not_contains "$sec" "none outstanding" "malformed row printed a false none"
+  out=$(FM_FAKE_TASKS_AXI_COUNT=3 FM_FAKE_TASKS_AXI_ROWS='  captain-test-a,queued,task,"-",one,no,no' run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$(outstanding_section "$out")" "UNAVAILABLE - tasks-axi list output could not be parsed" "header/count mismatch degraded to none"
+  pass "outstanding testing reports unparseable tasks-axi output as UNAVAILABLE"
+}
+
+test_outstanding_testing_placement() {
+  local rec root home fakebin out pq po pc
+  rec=$(outstanding_world outstanding-placement)
+  IFS='|' read -r root home fakebin <<WORLD
+$rec
+WORLD
+  out=$(FM_FAKE_TASKS_AXI_ROWS='  captain-test-a,queued,task,"-",one,no,no' run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  pq=$(printf '%s\n' "$out" | grep -n '^WAKE QUEUE$' | head -1 | cut -d: -f1)
+  po=$(printf '%s\n' "$out" | grep -n '^OUTSTANDING TESTING$' | head -1 | cut -d: -f1)
+  pc=$(printf '%s\n' "$out" | grep -n '^CONTEXT$' | head -1 | cut -d: -f1)
+  if [ -n "$pq" ] && [ -n "$po" ] && [ -n "$pc" ] && [ "$pq" -lt "$po" ] && [ "$po" -lt "$pc" ]; then
+    pass "outstanding testing sits after the wake queue and before context"
+  else
+    fail "OUTSTANDING TESTING is not between the wake queue and context ($pq/$po/$pc)"
+  fi
+}
+
+test_outstanding_testing_prints_when_lock_refused() {
+  local rec root home fakebin out holder
+  rec=$(outstanding_world outstanding-readonly)
+  IFS='|' read -r root home fakebin <<WORLD
+$rec
+WORLD
+  sleep 60 &
+  holder=$!
+  printf '%s\n' "$holder" > "$home/state/.lock"
+  out=$(FM_FAKE_TASKS_AXI_ROWS='  captain-test-a,queued,task,"-",one,no,no' run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  kill "$holder" 2>/dev/null
+  assert_contains "$out" "READ-ONLY SESSION" "lock was not refused; fixture invalid"
+  assert_contains "$out" "- captain-test-a (queued) - one" "outstanding testing missing in read-only mode"
+  pass "outstanding testing still prints in a lock-refused session"
+}
+
 # --- fleet-state digest: no in-flight tasks ----------------------------------
 
 test_fleet_digest_empty_fleet() {
@@ -985,4 +1172,12 @@ run_case test_pi_diagnostic_rejects_stale_loaded_marker
 run_case test_pi_diagnostic_accepts_prelock_loaded_marker
 run_case test_pi_diagnostic_rejects_missing_turnend_guard_marker
 run_case test_pi_diagnostic_rejects_previous_session_loaded_marker
+run_case test_outstanding_testing_lists_items_one_line_each
+run_case test_outstanding_testing_none_is_explicit
+run_case test_outstanding_testing_notes_held_and_blocked
+run_case test_outstanding_testing_config_patterns_replace_default
+run_case test_outstanding_testing_backend_unavailable_is_visible
+run_case test_outstanding_testing_unparseable_output_is_unavailable
+run_case test_outstanding_testing_placement
+run_case test_outstanding_testing_prints_when_lock_refused
 fm_case_summary "fm-session-start"
