@@ -38,6 +38,19 @@ Set the local, gitignored `config/backlog-backend` file to `manual` to force man
 Absent or `tasks-axi` selects the default tasks-axi backend.
 The file format is unchanged in both modes; tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
 
+## Outstanding testing (config/outstanding-test-patterns)
+
+The session-start digest prints an OUTSTANDING TESTING section right after the wake queue, listing every not-done backlog item that is a test, one line each with its id, state, a `[HELD]` or `[BLOCKED]` note, and its title.
+It reads the backlog through `tasks-axi list`, which has no tag selector, so a test is recognised by task id.
+The default pattern is the shell glob `captain-test-*`.
+The local, gitignored `config/outstanding-test-patterns` file replaces the default: one shell glob per line, matched against the whole task id, with blank lines and `#` comments ignored.
+List `captain-test-*` again to keep the default alongside site-specific patterns.
+With no match the section prints one explicit "none outstanding" line.
+With the manual backlog backend or an unusable `tasks-axi`, it prints a visible UNAVAILABLE notice naming the patterns rather than a list.
+The section is read-only and also prints in a lock-refused session.
+The file is not inherited into secondmate homes.
+`bin/fm-session-start.sh`'s header owns the section's placement and behavior.
+
 ## Runtime backend (config/backend / FM_BACKEND)
 
 For spawn-capable adapters, the runtime session-provider backend controls where task windows/endpoints are created, captured, sent to, watched, and killed.
