@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Regression Board</title>
+<!-- Template for bin/fm-regression.sh render, which puts the derived model in the board-data
+     block; everything else is static. No external fetches: styles and script are inline. -->
+<style>
+:root {
+  --bg: #f7f7f5; --surface: #ffffff; --surface-2: #f0f0ec; --text: #1c1c1a; --muted: #62625c;
+  --border: #dcdcd5; --accent: #2b5fb4;
+  --good: #1f7a3d; --good-bg: #e3f3e8; --warn: #8a5a00; --warn-bg: #fbf0d9;
+  --bad: #b3261e; --bad-bg: #fbe4e2; --info: #39598a; --info-bg: #e5ecf7; --none-bg: #ececea;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #141413; --surface: #1d1d1b; --surface-2: #262624; --text: #ecece8; --muted: #a3a39b;
+    --border: #3a3a36; --accent: #8fb3ef;
+    --good: #7fd19a; --good-bg: #1d3325; --warn: #f0c46b; --warn-bg: #3a2f17;
+    --bad: #f2948d; --bad-bg: #3d1f1d; --info: #a9c1ea; --info-bg: #1f2a3c; --none-bg: #2c2c29;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #141413; --surface: #1d1d1b; --surface-2: #262624; --text: #ecece8; --muted: #a3a39b;
+  --border: #3a3a36; --accent: #8fb3ef;
+  --good: #7fd19a; --good-bg: #1d3325; --warn: #f0c46b; --warn-bg: #3a2f17;
+  --bad: #f2948d; --bad-bg: #3d1f1d; --info: #a9c1ea; --info-bg: #1f2a3c; --none-bg: #2c2c29;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+h1 { font-size: 1.35rem; margin: 0 0 4px; }
+h2 { font-size: 1.05rem; margin: 0 0 10px; }
+h3 { font-size: .95rem; margin: 14px 0 6px; color: var(--muted); }
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85em; }
+code { overflow-wrap: anywhere; user-select: all; }
+a { color: var(--accent); }
+.sub { color: var(--muted); margin: 0 0 14px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  padding: 14px; margin: 0 0 14px; min-width: 0; }
+.strip { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: .88rem; position: sticky; top: 0; z-index: 2; }
+.strip.old { background: var(--bad-bg); border-color: var(--bad); color: var(--bad); }
+.strip b { font-weight: 600; }
+.verdict { font-size: 1.1rem; font-weight: 700; padding: 8px 12px; border-radius: 8px; margin: 0 0 10px; }
+.verdict.no { background: var(--bad-bg); color: var(--bad); }
+.verdict.yes { background: var(--good-bg); color: var(--good); }
+.counts { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
+.count { border-radius: 8px; padding: 6px 10px; display: flex; justify-content: space-between; gap: 8px; min-width: 0; }
+.count .n { font-weight: 700; font-variant-numeric: tabular-nums; }
+.count.zero { opacity: .55; }
+.badge { display: inline-block; border-radius: 999px; padding: 1px 8px; font-size: .78rem; font-weight: 600; white-space: nowrap; }
+.s-good { background: var(--good-bg); color: var(--good); }
+.s-warn { background: var(--warn-bg); color: var(--warn); }
+.s-bad { background: var(--bad-bg); color: var(--bad); }
+.s-info { background: var(--info-bg); color: var(--info); }
+.s-none { background: var(--none-bg); color: var(--muted); }
+.grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+ul.list { margin: 0; padding-left: 18px; }
+ul.list li { margin: 3px 0; overflow-wrap: anywhere; }
+.empty { color: var(--muted); font-style: italic; }
+details { border-top: 1px solid var(--border); }
+details:first-of-type { border-top: 0; }
+summary { cursor: pointer; padding: 8px 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; list-style: none; }
+summary::-webkit-details-marker { display: none; }
+summary::before { content: "\25B8"; color: var(--muted); }
+details[open] > summary::before { content: "\25BE"; }
+.item-body, .check-body { padding: 0 0 10px 16px; min-width: 0; }
+.meta { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: .85rem; color: var(--muted); margin: 0 0 6px; }
+.claim { margin: 0 0 6px; }
+.envs { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 6px; margin: 6px 0; }
+.cell { border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; background: var(--surface-2); min-width: 0; }
+.cell.dim { opacity: .6; }
+.cell .env { font-size: .8rem; color: var(--muted); display: flex; justify-content: space-between; gap: 6px; }
+.layers { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 4px; }
+.obs { font-size: .82rem; margin: 6px 0 0; padding: 0; list-style: none; }
+.obs li { border-top: 1px dashed var(--border); padding: 4px 0; overflow-wrap: anywhere; }
+.obs li.sup { text-decoration: line-through; opacity: .6; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin: 0 0 8px; }
+.controls input[type=search] { flex: 1 1 200px; min-width: 0; padding: 6px 8px; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; }
+.flag { color: var(--warn); font-size: .82rem; font-weight: 600; }
+@media (max-width: 560px) { main { padding: 12px 16px; } .counts { grid-template-columns: 1fr 1fr; } }
+</style>
+</head>
+<body>
+<main id="app"><p>Loading the board&#8230;</p></main>
+<script type="application/json" id="board-data">
+/*BOARD_DATA*/
+</script>
+<script>
+(function () {
+  "use strict";
+  var D = JSON.parse(document.getElementById("board-data").textContent);
+  var L = D.labels;
+  var STALE_AFTER_MS = 24 * 60 * 60 * 1000;
+  var TONE = {
+    "proven": "s-good", "as-designed": "s-good", "ui-owed": "s-warn", "layer-owed": "s-warn",
+    "still-open": "s-bad", "never-observed": "s-bad", "unknown": "s-bad", "stale": "s-warn",
+    "code-only": "s-warn", "blocked": "s-warn", "not-run": "s-warn", "not-testable": "s-info",
+    "out-of-scope": "s-none", "no-checks": "s-bad", "baseline": "s-none"
+  };
+  var RESULT_TONE = { "FIXED": "s-good", "AS-DESIGNED": "s-good", "STILL-OPEN": "s-bad",
+    "OBSERVED": "s-none", "NOT-RUN": "s-warn", "NOT-TESTABLE": "s-info", "BLOCKED": "s-warn" };
+  var UNBLOCK = {
+    "round": "Needs a round", "fixture": "Needs a fixture or identity", "decision": "Needs your decision",
+    "dev": "Needs the dev team", "staging": "Not testable locally (staging only)",
+    "define-checks": "Needs checks written"
+  };
+
+  function h(tag, attrs) {
+    var el = document.createElement(tag);
+    if (attrs) Object.keys(attrs).forEach(function (k) {
+      if (k === "class") el.className = attrs[k];
+      else if (k === "text") el.textContent = attrs[k];
+      else el.setAttribute(k, attrs[k]);
+    });
+    for (var i = 2; i < arguments.length; i++) {
+      var c = arguments[i];
+      if (c === null || c === undefined || c === false) continue;
+      if (Array.isArray(c)) c.forEach(function (x) { if (x) el.appendChild(typeof x === "string" ? document.createTextNode(x) : x); });
+      else el.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+    }
+    return el;
+  }
+  function badge(state, text) { return h("span", { "class": "badge " + (TONE[state] || "s-none"), text: text || L[state] || state }); }
+  function rbadge(layer, result) { return h("span", { "class": "badge " + (RESULT_TONE[result] || "s-none"), text: layer + " " + result }); }
+  function fmt(ts) {
+    if (!ts) return "never";
+    var d = new Date(ts);
+    return isNaN(d) ? String(ts) : d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+  }
+  function ago(ms) {
+    var m = Math.round(ms / 60000);
+    if (m < 60) return m + " min ago";
+    var hr = Math.round(m / 60);
+    return hr < 48 ? hr + " h ago" : Math.round(hr / 24) + " days ago";
+  }
+  function shortSha(s) { return s && s !== "unidentified" && s.length > 9 ? s.slice(0, 9) : s; }
+  function evidence(ev) {
+    if (!ev || ev === "-") return h("span", { "class": "empty", text: "no evidence path" });
+    if (/^https?:\/\//.test(ev)) return h("a", { href: ev, rel: "noreferrer", text: ev });
+    var root = D.effort.evidence_root;
+    var p = ev.charAt(0) === "/" || !root ? ev : root.replace(/\/$/, "") + "/" + ev;
+    return h("code", { text: p });
+  }
+  function itemLabel(it) { return it.linear_id ? it.linear_id + (it.title ? " " + it.title : "") : it.id + " " + (it.title || ""); }
+  var byId = {};
+  D.items.forEach(function (it) { byId[it.id] = it; });
+
+  var app = document.getElementById("app");
+  app.textContent = "";
+  document.title = D.effort.title + " - Regression Board";
+  app.appendChild(h("h1", { text: D.effort.title }));
+  app.appendChild(h("p", { "class": "sub" }, "Effort ", h("span", { "class": "mono", text: D.effort.id }),
+    ". Target environments: " + D.effort.target_envs.join(", ") + ". Generated from the ledger; never edit this page by hand."));
+
+  // Freshness strip: the page judges its own age in the browser from the embedded render time.
+  var age = Date.now() - new Date(D.rendered_at).getTime();
+  var old = !(age < STALE_AFTER_MS);
+  var lr = D.linear_read;
+  app.appendChild(h("section", { "class": "card strip" + (old ? " old" : ""), "aria-label": "Freshness" },
+    old ? h("span", null, h("b", { text: "This board may be out of date. " })) : null,
+    h("span", null, h("b", { text: "Rendered " }), fmt(D.rendered_at) + " (" + (isNaN(age) ? "unknown age" : ago(age)) + ")"),
+    h("span", null, h("b", { text: "Linear read " }), lr.tickets ? (fmt(lr.oldest) + (lr.newest !== lr.oldest ? " to " + fmt(lr.newest) : "") + ", " + lr.tickets + " tickets") : "never"),
+    h("span", null, h("b", { text: "Last round " }), D.last_round ? D.last_round.id + (D.last_round.closed ? ", closed " + fmt(D.last_round.closed) : ", not closed") : "none"),
+    h("span", null, h("b", { text: "Lint " }), D.lint.length ? D.lint.length + " failure(s)" : "clean"),
+    h("span", null, h("b", { text: "Decisions " }), D.decisions_read ? "read from the backlog at render" : "not read")));
+
+  // Headline counts: every state is shown, zero included, and the counts add up to the total.
+  var head = h("section", { "class": "card", "aria-label": "Headline" });
+  head.appendChild(h("div", { "class": "verdict " + (D.ready.ready ? "yes" : "no"),
+    text: (D.ready.ready ? "READY FOR STAGE" : "NOT READY FOR STAGE") + ": " + D.ready.reason }));
+  head.appendChild(h("p", { "class": "sub", text: D.totals.items + " items, " + D.totals.checks + " checks. Check states on the target build:" }));
+  head.appendChild(h("div", { "class": "counts" }, D.check_counts.map(function (c) {
+    return h("div", { "class": "count " + (TONE[c.state] || "s-none") + (c.count ? "" : " zero") },
+      h("span", { text: L[c.state] }), h("span", { "class": "n", text: String(c.count) }));
+  })));
+  head.appendChild(h("p", { "class": "sub", style: "margin-top:10px" }, "Items by worst check: " +
+    D.item_counts.filter(function (c) { return c.count; }).map(function (c) { return c.count + " " + L[c.state]; }).join(" · ")));
+  app.appendChild(head);
+
+  // Panel A: outstanding before stage, grouped by what unblocks it.
+  var pa = h("section", { "class": "card", "aria-label": "Outstanding before stage" }, h("h2", { text: "A. Outstanding before stage" }));
+  if (!D.panel_a.length) pa.appendChild(h("p", { "class": "empty", text: "Nothing outstanding." }));
+  D.panel_a.forEach(function (g) {
+    pa.appendChild(h("h3", { text: (UNBLOCK[g.unblock] || g.unblock) + " (" + g.items.length + ")" }));
+    pa.appendChild(h("ul", { "class": "list" }, g.items.map(function (it) {
+      return h("li", null, badge(it.state), " ", h("a", { href: "#item-" + it.item, text: itemLabel(byId[it.item]) }),
+        it.next_action ? " - " + it.next_action : "",
+        h("span", { "class": "sub" }, " (" + it.open_checks.map(function (c) { return c.id + ": " + L[c.state]; }).join("; ") + ")"));
+    })));
+  });
+
+  // Panel B: what changed between the last two rounds, plus Linear moves between snapshots.
+  var pb = h("section", { "class": "card", "aria-label": "Changed since the last round" }, h("h2", { text: "B. Changed since the last round" }));
+  var rb = D.panel_b.rounds;
+  if (!rb.from) pb.appendChild(h("p", { "class": "empty", text: "Fewer than two rounds recorded; nothing to compare yet." }));
+  else {
+    pb.appendChild(h("p", { "class": "sub", text: "From round " + rb.from + " to " + rb.to + ":" }));
+    pb.appendChild(rb.cells.length ? h("ul", { "class": "list" }, rb.cells.map(function (c) {
+      return h("li", null, h("a", { href: "#item-" + c.item, text: c.check }), ": ", badge(c.before), " to ", badge(c.after));
+    })) : h("p", { "class": "empty", text: "No check changed state." }));
+  }
+  pb.appendChild(h("h3", { text: "Linear status moves between snapshots" }));
+  pb.appendChild(D.panel_b.linear.length ? h("ul", { "class": "list" }, D.panel_b.linear.map(function (m) {
+    return h("li", { text: m.ticket + ": " + m.from + " to " + m.to + " (read " + fmt(m.read_at) + ")" });
+  })) : h("p", { "class": "empty", text: "None recorded." }));
+
+  // Panel C: what needs the captain.
+  var pc = h("section", { "class": "card", "aria-label": "Needs you" }, h("h2", { text: "C. Needs you" }));
+  var openDec = D.panel_c.decisions.filter(function (d) { return d.state === "open"; });
+  var otherDec = D.panel_c.decisions.filter(function (d) { return d.state !== "open" && d.state !== "resolved"; });
+  pc.appendChild(h("h3", { text: "Your open decisions (" + openDec.length + ")" }));
+  if (!D.decisions_read) pc.appendChild(h("p", { "class": "empty", text: "The backlog was not read at this render, so open decisions are unknown." }));
+  else pc.appendChild(openDec.length ? h("ul", { "class": "list" }, openDec.map(function (d) {
+    return h("li", null, h("span", { "class": "mono", text: d.key }), d.title ? " - " + d.title : "");
+  })) : h("p", { "class": "empty", text: "No linked decision is open." }));
+  if (D.decisions_read && otherDec.length) pc.appendChild(h("p", { "class": "sub", text: "Linked but not in the backlog (resolved and archived, or never registered): " +
+    otherDec.map(function (d) { return d.key + " (" + d.state + ")"; }).join(", ") }));
+  [["Linear disagrees with our evidence", D.panel_c.linear_disagrees], ["Results not yet relayed to Linear", D.panel_c.not_relayed]].forEach(function (p) {
+    pc.appendChild(h("h3", { text: p[0] + " (" + p[1].length + ")" }));
+    pc.appendChild(p[1].length ? h("ul", { "class": "list" }, p[1].map(function (f) {
+      return h("li", null, f.item ? h("a", { href: "#item-" + f.item, text: f.message }) : f.message);
+    })) : h("p", { "class": "empty", text: "None." }));
+  });
+  app.appendChild(h("div", { "class": "grid3" }, pa, h("div", null, pb, pc)));
+
+  // Lint: every failure, each also counted in the freshness strip.
+  var lint = h("section", { "class": "card", "aria-label": "Lint" }, h("h2", { text: "Lint (" + D.lint.length + ")" }));
+  if (!D.lint.length) lint.appendChild(h("p", { "class": "empty", text: "Clean." }));
+  var rules = [];
+  D.lint.forEach(function (f) { if (rules.indexOf(f.rule) < 0) rules.push(f.rule); });
+  rules.forEach(function (rule) {
+    var fs = D.lint.filter(function (f) { return f.rule === rule; });
+    lint.appendChild(h("details", null, h("summary", null, h("span", { "class": "mono", text: rule }), h("span", { "class": "badge s-bad", text: String(fs.length) })),
+      h("ul", { "class": "list" }, fs.map(function (f) {
+        return h("li", null, f.item ? h("a", { href: "#item-" + f.item, text: f.message }) : f.message);
+      }))));
+  });
+  app.appendChild(lint);
+
+  // Drill-down: item -> checks -> per-environment cells -> observations.
+  var buildsByEnv = {};
+  D.builds.forEach(function (b) { (buildsByEnv[b.env] = buildsByEnv[b.env] || []).push(b); });
+  function cellView(c, cell) {
+    var live = cell.observations.filter(function (o) { return !o.superseded; });
+    var latest = {};
+    live.forEach(function (o) { latest[o.layer] = o; });
+    var cur = (buildsByEnv[cell.env] || []).filter(function (b) { return b.current; })[0];
+    return h("div", { "class": "cell" + (cell.required_env ? "" : " dim") },
+      h("div", { "class": "env" }, h("span", { text: cell.env + (cell.required_env ? "" : " (not required)") }),
+        h("span", { "class": "mono", text: cur ? shortSha(cur.sha) : "no build" })),
+      badge(cell.state),
+      cell.owed ? h("div", { "class": "sub", text: "owed: " + cell.owed.join(", ") }) : null,
+      cell.detail ? h("div", { "class": "sub", text: cell.detail }) : null,
+      h("div", { "class": "layers" }, Object.keys(latest).map(function (k) { return rbadge(k, latest[k].result); })),
+      cell.observations.length ? h("details", null, h("summary", { text: cell.observations.length + " observation(s)" }),
+        h("ul", { "class": "obs" }, cell.observations.map(function (o) {
+          return h("li", { "class": o.superseded ? "sup" : "" },
+            rbadge(o.layer, o.result), " round " + o.round + (o.date ? ", " + o.date : "") + ", build " + shortSha(o.build),
+            o.reason ? h("div", { text: o.reason }) : null,
+            h("div", null, evidence(o.evidence)),
+            h("div", { "class": "sub", text: "line " + o.id + (o.supersedes ? ", supersedes " + o.supersedes : "") + (o.recorded_by ? ", recorded by " + o.recorded_by : "") }));
+        }))) : null);
+  }
+  var drill = h("section", { "class": "card", "aria-label": "Items" }, h("h2", { text: "Items (" + D.items.length + ")" }));
+  var search = h("input", { type: "search", placeholder: "Filter items", "aria-label": "Filter items" });
+  var hideDone = h("input", { type: "checkbox", id: "hide-done" });
+  drill.appendChild(h("div", { "class": "controls" }, search, h("label", null, hideDone, " hide proven, as designed and out of scope")));
+  var ORDER = D.check_counts.map(function (c) { return c.state; });
+  var rows = D.items.slice().sort(function (a, b) { return ORDER.indexOf(a.state) - ORDER.indexOf(b.state); }).map(function (it) {
+    var row = h("details", { id: "item-" + it.id, "data-state": it.state, "data-text": (itemLabel(it) + " " + it.id).toLowerCase() },
+      h("summary", null, badge(it.state), h("b", { text: it.linear_id || it.id }), h("span", { text: it.title || "" }),
+        it.linear ? h("span", { "class": "sub", text: "Linear: " + it.linear.status }) : null,
+        it.imported ? h("span", { "class": "flag", text: "imported, never re-observed" }) : null),
+      h("div", { "class": "item-body" },
+        h("div", { "class": "meta" },
+          h("span", { text: "kind " + (it.kind || "ticket") }),
+          h("span", { text: "scope " + it.scope + (it.scope_reason ? " (" + it.scope_reason + ")" : "") }),
+          it.owner_next ? h("span", { text: "next: " + it.owner_next }) : null,
+          it.visibility ? h("span", { text: "visibility " + it.visibility }) : null,
+          it.linear ? h("span", { text: "Linear " + it.linear.status + (it.linear.assignee ? ", " + it.linear.assignee : "") + ", read " + fmt(it.linear.read_at) }) : null),
+        it.next_action ? h("p", { "class": "claim", text: "Next: " + it.next_action }) : null,
+        it.imported ? h("p", { "class": "flag", text: "Imported from " + it.imported + "; never re-observed under this ledger." }) : null,
+        it.note ? h("p", { "class": "sub", text: it.note }) : null,
+        it.decisions.length ? h("p", { "class": "sub", text: "Decisions: " + it.decisions.map(function (d) { return d.key + " (" + d.state + ")"; }).join(", ") }) : null,
+        it.relays.length ? h("p", { "class": "sub", text: "Relayed: " + it.relays.map(function (r) { return r.date + " " + r.action + " " + r.verdict + (r.note ? " - " + r.note : ""); }).join("; ") }) : null,
+        it.checks.length ? it.checks.map(function (c) {
+          return h("details", null,
+            h("summary", null, badge(c.state), h("span", { "class": "mono", text: c.id }), h("span", { text: c.claim })),
+            h("div", { "class": "check-body" },
+              h("div", { "class": "meta" }, h("span", { text: "arm " + c.arm }), h("span", { text: "required layers " + c.required.join(", ") }),
+                c.ui_na ? h("span", { text: "UI n/a: " + c.ui_na }) : null, h("span", { text: "required envs " + c.envs.join(", ") })),
+              c.note ? h("p", { "class": "sub", text: c.note }) : null,
+              h("div", { "class": "envs" }, c.cells.map(function (cell) { return cellView(c, cell); }))));
+        }) : h("p", { "class": "empty", text: "No checks." })));
+    return row;
+  });
+  rows.forEach(function (r) { drill.appendChild(r); });
+  function applyFilter() {
+    var q = search.value.trim().toLowerCase();
+    rows.forEach(function (r) {
+      var done = ["proven", "as-designed", "out-of-scope"].indexOf(r.getAttribute("data-state")) >= 0;
+      r.hidden = (q && r.getAttribute("data-text").indexOf(q) < 0) || (hideDone.checked && done);
+    });
+  }
+  search.addEventListener("input", applyFilter);
+  hideDone.addEventListener("change", applyFilter);
+  app.appendChild(drill);
+  if (location.hash) { var t = document.getElementById(location.hash.slice(1)); if (t && t.tagName === "DETAILS") t.open = true; }
+  document.addEventListener("click", function (e) {
+    var a = e.target.closest && e.target.closest("a[href^='#item-']");
+    if (a) { var t = document.getElementById(a.getAttribute("href").slice(1)); if (t) t.open = true; }
+  });
+})();
+</script>
+</body>
+</html>
