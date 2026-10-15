@@ -29,7 +29,7 @@ Hard rules, in priority order:
 3. **Never tear down unlanded work.**
    Uncommitted changes are never landed, and `bin/fm-teardown.sh` owns the complete landed-work test.
    Never bypass a refusal or use `--force` unless the captain explicitly authorized discarding that work.
-   A scout worktree is declared scratch and may be discarded only after its report exists and the shared unresolved-decision completion gate passes.
+   A scout or tester worktree is declared scratch and may be discarded only after its report exists and the shared unresolved-decision completion gate passes.
 4. **Crewmates never address the captain.**
    All crewmate communication flows through firstmate.
    Treat direct captain intervention in a crewmate window as authoritative and reconcile it at the next supervision review.
@@ -95,13 +95,13 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   projects.md        thin fleet navigation registry; firstmate-private, parsed by fm-project-mode.sh (section 6)
   secondmates.md      secondmate routing table; firstmate-private, maintained by fm-home-seed.sh (section 6)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
-  <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
+  <id>/report.md     scout or tester task deliverable, written by the crewmate; survives teardown
 projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
-  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; kind=secondmate also records home= and projects=; a non-default runtime backend records further backend-specific fields (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, records one canonical pr= and the forge's pr_head= when available (GitHub pull requests and GitLab merge requests; docs/gitlab-merge-watch.md); fm-x-link appends x_request=, x_request_ts=, x_followups=, and optional x_platform=/x_reply_max_chars= for an X-mode-originated task (section 14)
+  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=, sandbox= (with override= only as a record of a captain-present launch); kind=secondmate also records home= and projects=; a non-default runtime backend records further backend-specific fields (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, records one canonical pr= and the forge's pr_head= when available (GitHub pull requests and GitLab merge requests; docs/gitlab-merge-watch.md); fm-x-link appends x_request=, x_request_ts=, x_followups=, and optional x_platform=/x_reply_max_chars= for an X-mode-originated task (section 14)
   <id>.herdr-presentation  quarantinable attempt journal for Herdr's optional visual projection; never task or endpoint authority; see docs/herdr-backend.md "Optional disposable single-task presentation spaces"
   <id>.check.sh      authenticated slow poll; the watcher dispatches validated PR data and the byte-identified X shim through trusted repository scripts, runs registered custom checks from hash-validated private snapshots, and rejects every other state check without execution
   <id>.check-trust   private content binding created by fm-check-register.sh for an intentional custom check
@@ -190,7 +190,7 @@ Do not add model-specific versions of that policy.
 Dispatch only on a backend that `fm-spawn` validates as spawn-capable.
 A missing dependency, authentication failure, unsupported backend, or version refusal is a blocker; never silently retry on another backend.
 
-Scout dispatch runs under a standing OS-level sandbox boundary with full autonomy retained; supervised per-command approval is not the default for any relaunch or resume.
+Claude scout dispatch runs under a standing OS-level write boundary with no browser and full autonomy retained; testers are deliberately unsandboxed, scouts on other harnesses launch unsandboxed until a mechanism is verified for them, and supervised per-command approval is not the default for any relaunch or resume.
 Ship tasks are decoupled and keep today's unsandboxed posture pending `sandbox-trust-services-spike-t1`.
 `docs/configuration.md` owns the exact settings and the captain-present override that can lift the boundary for one supervised task; section 1 rule 6 owns the override's non-negotiable safety boundary.
 
@@ -261,7 +261,11 @@ If no secondmate scope fits, use the main home or discuss creating an appropriat
 Classify the deliverable:
 
 - **Ship** is the default and produces a project change through the selected delivery mode.
-- **Scout** produces knowledge in `data/<id>/report.md`, never a PR, and is the default for investigation, diagnosis, planning, reproduction, or audit requests that do not clearly include implementation.
+- **Scout** produces knowledge in `data/<id>/report.md`, never a PR, and is the default for research and analysis that does not clearly include implementation: investigation, diagnosis, planning, audits, plan reviews, and anything reading outside content.
+- **Tester** produces a report with evidence in `data/<id>/report.md`, never a PR, for QA execution against the project's own stage or local apps: regression rounds, page checks, bug reproductions, and evidence capture.
+  Its brief binds the project's production-URL guard and limits it to the project's own stage and local hosts.
+
+When a request could be either a tester or a scout, make it a scout: a wrongly sandboxed task escalates, while a wrongly unsandboxed one is exposed.
 
 A diagnostic request, report, recommendation, or implementation-ready finding is evidence, not authorization to change code.
 Implementation requires a separate request or other clear implementation scope.
@@ -276,7 +280,7 @@ Write the task-specific brief under section 11 before spawning.
 Spawn only through `bin/fm-spawn.sh` after the profile and backend checks in section 4.
 The spawn must resolve a genuine isolated task worktree distinct from the primary checkout and from every other in-flight task's recorded worktree; a failed isolation assertion, a double-allocation refusal, or a denied pull-request target stops the task.
 A double-allocation refusal names the colliding task id: inspect that task and tear it down properly if it is finished or dead, or get captain guidance, before retrying the spawn.
-After spawning, confirm the worker is processing the brief, handle any trust dialog through `harness-adapters`, and record ship or scout work as under way.
+After spawning, confirm the worker is processing the brief, handle any trust dialog through `harness-adapters`, and record ship, scout, or tester work as under way.
 A persistent secondmate is recorded in the secondmate registry and runtime state, never as a backlog work item.
 
 Steer a worker with short single-line messages through fail-closed `fm-send`; put long instructions in a file.
@@ -338,13 +342,13 @@ After successful teardown, record completion, retain only the configured recent 
 A secondmate is persistent and an empty queue is healthy.
 Retire one only on an explicit captain or main-firstmate decision, after loading `secondmate-provisioning`; its home must contain no work under way, and forced discard still requires explicit captain authority.
 
-### Scout outcome and promotion
+### Scout and tester outcome and promotion
 
-A completed scout must leave a self-contained report before its scratch worktree can be discarded.
+A completed scout or tester must leave a self-contained report before its scratch worktree can be discarded.
 Read the report, relay its findings rather than merely saying it finished, record the report as the Done artifact, and re-evaluate the queue.
 A report may recommend implementation but does not authorize it.
 Before treating the investigation or any visual review as complete, load `decision-hold-lifecycle`; teardown enforces that shared completion gate.
-When implementation is separately authorized, promote the existing scout through `bin/fm-promote.sh` rather than creating a duplicate task.
+When implementation is separately authorized, promote the existing scout or tester through `bin/fm-promote.sh` rather than creating a duplicate task.
 The promoted worker must inventory scratch state, return to a clean default-branch base, carry over only intended fix changes, create the ship branch, and follow the project's selected delivery path.
 Scratch commits and debug edits never ride along, and a reproduced bug becomes the regression test.
 

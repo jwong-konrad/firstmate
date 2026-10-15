@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
+# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout|--tester] [--captain-present-override]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
@@ -81,8 +81,23 @@
 #   (fm-config-inherit-lib.sh). A successful launch clears pending inherited
 #   config reread generations because the new agent reads the converged files.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
-#   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
+#   see AGENTS.md task lifecycle); --tester records kind=tester (the same report
+#   deliverable and scratch worktree, for QA against the project's own stage and local
+#   apps, never sandboxed); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
+#   Worker write boundary: a --scout on a claude harness launches with Claude Code's
+#   OS sandbox plus a file-tool PreToolUse guard written into the worktree's
+#   .claude/settings.local.json beside the turn-end hook; writes are confined to the
+#   worktree, the task's own state/<id>.status and state/<id>.turn-ended,
+#   data/<id>/, and /tmp/fm-<id>/. bin/fm-sandbox-lib.sh owns the exact settings
+#   block. Ship and tester tasks stay unsandboxed; a non-claude scout launches as before.
+#   meta records sandbox=on|off|off-tester|override|unsupported-harness (none for
+#   secondmates).
+#   A relaunch or resume restores the boundary with bin/fm-sandbox-settings.sh.
+#   --captain-present-override omits the boundary for this one launch of one named
+#   ship, scout, or tester task and records override=captain-present in meta as a record
+#   only. Refused for --secondmate, in batch dispatch, and whenever state/.afk
+#   exists. docs/configuration.md owns when it may be used.
 #   Worker environment: every launch is wrapped in bin/fm-env-clean.sh, so the agent
 #   starts with a deny-by-default environment instead of the captain's whole login
 #   shell (so an exported secret cannot ride into a generated PR body). The pane
@@ -154,7 +169,7 @@
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
-# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
+# On success prints: spawned <id> harness=<name> kind=<ship|scout|tester|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
 set -eu
@@ -162,7 +177,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,117p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,132p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -188,6 +203,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-sandbox-lib.sh
+. "$SCRIPT_DIR/fm-sandbox-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -203,6 +220,8 @@ HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
+OVERRIDE=0
+KIND_FLAGS=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -221,8 +240,9 @@ for a in "$@"; do
     continue
   fi
   case "$a" in
-    --scout) KIND=scout ;;
-    --secondmate) KIND=secondmate ;;
+    --scout) KIND=scout; KIND_FLAGS=$((KIND_FLAGS + 1)) ;;
+    --tester) KIND=tester; KIND_FLAGS=$((KIND_FLAGS + 1)) ;;
+    --secondmate) KIND=secondmate; KIND_FLAGS=$((KIND_FLAGS + 1)) ;;
     --harness) want_value=harness ;;
     --harness=*) HARNESS_ARG=${a#--harness=}; HARNESS_SET=1 ;;
     --model) want_value=model ;;
@@ -231,10 +251,12 @@ for a in "$@"; do
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
+    --captain-present-override) OVERRIDE=1 ;;
     *) POS+=("$a") ;;
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
+[ "$KIND_FLAGS" -le 1 ] || { echo "error: pass at most one of --scout, --tester, --secondmate" >&2; exit 1; }
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || { echo "error: --harness requires a non-empty value" >&2; exit 1; }
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
@@ -243,6 +265,16 @@ case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
 esac
+# The captain-present override (docs/configuration.md) is per task and per
+# launch: refuse it for a secondmate, and refuse it outright in away mode, before
+# anything is created. Batch dispatch refuses it below, before any pair spawns.
+if [ "$OVERRIDE" = 1 ]; then
+  if [ "$KIND" = secondmate ]; then
+    echo "error: --captain-present-override applies only to a single ship, scout, or tester task, never --secondmate" >&2
+    exit 1
+  fi
+  fm_sandbox_override_refusal "$STATE" || exit 1
+fi
 
 # Worker environment boundary. bin/fm-env-clean.sh is what keeps the captain's
 # shell secrets and ssh-agent out of the agent process; docs/worker-environment.md
@@ -416,6 +448,10 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     exit 1
   fi
+  if [ "$OVERRIDE" = 1 ]; then
+    echo "error: --captain-present-override is never valid in batch dispatch; spawn the one named task on its own" >&2
+    exit 1
+  fi
   rc=0
   shared_args=()
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
@@ -431,8 +467,8 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
       echo "error: batch dispatch does not support --secondmate; spawn each secondmate explicitly" >&2
       rc=2
       continue
-    elif [ "$KIND" = scout ]; then
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}" --scout; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
+    elif [ "$KIND" = scout ] || [ "$KIND" = tester ]; then
+      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}" "--$KIND"; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
     else
       if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}"; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
     fi
@@ -1497,13 +1533,16 @@ exclude_path() {
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
+# Worker write boundary (bin/fm-sandbox-lib.sh owns the mechanics,
+# docs/configuration.md the posture): a claude scout gets the OS sandbox plus the
+# file-tool guard in the same settings file as its turn-end hook.
+SANDBOX=
+[ "$KIND" = secondmate ] || SANDBOX=$(fm_sandbox_posture "$HARNESS" "$KIND" "$OVERRIDE")
 if [ "$KIND" != secondmate ]; then
   case "$HARNESS" in
     claude*)
-      mkdir -p "$WT/.claude"
-      cat > "$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}]}}
-EOF
+      fm_sandbox_install_claude_settings "$SANDBOX" "$WT" "$STATE" "$DATA" "$ID" "$TASK_TMP" "$SCRIPT_DIR/fm-sandbox-guard.sh" \
+        || { echo "error: could not write $WT/.claude/settings.local.json" >&2; exit 1; }
       exclude_path '.claude/settings.local.json'
       ;;
     opencode*)
@@ -1616,6 +1655,9 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  [ -z "$SANDBOX" ] || echo "sandbox=$SANDBOX"
+  # A record of this launch only; nothing reads it back as authorization.
+  [ "$OVERRIDE" = 0 ] || echo "override=captain-present"
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).

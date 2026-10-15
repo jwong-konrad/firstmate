@@ -6,10 +6,16 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> [--scout|--tester] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
+#   A claude scout runs inside the worker write sandbox with no browser
+#   (docs/worker-sandbox.md), so the scout contract says to escalate a browser need.
+#   --tester writes the tester contract: the same report deliverable and scratch
+#   worktree, for QA runs against the project's own stage and local apps with a full
+#   browser and no sandbox, plus a binding clause that the project's production-URL
+#   guard holds and only its own stage and local hosts are driven.
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
@@ -45,7 +51,7 @@
 # raw captures, personal paths, hostnames, or secret-shaped values in PR text,
 # commits, or docs, and bin/fm-privacy-scan.sh over the PR description and
 # commits before done. local-only publishes nothing, so it omits the section.
-# Scout tasks ignore mode - their deliverable is a report, not a merge.
+# Scout and tester tasks ignore mode - their deliverable is a report, not a merge.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
@@ -98,6 +104,7 @@ POS=()
 for a in "$@"; do
   case "$a" in
     --scout) KIND=scout ;;
+    --tester) KIND=tester ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
@@ -107,7 +114,7 @@ done
 ID=${POS[0]}
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
-  echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
+  echo "error: --herdr-lab applies only to crewmate ship, scout, or tester briefs" >&2
   exit 1
 fi
 
@@ -287,8 +294,24 @@ EOF
 )
 fi
 
-if [ "$KIND" = scout ]; then
+if [ "$KIND" = scout ] || [ "$KIND" = tester ]; then
 RESET_SECTION=$(reset_section "posting or editing anything on GitHub, changing an external service or dataset, anything destructive")
+if [ "$KIND" = scout ]; then
+KIND_LINE="This is a SCOUT task: the deliverable is a written report, not a PR."
+TOOLS_RULE="3. Use gh-axi for GitHub reads, and web search or fetch for outside content.
+   You may run inside a write sandbox: a write outside this worktree, the report, the status file, or /tmp/fm-$ID/ fails with \"operation not permitted\", and there is no browser.
+   That boundary is deliberate - never work around it. If the task genuinely needs a browser or another write, append \`needs-decision: {what and why}\` and stop."
+TESTER_SECTION=
+else
+KIND_LINE="This is a TESTER task: QA execution against this project's own stage and local apps.
+The deliverable is a written report with evidence, not a PR."
+TOOLS_RULE="3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations; a visible browser (\`CHROME_DEVTOOLS_AXI_HEADED=1\`) is preferred."
+TESTER_SECTION="# Hosts you may drive
+This project's production-URL guard is binding: never point a browser, an API call, or a test run at production, and never work around the guard when it refuses.
+Drive only this project's own stage and local hosts.
+If a step needs any other host, append \`needs-decision: {host and why}\` and stop.
+"
+fi
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
@@ -299,14 +322,14 @@ $HERDR_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
-This is a SCOUT task: the deliverable is a written report, not a PR.
+$KIND_LINE
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
 The report is the only thing that survives, so anything worth keeping must be in it.
 
 # Rules
 1. Never push to any remote and never open a PR.
-2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+2. Stay inside this worktree; the only files you may write outside it are the report, the status file below, and scratch under /tmp/fm-$ID/.
+$TOOLS_RULE
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -325,6 +348,7 @@ The report is the only thing that survives, so anything worth keeping must be in
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 
+$TESTER_SECTION
 $RESET_SECTION
 
 # Definition of done
@@ -334,7 +358,7 @@ Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-l
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
-echo "scaffolded: $BRIEF (scout; replace {TASK})"
+echo "scaffolded: $BRIEF ($KIND; replace {TASK})"
 exit 0
 fi
 

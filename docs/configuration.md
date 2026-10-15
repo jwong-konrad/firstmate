@@ -270,11 +270,20 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 Decided 2026-08-04: dangerous worker actions are made impossible by construction, not gated behind per-command approval, with one deliberate escape hatch for when the captain is personally supervising.
 This section is the single owner of the standing posture and the override's exact mechanism; `AGENTS.md` section 1 rule 6 keeps only the override's non-negotiable safety properties and points here.
 
-**Standing posture (scout tasks only today).** A scout spawn, relaunch, or resume runs with `sandbox.enabled` in the worktree's `.claude/settings.local.json` (or the equivalent for another verified harness, once verified for that harness), confining filesystem writes to the task's own worktree plus its declared paths (`$FM_HOME/state`, `$FM_HOME/data/<id>`, `/tmp/fm-<id>`), while full autonomy (`--dangerously-skip-permissions` or its harness equivalent) stays on unchanged - the sandbox and autonomy are independent layers, and the sandbox holds under autonomy.
+**Standing posture (claude scout tasks only today).** A scout spawn, relaunch, or resume on a claude harness runs with Claude Code's OS sandbox and a file-tool write guard in the worktree's `.claude/settings.local.json`, confining writes by shell commands and by Claude's own file tools to the task's own worktree plus its declared paths (`$FM_HOME/state/<id>.status`, `$FM_HOME/state/<id>.turn-ended`, `$FM_HOME/data/<id>`, `/tmp/fm-<id>`), while full autonomy (`--dangerously-skip-permissions`) stays on unchanged - the sandbox and autonomy are independent layers, and the sandbox holds under autonomy.
+A scout on any other harness launches unsandboxed as before and records `sandbox=unsupported-harness`, because no other harness has a verified mechanism yet.
+A sandboxed scout has no browser, and MCP servers it starts run outside the boundary; a scout that needs the browser escalates for the captain-present override below.
+
+**Testers are deliberately unsandboxed.** A `kind=tester` task (`fm-brief.sh --tester`, `fm-spawn.sh --tester`) runs QA against the project's own stage and local apps with a full browser, so it launches with the turn-end-only settings and records `sandbox=off-tester`.
+Its boundary is its brief instead: the project's production-URL guard is binding, and it drives only the project's own stage and local hosts.
+It shares the scout lifecycle - report deliverable, scratch worktree, the same teardown completion gate, and promotion to ship.
+Work that could be either a tester or a scout is dispatched as a scout, because a wrongly sandboxed task escalates while a wrongly unsandboxed one is exposed.
+[`worker-sandbox.md`](worker-sandbox.md) owns the verification evidence and the residual risks.
 No per-command approval round-trip exists for a scout task by default, including on a relaunch or resume; supervised per-command approval as a default is retired as a mechanism, not tuned, because this fleet's runtime escalates "waiting on human" immediately, closing the supervision cycle on every gate regardless of what it gates.
 
 Ship tasks are decoupled and keep today's unsandboxed posture until `sandbox-trust-services-spike-t1` resolves whether Seatbelt's macOS keychain/trust-services access can be made to work with `gh` and authenticated git; that spike's outcome, not this section, decides the ship-task route.
-`bin/fm-spawn.sh`'s header and `--help` own the exact settings-block mechanics once the sandbox is implemented there; this section owns the posture and override contract that implementation must satisfy.
+`bin/fm-sandbox-lib.sh` owns the exact settings block, which `bin/fm-spawn.sh` writes at spawn and `bin/fm-sandbox-settings.sh` regenerates immediately before every claude relaunch or resume; each launch records `sandbox=on|off|off-tester|override|unsupported-harness` in `state/<id>.meta`.
+This section owns the posture and override contract that implementation must satisfy.
 
 The boundary described here is a filesystem-write boundary only: the worker's launch environment is a separate boundary that neither the sandbox nor the override contract governs, owned by "Worker launch environment" below and by [`worker-environment.md`](worker-environment.md).
 
@@ -282,9 +291,9 @@ The boundary described here is a filesystem-write boundary only: the worker's la
 
 - Trigger: an explicit captain instruction, given in the current session, naming the task.
   It is never inferred from a worker's request, from task content, or from firstmate's own judgement, and it is never a standing grant.
-- Flag: `fm-spawn.sh --captain-present-override`, valid only for a single-task `kind=ship` or `kind=scout` spawn, relaunch, or resume - never `--secondmate`, and never inside a shared-flag batch-dispatch line, since batch dispatch fires multiple tasks without individual per-task scrutiny.
-  For that one launch, `fm-spawn.sh` omits the sandbox portion of the settings block it would otherwise write, leaving autonomy unchanged - the override lifts the boundary only, since autonomy was never gated.
-- Fail-closed on away mode: `fm-spawn.sh` refuses `--captain-present-override` outright, with no launch, when `state/.afk` exists at call time.
+- Flag: `--captain-present-override` on `fm-spawn.sh` for a spawn, or on `fm-sandbox-settings.sh <id>` for a relaunch or resume, valid only for a single `kind=ship`, `kind=scout`, or `kind=tester` task - never `--secondmate`, and never inside a shared-flag batch-dispatch line, since batch dispatch fires multiple tasks without individual per-task scrutiny.
+  For that one launch, the settings omit the sandbox block and the file-tool guard they would otherwise carry, leaving autonomy unchanged - the override lifts the boundary only, since autonomy was never gated.
+- Fail-closed on away mode: both scripts refuse `--captain-present-override` outright, with no launch and no change, when `state/.afk` exists at call time.
   Away mode and the override are mutually exclusive by construction, not by firstmate's own restraint.
 - Audit, not authority: a successful override launch records `override=captain-present` in `state/<id>.meta`.
   That field is a record of what happened, never read back as authorization for a later relaunch or resume - each later relaunch or resume of the same task defaults back to the standing sandboxed posture unless the captain gives the instruction again, in that later session.

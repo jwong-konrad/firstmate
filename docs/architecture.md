@@ -140,7 +140,7 @@ The helper's header owns the exact signal detection, relocated-home limitation, 
 
 ## Two task shapes
 
-Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks investigate, plan, reproduce bugs, or audit, then leave a report at `data/<id>/report.md` and never push.
+Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks research, investigate, plan, or audit, and tester tasks run QA against the project's own stage and local apps; both leave a report at `data/<id>/report.md` and never push.
 
 ## Dispatch profiles
 
