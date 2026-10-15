@@ -148,6 +148,7 @@ Natural language is acceptable if uncertain.
 | Exit command | `/exit` |
 | Interrupt | single Escape |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
+| Resume | `claude --continue` (most recent conversation for the cwd) or `claude --resume <session-id>`, in the task's own worktree with the same launch flags; run `bin/fm-sandbox-settings.sh <id>` first so the restart carries the task's write-boundary posture |
 
 First launch in a fresh worktree, or first ever on a machine, may show a trust or bypass-permissions confirmation.
 After every spawn, peek the pane within about 20 seconds.

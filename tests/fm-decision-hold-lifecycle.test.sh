@@ -305,6 +305,31 @@ EOF
   pass "non-forced scout teardown always requires durable inventory verification"
 }
 
+# A tester shares the scout lifecycle: no report refuses, and a report without a
+# verified decision inventory refuses, both before any state is removed.
+test_tester_teardown_uses_the_report_completion_gate() {
+  local home id
+  home=$(make_home tester-teardown)
+  id=sample-regression-round
+  write_origin_meta "$home" "$id" tester
+  if run_teardown "$home" "$id" > "$home/tester-noreport.out" 2> "$home/tester-noreport.err"; then
+    fail "tester teardown proceeded without its report"
+  fi
+  assert_grep "REFUSED: tester task $id has no report" "$home/tester-noreport.err" \
+    "tester refusal must name the missing report"
+  assert_present "$home/state/$id.meta" "refused tester teardown removed metadata"
+
+  mkdir -p "$home/data/$id"
+  printf '# Sample regression round\n\nNo decision inventory was recorded.\n' > "$home/data/$id/report.md"
+  if run_teardown "$home" "$id" > "$home/tester-gate.out" 2> "$home/tester-gate.err"; then
+    fail "tester teardown skipped the unresolved-decision completion gate"
+  fi
+  assert_grep "REFUSED: tester task $id has not passed the unresolved-decision completion gate" "$home/tester-gate.err" \
+    "tester refusal must name the completion gate"
+  assert_present "$home/state/$id.meta" "gate-refused tester teardown removed metadata"
+  pass "non-forced tester teardown requires the report and the shared completion gate"
+}
+
 test_origin_slug_validation_precedes_path_construction() {
   local home escaped
   home=$(make_home origin-validation)
@@ -598,6 +623,7 @@ test_archived_closed_hold_satisfies_verify() {
 run_case test_uninventoried_report_decision_refuses_completion
 
 run_case test_scout_teardown_always_requires_inventory_verification
+run_case test_tester_teardown_uses_the_report_completion_gate
 run_case test_structured_holds_survive_teardown_and_route_resolution
 run_case test_origin_slug_validation_precedes_path_construction
 run_case test_visual_review_uses_shared_completion_owner

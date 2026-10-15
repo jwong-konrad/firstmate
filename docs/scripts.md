@@ -19,7 +19,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-upstream-gate.sh`    | Refuse a push or PR to main that ingests upstream commits the vetting pin does not cover |
 | `fm-backlog-handoff.sh`  | Validate and delegate queued backlog-item moves into a secondmate home               |
 | `fm-decision-hold.sh`    | Create, verify, complete, and resolve durable captain-held decisions                 |
-| `fm-brief.sh`            | Scaffold ship, scout, secondmate-charter, and Herdr-lab briefs                       |
+| `fm-brief.sh`            | Scaffold ship, scout, tester, secondmate-charter, and Herdr-lab briefs               |
 | `fm-herdr-lab.sh`        | Provision and guardedly operate an isolated, never-default Herdr lab session         |
 | `fm-install-herdr.sh`    | Install CI's exact-version Herdr pin with official asset URL, SHA-256, and protocol checks |
 | `fm-install-treehouse.sh`| Install CI's exact-version Treehouse pin for real-Herdr E2E that needs spawn worktrees |
@@ -51,6 +51,9 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend |
 | `fm-pr-target-guard.sh`  | Refuse work in a checkout whose recorded pull-request target is a repository this home must never open a pull request against (docs/configuration.md) |
 | `fm-env-clean.sh`        | Run a spawned worker's launch command under a deny-by-default environment (docs/worker-environment.md) |
+| `fm-sandbox-lib.sh`      | Shared claude scout write boundary: the OS sandbox block, the file-tool guard hook, and the posture recorded in meta (docs/worker-sandbox.md) |
+| `fm-sandbox-guard.sh`    | PreToolUse guard refusing a claude scout's file-tool write outside its copy and declared paths (docs/worker-sandbox.md) |
+| `fm-sandbox-settings.sh` | Restore a task's write boundary before a relaunch or resume, or lift it once under the captain-present override (docs/worker-sandbox.md) |
 | `fm-dispatch-select.sh`  | Resolve a matched crew-dispatch rule to one concrete profile, owning `quota-balanced` selection |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
@@ -100,8 +103,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-pr-check-migrate.sh` | Quarantine older task polls without execution and rebuild only canonical polls       |
 | `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
 | `fm-pr-merge.sh`         | Record PR metadata, then merge a task's canonical full GitHub URL                    |
-| `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
-| `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
+| `fm-promote.sh`          | Promote a scout or tester task in place to a protected ship task                     |
+| `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout and tester deliverables, retire secondmate homes |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |
 | `fm-x-lib.sh`            | Shared X-mode config, relay, and reply-threading helpers                             |

@@ -496,6 +496,32 @@ test_context_reset_markers_ride_existing_classification() {
   pass "fm-brief.sh: in-flight markers ride the existing keyed classification"
 }
 
+# Scout and tester share the report contract; they differ in browser access and
+# in the tester's binding production-guard and own-hosts clause.
+test_tester_and_scout_browser_contracts() {
+  local tester scout
+  FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-tester-t1 alpha --tester >/dev/null 2>&1 \
+    || fail "fm-brief.sh tester scaffold exited non-zero"
+  tester="$BRIEF_HOME/data/brief-tester-t1/brief.md"
+  assert_grep "TESTER task" "$tester" "tester brief must declare itself a tester task"
+  assert_grep "$BRIEF_HOME/data/brief-tester-t1/report.md" "$tester" "tester brief must point at the report deliverable"
+  assert_grep "Never push to any remote and never open a PR." "$tester" "tester brief must forbid pushing"
+  assert_grep "production-URL guard is binding" "$tester" "tester brief must bind the production-URL guard"
+  assert_grep "Drive only this project's own stage and local hosts." "$tester" "tester brief must limit hosts"
+  assert_grep "chrome-devtools-axi for browser operations" "$tester" "tester brief must allow the browser"
+  assert_grep "decision-hold-lifecycle/SKILL.md" "$tester" "tester brief must load the completion gate policy"
+  assert_grep "# Context resets" "$tester" "tester brief must carry the context-reset contract"
+
+  FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-scout-t1 alpha --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold exited non-zero"
+  scout="$BRIEF_HOME/data/brief-scout-t1/brief.md"
+  assert_no_grep "chrome-devtools-axi" "$scout" "a scout brief must not direct the worker to a browser it cannot run"
+  assert_grep "there is no browser" "$scout" "scout brief must state the sandbox has no browser"
+  assert_grep "needs-decision: {what and why}" "$scout" "scout brief must escalate a browser need"
+  assert_no_grep "production-URL guard" "$scout" "the tester host clause must not leak into scouts"
+  pass "fm-brief: testers get the browser and the binding host clause; scouts escalate a browser need"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -534,4 +560,5 @@ run_case test_scout_and_secondmate_load_decision_hold_policy
 run_case test_context_reset_contract_in_ship_and_scout
 run_case test_context_reset_markers_ride_existing_classification
 run_case test_scout_and_secondmate_scaffold
+run_case test_tester_and_scout_browser_contracts
 fm_case_summary "fm-brief"

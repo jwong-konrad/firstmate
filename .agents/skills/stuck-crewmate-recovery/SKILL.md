@@ -22,7 +22,7 @@ The target window's harness is recorded as `harness=` in `state/<id>.meta`.
 
 ## Session-start reconciliation for a dead ordinary direct report
 
-This procedure covers ordinary `kind=ship` and `kind=scout` direct reports.
+This procedure covers ordinary `kind=ship`, `kind=scout`, and `kind=tester` direct reports.
 Load `secondmate-provisioning` instead for `kind=secondmate` recovery.
 
 Treat the digest's endpoint result as a presence signal, not proof that the task's work or validation run is gone.
@@ -58,5 +58,5 @@ Escalate in order:
    Genuine wedging means looping, unresponsive, repeating the same obstacle, or truly dead.
    A low context reading is not wedging; modern harnesses auto-compact and keep going.
    The worktree and commits persist, so relaunch is cheap.
-   A relaunch never carries a prior captain-present sandbox override forward - it restarts under the standing posture unless the captain grants the override again, in the current session (`docs/configuration.md` "Worker permission posture and captain-present override").
+   Before relaunching or resuming a claude ship, scout, or tester, run `bin/fm-sandbox-settings.sh <id>` so it restarts under the standing posture; a relaunch never carries a prior captain-present sandbox override forward unless the captain grants it again, in the current session (`docs/configuration.md` "Worker permission posture and captain-present override").
 5. If a second relaunch fails too, write `failed` to the backlog and tell the captain the plain failure, preserved work, and consequence using `AGENTS.md` section 9; do not mention metadata, harness, window, or worktree unless the path itself is needed for action.
