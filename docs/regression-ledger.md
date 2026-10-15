@@ -45,7 +45,7 @@ A check's required environments come from `envs`, else the effort's `target_envs
 
 ## Derived states
 
-Each check is judged per required environment against that environment's current build, and the check takes the worst cell.
+Each check is judged per required environment against that environment's current build, and the check takes the worst cell. A `baseline` build's cell is observation only and never counts toward the check's state.
 States, worst first:
 
 | State | Meaning |
