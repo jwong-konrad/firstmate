@@ -104,7 +104,7 @@ $effort[0] as $E
     | . + {env: $env};
 
   def check_envs($c): $c.envs // $TARGET_ENVS;
-  def check_state($c; $os): [check_envs($c)[] as $e | cell($c; $e; $os).state] | worst;
+  def check_state($c; $os): [check_envs($c)[] as $e | select(current_build($e).role != "baseline") | cell($c; $e; $os).state] | worst;
 
 # ---- items, checks, cells ----------------------------------------------------
 ($items | map(.id)) as $ITEM_IDS

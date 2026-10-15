@@ -213,6 +213,23 @@ test_changed_since_last_round() {
   pass "panel B lists the checks whose state changed between the last two rounds"
 }
 
+test_baseline_env_in_check_envs() {
+  local d m out
+  d=$(new_effort baselineenv)
+  item "$d" T1
+  check "$d" a T1 '{"envs":["local-old","local-new"]}'
+  check "$d" b T1 '{"envs":["local-old"]}'
+  obs "$d" o1 a local-new "$NEW" API FIXED
+  obs "$d" o2 a local-new "$NEW" UI FIXED
+  m=$("$REG" json "$d") || fail "baseline env: json failed"
+  [ "$(jq -r '.items[].checks[] | select(.id == "a") | .state' <<<"$m")" = proven ] || fail "baseline env: got $(jq -c "[.items[].checks[]|[.id,.state]]" <<<"$m")"
+  [ "$(jq -r '.items[].checks[] | select(.id == "b") | .state' <<<"$m")" = never-observed ] || fail "baseline env: an all-baseline check is never observed"
+  [ "$(jq '[.check_counts[].count] | add' <<<"$m")" = "$(jq '.totals.checks' <<<"$m")" ] || fail "baseline env: counts do not add up"
+  out=$("$REG" render "$d") || fail "baseline env: render failed"
+  assert_contains "$out" "NOT READY" "baseline env: never-observed check blocks readiness"
+  pass "baseline environments are excluded from the check state"
+}
+
 test_decisions_read_from_backlog() {
   local d fb m
   d=$(new_effort decisions)
@@ -258,6 +275,7 @@ run_case test_derived_states
 run_case test_counts_add_up_and_readiness
 run_case test_lint_rules
 run_case test_changed_since_last_round
+run_case test_baseline_env_in_check_envs
 run_case test_decisions_read_from_backlog
 run_case test_page_self_contained
 fm_case_summary "fm-regression"
