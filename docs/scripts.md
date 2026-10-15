@@ -85,6 +85,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-lock-lib.sh`         | Shared "is this git lock provably abandoned?" proof used by teardown and fleet-sync   |
 | `fm-config-inherit-lib.sh` | Shared primary-to-secondmate inherited local-material propagation and config-reread delivery |
 | `fm-tasks-axi-lib.sh`    | Shared backlog-backend selector and `tasks-axi` compatibility probe                  |
+| `fm-jq-lib.sh`           | Sourced `jq` wrapper that moves large `--arg`/`--argjson` values to temp files so big backlogs avoid `Argument list too long` |
 | `fm-wake-drain.sh`       | Atomically drain queued watcher wakes, emit bounded best-effort status-event annotations, then assert watcher liveness |
 | `fm-wake-lib.sh`         | Shared durable wake queue, portable locks, and watcher identity/health helpers       |
 | `fm-classify-lib.sh`     | Shared captain-relevant and declared-external-wait wake classification vocabulary    |

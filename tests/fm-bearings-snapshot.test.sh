@@ -1553,6 +1553,33 @@ test_chat_contract_four_sections() {
   pass "the /bearings skill states the four-section chat contract in order, with empty-states and the At Anchor exclusion"
 }
 
+# A backlog whose JSON exceeds ARG_MAX must not break either command: unbounded payloads
+# go through temp files, never the jq command line.
+test_huge_backlog_exceeds_arg_max() {
+  local home fakebin out rc i body
+  home=$(make_home huge-backlog)
+  fakebin=$(make_fakebin "$home/fakebin")
+  body=$(printf 'x%.0s' $(seq 1 400))
+  {
+    printf '## In flight\n\n## Queued\n'
+    i=1
+    while [ "$i" -le 3000 ]; do
+      printf -- '- [ ] queued-%s - Queued item %s %s (repo: firstmate) (kind: ship)\n' "$i" "$i" "$body"
+      i=$((i + 1))
+    done
+    printf '\n## Done\n'
+  } > "$home/data/backlog.md"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json 2>&1); rc=$?
+  expect_code 0 "$rc" "huge backlog: fleet snapshot exits 0"
+  printf '%s' "$out" | jq -e '.backlog.records | length > 2000' >/dev/null 2>&1
+  expect_code 0 "$?" "huge backlog: fleet snapshot is valid JSON with records"
+  out=$(run "$home" "$fakebin" --json 2>&1); rc=$?
+  expect_code 0 "$rc" "huge backlog: bearings exits 0"
+  printf '%s' "$out" | jq -e . >/dev/null 2>&1
+  expect_code 0 "$?" "huge backlog: bearings output is valid JSON"
+}
+
 run_case test_domain_alpha_stale_parent_event_does_not_become_current_work
 run_case test_gnu_stat_uses_file_formats_without_bsd_fallback_pollution
 run_case test_parent_activity_evidence_is_bounded_and_disclosed
@@ -1592,4 +1619,5 @@ run_case test_section_caps_and_expansion_flags
 run_case test_pr_repository_cap_and_expansion
 run_case test_per_repository_pr_cap_is_disclosed
 run_case test_projection_and_toon_fail_closed
+run_case test_huge_backlog_exceeds_arg_max
 fm_case_summary "fm-bearings-snapshot"

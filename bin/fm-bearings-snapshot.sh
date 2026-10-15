@@ -59,6 +59,9 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FLEET="$SCRIPT_DIR/fm-fleet-snapshot.sh"
+# shellcheck source=bin/fm-jq-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-jq-lib.sh"  # jq wrapper: large --arg/--argjson payloads go via temp files, not ARG_MAX
 
 # Bounds (overridable for tests / large fleets).
 FM_BEARINGS_LANDED=${FM_BEARINGS_LANDED:-6}
