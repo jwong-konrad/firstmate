@@ -792,8 +792,11 @@ case "${1:-}" in
       printf '%s\n' 'error: boom' >&2
       exit 3
     fi
-    printf 'count: x\ntasks[x]{id,state,kind,repo,title,held,blocked}:\n'
-    printf '%s\n' "${FM_FAKE_TASKS_AXI_ROWS:-}" | sed '/^$/d'
+    rows=$(printf '%s\n' "${FM_FAKE_TASKS_AXI_ROWS:-}" | sed '/^$/d')
+    n=$(printf '%s\n' "$rows" | grep -c .)
+    n=${FM_FAKE_TASKS_AXI_COUNT:-$n}
+    printf 'count: %s\ntasks[%s]{id,state,kind,repo,title,held,blocked}:\n' "$n" "$n"
+    printf '%s\n' "$rows"
     printf 'help[1]:\n  - Run `tasks-axi show <id>` for full notes on a task\n'
     exit 0
     ;;
@@ -906,6 +909,21 @@ WORLD
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$(outstanding_section "$out")" "UNAVAILABLE - tasks-axi is missing or incompatible" "missing tasks-axi degraded silently"
   pass "outstanding testing reports an unavailable backend visibly"
+}
+
+test_outstanding_testing_unparseable_output_is_unavailable() {
+  local rec root home fakebin out sec
+  rec=$(outstanding_world outstanding-unparseable)
+  IFS='|' read -r root home fakebin <<WORLD
+$rec
+WORLD
+  out=$(FM_FAKE_TASKS_AXI_ROWS='  captain-test-a,queued,task,"-",one,maybe,no' run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  sec=$(outstanding_section "$out")
+  assert_contains "$sec" "UNAVAILABLE - tasks-axi list output could not be parsed" "malformed row degraded to none"
+  assert_not_contains "$sec" "none outstanding" "malformed row printed a false none"
+  out=$(FM_FAKE_TASKS_AXI_COUNT=3 FM_FAKE_TASKS_AXI_ROWS='  captain-test-a,queued,task,"-",one,no,no' run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$(outstanding_section "$out")" "UNAVAILABLE - tasks-axi list output could not be parsed" "header/count mismatch degraded to none"
+  pass "outstanding testing reports unparseable tasks-axi output as UNAVAILABLE"
 }
 
 test_outstanding_testing_placement() {
@@ -1159,6 +1177,7 @@ run_case test_outstanding_testing_none_is_explicit
 run_case test_outstanding_testing_notes_held_and_blocked
 run_case test_outstanding_testing_config_patterns_replace_default
 run_case test_outstanding_testing_backend_unavailable_is_visible
+run_case test_outstanding_testing_unparseable_output_is_unavailable
 run_case test_outstanding_testing_placement
 run_case test_outstanding_testing_prints_when_lock_refused
 fm_case_summary "fm-session-start"

@@ -334,9 +334,17 @@ print_outstanding_testing() {
       return r "$"
     }
     BEGIN { for (i = 1; i <= n; i++) if (pats[i] != "") re[i] = globre(pats[i]) }
-    /^  [^ ]/ && !/^  - / {
+    /^count: / { cnt = $2 }
+    /^tasks\[[0-9]+\]\{id,state,kind,repo,title,held,blocked\}:$/ {
+      hdr = 1; inblk = 1; declared = $0
+      sub(/^tasks\[/, "", declared); sub(/\].*/, "", declared)
+      next
+    }
+    /^[^ ]/ { inblk = 0 }
+    inblk && /^  [^ ]/ {
+      seen++
       line = substr($0, 3)
-      if (!match(line, /,(yes|no),(yes|no)$/)) next
+      if (!match(line, /,(yes|no),(yes|no)$/)) { bad++; next }
       flags = substr(line, RSTART + 1)
       line = substr(line, 1, RSTART - 1)
       split(flags, f, ",")
@@ -357,7 +365,14 @@ print_outstanding_testing() {
       if (f[2] == "yes") note = note " [BLOCKED]"
       printf "- %s (%s)%s - %s\n", id, state, note, title
     }
+    END {
+      if (bad > 0 || (hdr && seen != declared + 0) || (!hdr && cnt != "0")) print "@@UNPARSEABLE"
+    }
   ')
+  if printf '%s\n' "$rows" | grep -qx '@@UNPARSEABLE'; then
+    printf 'UNAVAILABLE - tasks-axi list output could not be parsed, so the test list was NOT computed. Scan data/backlog.md by hand for ids matching: %s\n' "$(printf '%s\n' "$patterns" | paste -sd' ' -)"
+    return 0
+  fi
   if [ -n "$rows" ]; then
     printf 'patterns: %s\n' "$(printf '%s\n' "$patterns" | paste -sd' ' -)"
     printf '%s outstanding test item(s):\n' "$(printf '%s\n' "$rows" | grep -c .)"
