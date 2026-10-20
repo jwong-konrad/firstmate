@@ -9,6 +9,11 @@ on:
 permissions:
   contents: read
 
+# A newer push to a PR cancels that PR's older run. A running main run always finishes; an older pending main run may be replaced by a newer queued one.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint:
     name: Lint shell scripts
