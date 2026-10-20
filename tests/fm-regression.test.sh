@@ -3,14 +3,25 @@
 # Hermetic: every effort folder is a fixture in a temp dir; the backlog reader is a fake.
 #
 # Matrix:
-#   an empty effort renders, is never ready, and lints clean; init refuses to overwrite a ledger
+#   an empty effort renders, lints clean, and gives no readiness verdict; init refuses to
+#   overwrite a ledger
 #   each derived check state: proven, UI still owed, server layer still owed, stale, never
 #   observed, code-only (never fixed, even when the code says still open), not run, not
 #   testable, blocked, still open, as designed through a superseding correction, unknown build,
 #   and a recorded UI n/a reason
 #   an item takes its worst check's state; out-of-scope items are their own bucket
-#   headline counts add up to the totals, every state is printed even at zero
-#   readiness: all proven is ready; any unproven check or lint failure is not
+#   headline counts add up to the totals, every state is printed even at zero, and the headline
+#   reports what is not yet proven instead of a READY / NOT READY verdict
+#   superseding check lines: retire a check, move a layer to its own environments, add ui_na;
+#   a duplicate id without supersedes and a dangling supersedes are lint failures
+#   round lifecycle: open validates its plan, observe validates and appends one line, check
+#   reports coverage (a reasonless NOT-RUN does not count), close refuses until covered and
+#   then appends the close line and renders
+#   the Ledger duty brief section names the round, the planned checks and the gate
+#   Linear status at render: one batched read, reused while recent, measured per render, and a
+#   failing reader never stops the render; json never reads Linear
+#   teardown refuses a scout or tester whose round still has uncovered planned checks, and
+#   leaves tasks no round names untouched
 #   lint: ticket with no item, Linear disagreeing, unregistered build, verdict not relayed (and a
 #   relay clearing it), in-scope item with no checks, invalid records
 #   panel B lists checks whose state changed between the last two rounds
@@ -79,7 +90,8 @@ test_empty_effort() {
   done
   out=$("$REG" render "$d") || fail "empty: render failed: $out"
   assert_contains "$out" "0 items, 0 checks" "empty: headline totals"
-  assert_contains "$out" "NOT READY FOR STAGE (no checks are tracked yet)" "empty: an empty effort must never read ready"
+  assert_contains "$out" "-> 0 check(s) not yet proven" "empty: the headline reports what is not proven"
+  assert_not_contains "$out" "READY" "empty: the board gives no readiness verdict"
   assert_contains "$out" "lint: clean" "empty: lint should be clean"
   assert_present "$d/board.html" "empty: board not written"
   out=$("$REG" lint "$d") || fail "empty: lint should exit 0"
@@ -87,7 +99,7 @@ test_empty_effort() {
   out=$("$REG" init "$d" 2>&1) || rc=$?
   [ "$rc" -eq 2 ] || fail "empty: a second init must refuse, got rc=$rc"
   assert_contains "$out" "never overwrites" "empty: refusal names the reason"
-  pass "an empty effort renders not-ready and lints clean; init refuses to overwrite"
+  pass "an empty effort renders with no verdict and lints clean; init refuses to overwrite"
 }
 
 test_derived_states() {
@@ -132,7 +144,7 @@ test_derived_states() {
   pass "every derived check state, and the item takes the worst"
 }
 
-test_counts_add_up_and_readiness() {
+test_counts_add_up_and_not_proven() {
   local d out m
   d=$(new_effort counts)
   item "$d" T1 '{"linear_id":"KG-1"}'
@@ -151,16 +163,17 @@ test_counts_add_up_and_readiness() {
   [ "$(jq '[.item_counts[].count] | add' <<<"$m")" = 3 ] || fail "counts: item counts do not add up to 3"
   [ "$(jq -r '.items[] | select(.id == "T3") | .state' <<<"$m")" = out-of-scope ] || fail "counts: out-of-scope bucket"
   out=$("$REG" render "$d")
-  assert_contains "$out" "READY FOR STAGE" "counts: all proven should be ready"
-  assert_not_contains "$out" "NOT READY" "counts: all proven should be ready"
+  assert_contains "$out" "-> 0 check(s) not yet proven" "counts: all proven leaves nothing unproven"
+  assert_not_contains "$out" "READY" "counts: the board gives no readiness verdict"
   for label in "0 confirmed still open" "0 never observed" "0 unknown build" "0 stale (older build only)" \
-    "0 code reading only" "0 not run" "0 UI still owed" "2 proven fixed" "0 out of scope"; do
+    "0 code reading only" "0 not run" "0 UI still owed" "2 proven fixed" "0 out of scope" "0 retired"; do
     assert_contains "$out" "$label" "counts: headline must show every state, zero included ($label)"
   done
   obs "$d" o5 b local-new "$NEW" UI NOT-RUN r2 '{"reason":"skipped"}'
   out=$("$REG" render "$d")
-  assert_contains "$out" "NOT READY FOR STAGE (1 check(s) not yet proven" "counts: a not-run cell must block readiness"
-  pass "headline counts add up and readiness needs every check proven"
+  assert_contains "$out" "-> 1 check(s) not yet proven" "counts: a not-run cell is counted as not proven"
+  assert_not_contains "$out" "READY" "counts: still no readiness verdict"
+  pass "headline counts add up and report what is not yet proven"
 }
 
 test_lint_rules() {
@@ -194,7 +207,7 @@ test_lint_rules() {
   assert_not_contains "$out" "not-relayed" "lint (e) a relay with the verdict clears it"
   out=$("$REG" render "$d")
   assert_contains "$out" "lint: 5 failure(s)" "lint failures are counted on the front page"
-  assert_contains "$out" "NOT READY" "lint failures keep the board not ready"
+  assert_contains "$out" "1 item(s) without checks" "lint: an item with no checks is in the headline"
   pass "lint flags each rule and a relay clears the not-relayed rule"
 }
 
@@ -226,7 +239,7 @@ test_baseline_env_in_check_envs() {
   [ "$(jq -r '.items[].checks[] | select(.id == "b") | .state' <<<"$m")" = never-observed ] || fail "baseline env: an all-baseline check is never observed"
   [ "$(jq '[.check_counts[].count] | add' <<<"$m")" = "$(jq '.totals.checks' <<<"$m")" ] || fail "baseline env: counts do not add up"
   out=$("$REG" render "$d") || fail "baseline env: render failed"
-  assert_contains "$out" "NOT READY" "baseline env: never-observed check blocks readiness"
+  assert_contains "$out" "-> 1 check(s) not yet proven" "baseline env: a never-observed check is not proven"
   pass "baseline environments are excluded from the check state"
 }
 
@@ -267,15 +280,241 @@ test_page_self_contained() {
   assert_contains "$page" "prefers-color-scheme: dark" "page: dark mode"
   if grep -Eq '(src|href)="(https?:)?//' "$d/out.html"; then fail "page: no external fetches"; fi
   [ "$(grep -c '<script' "$d/out.html")" -eq 2 ] || fail "page: expected exactly the data and code script blocks"
+  assert_not_contains "$page" "READY FOR STAGE" "page: the page gives no readiness verdict"
+  assert_contains "$page" '"not_proven":{"checks":1' "page: the page embeds the not-proven count"
   pass "the page is self-contained, embeds its render time, and escapes stray script tags"
+}
+
+test_superseding_checks() {
+  local d m out rc=0
+  d=$(new_effort supersede)
+  item "$d" T1
+  item "$d" T2
+  check "$d" retire T1 '{"note":"first reading"}'
+  check "$d" stg T1 '{"envs":["local-new"]}'
+  check "$d" uina T1
+  check "$d" only T2
+  obs "$d" o1 stg local-new "$NEW" API FIXED
+  obs "$d" o2 uina local-new "$NEW" API FIXED
+  printf '%s\n' \
+    '{"id":"retire","supersedes":"retire","retired":"captain ruling: not part of the ticket","note":null}' \
+    '{"id":"stg","supersedes":"stg","layer_envs":{"UI":["staging"]}}' \
+    '{"id":"uina","supersedes":"uina","ui_na":"server-only claim"}' \
+    '{"id":"only","supersedes":"only","retired":"folded into another check"}' >> "$d/checks.jsonl"
+  out=$("$REG" lint "$d") || rc=$?
+  assert_not_contains "$out" "used 2 times" "supersede: a superseding duplicate id is valid"
+  assert_not_contains "$out" "supersedes" "supersede: a valid supersedes is not flagged"
+  assert_contains "$out" "item-without-checks: T2 is in scope but has no live checks" "supersede: an item whose checks are all retired has none"
+  m=$("$REG" json "$d")
+  [ "$(jq -r '.items[].checks[] | select(.id == "retire") | .state' <<<"$m")" = retired ] || fail "supersede: retired check state"
+  [ "$(jq -c '.items[].checks[] | select(.id == "retire") | [.claim, .item, .note]' <<<"$m")" = '["claim retire","T1",null]' ] ||
+    fail "supersede: a later line keeps the fields it leaves out and clears the ones it sets to null"
+  [ "$(jq -c '.items[].checks[] | select(.id == "stg") | .required_by_env' <<<"$m")" = '{"local-new":["API"],"staging":["UI"]}' ] ||
+    fail "supersede: layer_envs moves UI to staging, got $(jq -c '.items[].checks[] | select(.id == "stg") | .required_by_env' <<<"$m")"
+  [ "$(jq -r '.items[].checks[] | select(.id == "stg") | .cells[] | select(.env == "local-new") | .state' <<<"$m")" = proven ] ||
+    fail "supersede: local-new no longer owes UI"
+  [ "$(jq -r '.items[].checks[] | select(.id == "uina") | .state' <<<"$m")" = proven ] || fail "supersede: ui_na added by a later line"
+  [ "$(jq -r '.items[] | select(.id == "T2") | .state' <<<"$m")" = no-checks ] || fail "supersede: retired checks never set an item's state"
+  [ "$(jq -r '.check_counts[] | select(.state == "retired") | .count' <<<"$m")" = 2 ] || fail "supersede: retired bucket"
+  [ "$(jq '[.check_counts[].count] | add' <<<"$m")" = "$(jq '.totals.checks' <<<"$m")" ] || fail "supersede: counts do not add up"
+  [ "$(jq -r '.items[].checks[] | select(.id == "uina") | .amendments' <<<"$m")" = 1 ] || fail "supersede: amendment count"
+  check "$d" uina T1
+  printf '%s\n' '{"id":"ghost","supersedes":"ghost"}' '{"id":"stg","supersedes":"uina"}' >> "$d/checks.jsonl"
+  out=$("$REG" lint "$d") || true
+  assert_contains "$out" "check id uina is used 2 times" "supersede: a duplicate id without supersedes stays invalid"
+  assert_contains "$out" "supersedes ghost, but supersedes must name an earlier line" "supersede: a dangling supersedes is invalid"
+  assert_contains "$out" "supersedes uina, but supersedes must name an earlier line's id, the same id as its own" \
+    "supersede: supersedes must name the line's own id"
+  pass "a later check line retires a check, moves a layer, or adds ui_na; lint guards the form"
+}
+
+test_round_lifecycle() {
+  local d out rc m
+  d=$(new_effort lifecycle)
+  item "$d" T1
+  item "$d" T2
+  check "$d" a T1
+  check "$d" b T1
+  check "$d" c T2
+  check "$d" gone T2 '{"retired":"no longer applies"}'
+  rc=0; out=$("$REG" round open r3 "$d" --checks a,nope 2>&1) || rc=$?
+  expect_code 2 "$rc" "lifecycle: open with an unknown check"
+  assert_contains "$out" "unknown check nope" "lifecycle: open names the unknown check"
+  rc=0; out=$("$REG" round open r3 "$d" --checks gone 2>&1) || rc=$?
+  assert_contains "$out" "check gone is retired" "lifecycle: a retired check cannot be planned"
+  rc=0; out=$("$REG" round open r1 "$d" --checks a 2>&1) || rc=$?
+  assert_contains "$out" "already registered" "lifecycle: a round id is opened once"
+  out=$("$REG" round open r3 "$d" --task task-r3 --checks a --items T2 --note "pilot") || fail "lifecycle: open failed: $out"
+  assert_contains "$out" "opened round r3 with 2 planned check(s)" "lifecycle: --items adds the item's unretired checks"
+  [ "$(tail -n 1 "$d/rounds.jsonl")" = '{"id":"r3","task":"task-r3","opened":"2026-10-15T20:00:00Z","planned":["a","c"],"note":"pilot"}' ] ||
+    fail "lifecycle: open line, got $(tail -n 1 "$d/rounds.jsonl")"
+  rc=0; out=$("$REG" round check r3 "$d") || rc=$?
+  expect_code 1 "$rc" "lifecycle: an uncovered round"
+  assert_contains "$out" "round r3: 2 of 2 planned check(s) have no line: a, c" "lifecycle: check lists the missing checks"
+  rc=0; out=$("$REG" observe "$d" --round r3 --check a --env local-new --build "$NEW" --layer API --result NOT-RUN 2>&1) || rc=$?
+  expect_code 2 "$rc" "lifecycle: NOT-RUN without a reason"
+  assert_contains "$out" "NOT-RUN needs --reason" "lifecycle: the refusal names the missing reason"
+  rc=0; out=$("$REG" observe "$d" --round r9 --check zz --env local-new --build "$NEW" --layer GUI --result PASS 2>&1) || rc=$?
+  for want in "round r9 is not registered" "unknown check zz" "layer must be one of" "result must be one of"; do
+    assert_contains "$out" "$want" "lifecycle: observe validation ($want)"
+  done
+  rc=0; out=$("$REG" observe "$d" --round r3 --check a --env local-new --build "$NEW" --layer API --result FIXED --supersedes nope 2>&1) || rc=$?
+  assert_contains "$out" "--supersedes names no existing line nope" "lifecycle: a dangling supersedes is refused"
+  rc=0; out=$("$REG" observe "$d" --round r3 --check a --env local-new --build "$NEW" --layer API --result FIXED --task x 2>&1) || rc=$?
+  assert_contains "$out" "observe does not take --task" "lifecycle: options are checked per command"
+  [ "$(grep -c '"round":"r3"' "$d/observations.jsonl")" -eq 0 ] || fail "lifecycle: a refused observation must write nothing"
+  out=$("$REG" observe "$d" --round r3 --check a --env local-new --build "$NEW" --layer API --result FIXED --evidence ev/a --by task-r3) ||
+    fail "lifecycle: observe failed: $out"
+  assert_contains "$out" "recorded r3-1" "lifecycle: ids default to <round>-<n>"
+  [ "$(tail -n 1 "$d/observations.jsonl")" = "{\"id\":\"r3-1\",\"check\":\"a\",\"round\":\"r3\",\"date\":\"2026-10-15\",\"env\":\"local-new\",\"build\":\"$NEW\",\"layer\":\"API\",\"result\":\"FIXED\",\"evidence\":\"ev/a\",\"recorded_by\":\"task-r3\"}" ] ||
+    fail "lifecycle: observation line, got $(tail -n 1 "$d/observations.jsonl")"
+  rc=0; out=$("$REG" observe "$d" --round r3 --check a --env local-new --build "$NEW" --layer UI --result FIXED --id r3-1 2>&1) || rc=$?
+  assert_contains "$out" "line id r3-1 is already used" "lifecycle: duplicate ids are refused"
+  out=$("$REG" observe "$d" --round r3 --check a --env local-new --build deadbeef99 --layer UI --result FIXED 2>&1) ||
+    fail "lifecycle: an unregistered build is recorded with a warning: $out"
+  assert_contains "$out" "is not registered in builds.jsonl; recorded anyway" "lifecycle: unregistered build warning"
+  printf '%s\n' '{"id":"hand","check":"c","round":"r3","env":"local-new","build":"'"$NEW"'","layer":"API","result":"BLOCKED"}' >> "$d/observations.jsonl"
+  rc=0; out=$("$REG" round close r3 "$d" 2>&1) || rc=$?
+  expect_code 1 "$rc" "lifecycle: close refuses an uncovered round"
+  assert_contains "$out" "round r3: 1 of 2 planned check(s) have no line: c" "lifecycle: a reasonless BLOCKED line does not count"
+  assert_contains "$out" "not counted (malformed, or no reason for a result that needs one): line hand (c)" "lifecycle: the uncounted line is named"
+  assert_contains "$out" "round r3 not closed" "lifecycle: close says why"
+  [ "$(grep -c '"closed"' "$d/rounds.jsonl")" -eq 0 ] || fail "lifecycle: a refused close must append nothing"
+  "$REG" observe "$d" --round r3 --check c --env local-new --build "$NEW" --layer API --result NOT-RUN --reason "no fixture" >/dev/null ||
+    fail "lifecycle: NOT-RUN with a reason failed"
+  out=$("$REG" round check --task task-r3 "$d") || fail "lifecycle: round check --task should pass once covered: $out"
+  assert_contains "$out" "round r3: covered (2 of 2 planned checks have a line)" "lifecycle: NOT-RUN with a reason satisfies the gate"
+  out=$("$REG" round check --task unrelated "$d") || fail "lifecycle: a task no round names passes"
+  out=$("$REG" round close r3 "$d") || fail "lifecycle: close failed: $out"
+  assert_contains "$out" "closed round r3" "lifecycle: close confirms"
+  assert_contains "$out" "Test effort: 2 items" "lifecycle: close renders and prints the headline"
+  assert_present "$d/board.html" "lifecycle: close writes the board"
+  [ "$(tail -n 1 "$d/rounds.jsonl")" = '{"id":"r3","closed":"2026-10-15T20:00:00Z"}' ] || fail "lifecycle: close line"
+  m=$("$REG" json "$d")
+  [ "$(jq -c '.last_round | [.id, .task, .closed, .coverage.missing]' <<<"$m")" = '["r3","task-r3","2026-10-15T20:00:00Z",[]]' ] ||
+    fail "lifecycle: the close line amends the round, got $(jq -c .last_round <<<"$m")"
+  [ "$(jq '.rounds | length' <<<"$m")" = 3 ] || fail "lifecycle: an amended round is still one round"
+  rc=0; out=$("$REG" round close r3 "$d" 2>&1) || rc=$?
+  assert_contains "$out" "round r3 is already closed" "lifecycle: a round closes once"
+  pass "round open, observe, check and close append validated lines and enforce coverage"
+}
+
+test_brief_section() {
+  local d out rc=0 abs
+  d=$(new_effort brief)
+  abs=$(cd "$d" && pwd)
+  item "$d" T1
+  check "$d" a T1
+  check "$d" b T1 '{"layer_envs":{"UI":["staging"]}}'
+  rc=0; out=$("$REG" brief-section r1 "$d" 2>&1) || rc=$?
+  expect_code 2 "$rc" "brief: a round with no plan"
+  "$REG" round open r3 "$d" --task task-r3 --checks a,b >/dev/null || fail "brief: open failed"
+  out=$("$REG" brief-section r3 "$d") || fail "brief: brief-section failed"
+  assert_contains "$out" "# Ledger duty" "brief: heading"
+  assert_contains "$out" "$REG observe '$abs' --round r3 --by task-r3" "brief: the exact observe command with absolute paths"
+  assert_contains "$out" "- \`a\`: claim a. Layers: API, UI on local-new" "brief: planned check a with its layers"
+  assert_contains "$out" "- \`b\`: claim b. Layers: API on local-new; UI on staging" "brief: per-environment layers"
+  assert_contains "$out" "local-new \`$NEW\`" "brief: the current build"
+  assert_contains "$out" "NOT-RUN with the reason. That always satisfies the gate" "brief: the honest-omission rule"
+  assert_contains "$out" "$REG round check r3 '$abs'" "brief: the coverage command"
+  pass "the Ledger duty section names the round, the planned checks, the command and the gate"
+}
+
+test_linear_read_at_render() {
+  local d fb out m
+  d=$(new_effort linear)
+  item "$d" T1 '{"linear_id":"KG-1"}'
+  item "$d" T2 '{"linear_id":"KG-2"}'
+  check "$d" a T1
+  check "$d" b T2
+  fb=$(fm_fakebin "$TMP_ROOT/linear-bin")
+  cat > "$fb/fake-linear" <<EOS
+#!/usr/bin/env bash
+echo run >> "$TMP_ROOT/linear-calls"
+cat > "$TMP_ROOT/linear-stdin"
+printf '%s\n' '{"ticket":"KG-1","status":"QA Passed","assignee":"dev"}' '{"ticket":"KG-2","status":"Backlog","extra":"ignored"}' '{"tokens":321}'
+EOS
+  printf '#!/usr/bin/env bash\necho "rate limited" >&2\nexit 3\n' > "$fb/broken-linear"
+  chmod +x "$fb/fake-linear" "$fb/broken-linear"
+
+  out=$("$REG" render "$d") || fail "linear: render without a reader failed"
+  [ "$(tail -n 1 "$d/renders.jsonl" | jq -r .linear.action)" = not-read ] || fail "linear: no reader is recorded as not read"
+  REGRESSION_LINEAR_CMD="$fb/fake-linear" "$REG" json "$d" >/dev/null
+  assert_absent "$TMP_ROOT/linear-calls" "linear: json must never read Linear"
+
+  REGRESSION_LINEAR_CMD="$fb/fake-linear" "$REG" render "$d" >/dev/null || fail "linear: render with a reader failed"
+  [ "$(wc -l < "$TMP_ROOT/linear-calls" | tr -d ' ')" = 1 ] || fail "linear: one batched read per render"
+  [ "$(cat "$TMP_ROOT/linear-stdin")" = $'KG-1\nKG-2' ] || fail "linear: every ticket goes to the one read on stdin"
+  [ "$(tail -n 2 "$d/linear.jsonl" | jq -sc 'map([.ticket, .status, .assignee, .read_at, .extra])')" = \
+    '[["KG-1","QA Passed","dev","2026-10-15T20:00:00Z",null],["KG-2","Backlog",null,"2026-10-15T20:00:00Z",null]]' ] ||
+    fail "linear: statuses appended with the render time, got $(tail -n 2 "$d/linear.jsonl")"
+  [ "$(tail -n 1 "$d/renders.jsonl" | jq -c '.linear | [.action, .tickets_requested, .tickets_returned, .tokens, (.bytes > 0)]')" = '["read",2,2,321,true]' ] ||
+    fail "linear: the read and its cost are recorded, got $(tail -n 1 "$d/renders.jsonl")"
+  m=$("$REG" json "$d")
+  [ "$(jq -r '.last_render.linear.action' <<<"$m")" = read ] || fail "linear: the model carries the last render's read"
+  [ "$(jq -r '.linear_read.newest' <<<"$m")" = 2026-10-15T20:00:00Z ] || fail "linear: the page shows the read time"
+
+  REGRESSION_NOW=2026-10-15T23:00:00Z REGRESSION_LINEAR_CMD="$fb/fake-linear" "$REG" render "$d" >/dev/null
+  [ "$(wc -l < "$TMP_ROOT/linear-calls" | tr -d ' ')" = 1 ] || fail "linear: a recent read is reused, not read again"
+  assert_contains "$(tail -n 1 "$d/renders.jsonl")" "the last read is 180 min old, under the 240 min re-read interval" "linear: reuse reason"
+  REGRESSION_NOW=2026-10-15T23:00:00Z REGRESSION_LINEAR_MAX_AGE=0 REGRESSION_LINEAR_CMD="$fb/fake-linear" "$REG" render "$d" >/dev/null
+  [ "$(wc -l < "$TMP_ROOT/linear-calls" | tr -d ' ')" = 2 ] || fail "linear: the re-read interval is configurable"
+
+  out=$(REGRESSION_NOW=2026-10-15T23:30:00Z REGRESSION_LINEAR_MAX_AGE=0 REGRESSION_LINEAR_CMD="$fb/broken-linear" "$REG" render "$d") ||
+    fail "linear: a failing reader must not stop the render"
+  [ "$(tail -n 1 "$d/renders.jsonl" | jq -r .linear.reason)" = "the reader exited 3: rate limited" ] || fail "linear: failure recorded"
+  [ "$(wc -l < "$d/linear.jsonl" | tr -d ' ')" = 4 ] || fail "linear: a failed read appends no statuses"
+  pass "Linear status is one batched read per render, reused while recent, and measured"
+}
+
+test_teardown_refuses_uncovered_round() {
+  local home efforts d out rc
+  home="$TMP_ROOT/teardown-home"
+  efforts="$home/data/regressions"
+  mkdir -p "$efforts" "$home/state" "$home/config" "$home/projects"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  fm_fake_exit0 "$(fm_fakebin "$home")" tmux treehouse no-mistakes gh gh-axi tasks-axi
+  d="$efforts/effort"
+  "$REG" init "$d" >/dev/null
+  jq '.envs = ["local-new"]' "$d/effort.json" > "$d/e.tmp" && mv "$d/e.tmp" "$d/effort.json"
+  printf '%s\n' "{\"env\":\"local-new\",\"sha\":\"$NEW\",\"role\":\"target\",\"current\":true}" > "$d/builds.jsonl"
+  item "$d" T1
+  check "$d" a T1
+  "$REG" round open r1 "$d" --task round-task --checks a >/dev/null || fail "teardown: open failed"
+  for id in round-task other-task; do
+    fm_write_meta "$home/state/$id.meta" "window=firstmate:fm-$id" "worktree=$home/projects/missing-$id" \
+      "project=$home/projects/sample" "harness=codex" "kind=tester" "mode=tester"
+    mkdir -p "$home/data/$id"
+    printf '# Report\n' > "$home/data/$id/report.md"
+  done
+  run_td() {
+    PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-teardown.sh" "$1" 2>&1
+  }
+  rc=0; out=$(run_td round-task) || rc=$?
+  [ "$rc" -ne 0 ] || fail "teardown: an uncovered round must refuse"
+  assert_contains "$out" "REFUSED: tester task round-task ran a regression round with planned checks that have no recorded result" "teardown: plain refusal"
+  assert_contains "$out" "round r1: 1 of 1 planned check(s) have no line: a" "teardown: the refusal lists the missing checks"
+  assert_present "$home/state/round-task.meta" "teardown: a refused teardown keeps the task"
+  rc=0; out=$(run_td other-task) || rc=$?
+  assert_not_contains "$out" "regression round" "teardown: a task no round names is untouched"
+  "$REG" observe "$d" --round r1 --check a --env local-new --build "$NEW" --layer API --result NOT-RUN --reason "no fixture" >/dev/null
+  rc=0; out=$(run_td round-task) || rc=$?
+  assert_not_contains "$out" "regression round" "teardown: a covered round no longer refuses"
+  pass "teardown refuses a tester whose round has uncovered checks and leaves other tasks alone"
 }
 
 run_case test_empty_effort
 run_case test_derived_states
-run_case test_counts_add_up_and_readiness
+run_case test_counts_add_up_and_not_proven
 run_case test_lint_rules
 run_case test_changed_since_last_round
 run_case test_baseline_env_in_check_envs
 run_case test_decisions_read_from_backlog
 run_case test_page_self_contained
+run_case test_superseding_checks
+run_case test_round_lifecycle
+run_case test_brief_section
+run_case test_linear_read_at_render
+run_case test_teardown_refuses_uncovered_round
 fm_case_summary "fm-regression"

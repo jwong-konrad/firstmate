@@ -43,9 +43,7 @@ a { color: var(--accent); }
 .strip { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: .88rem; position: sticky; top: 0; z-index: 2; }
 .strip.old { background: var(--bad-bg); border-color: var(--bad); color: var(--bad); }
 .strip b { font-weight: 600; }
-.verdict { font-size: 1.1rem; font-weight: 700; padding: 8px 12px; border-radius: 8px; margin: 0 0 10px; }
-.verdict.no { background: var(--bad-bg); color: var(--bad); }
-.verdict.yes { background: var(--good-bg); color: var(--good); }
+.summary { font-size: 1.05rem; font-weight: 600; margin: 0 0 10px; }
 .counts { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
 .count { border-radius: 8px; padding: 6px 10px; display: flex; justify-content: space-between; gap: 8px; min-width: 0; }
 .count .n { font-weight: 700; font-variant-numeric: tabular-nums; }
@@ -99,7 +97,7 @@ details[open] > summary::before { content: "\25BE"; }
     "proven": "s-good", "as-designed": "s-good", "ui-owed": "s-warn", "layer-owed": "s-warn",
     "still-open": "s-bad", "never-observed": "s-bad", "unknown": "s-bad", "stale": "s-warn",
     "code-only": "s-warn", "blocked": "s-warn", "not-run": "s-warn", "not-testable": "s-info",
-    "out-of-scope": "s-none", "no-checks": "s-bad", "baseline": "s-none"
+    "out-of-scope": "s-none", "no-checks": "s-bad", "baseline": "s-none", "retired": "s-none"
   };
   var RESULT_TONE = { "FIXED": "s-good", "AS-DESIGNED": "s-good", "STILL-OPEN": "s-bad",
     "OBSERVED": "s-none", "NOT-RUN": "s-warn", "NOT-TESTABLE": "s-info", "BLOCKED": "s-warn" };
@@ -160,18 +158,37 @@ details[open] > summary::before { content: "\25BE"; }
   var age = Date.now() - new Date(D.rendered_at).getTime();
   var old = !(age < STALE_AFTER_MS);
   var lr = D.linear_read;
+  var lx = D.last_render && D.last_render.linear;
+  function linearThisRender() {
+    if (!lx) return "not recorded";
+    if (lx.action === "read") return "read " + lx.tickets_returned + " of " + lx.tickets_requested + " tickets, " +
+      lx.bytes + " bytes" + (lx.tokens !== null && lx.tokens !== undefined ? ", " + lx.tokens + " tokens" : "");
+    if (lx.action === "reused") return "reused: " + lx.reason;
+    if (lx.action === "failed") return "read failed: " + lx.reason;
+    return "not read: " + lx.reason;
+  }
+  var cov = D.last_round && D.last_round.coverage;
+  function roundText(r) {
+    if (!r) return "none";
+    var t = r.id + (r.closed ? ", closed " + fmt(r.closed) : ", open");
+    if (cov) t += cov.missing.length ? ", " + cov.missing.length + " of " + cov.planned + " planned check(s) have no line" : ", every planned check has a line";
+    return t;
+  }
   app.appendChild(h("section", { "class": "card strip" + (old ? " old" : ""), "aria-label": "Freshness" },
     old ? h("span", null, h("b", { text: "This board may be out of date. " })) : null,
     h("span", null, h("b", { text: "Rendered " }), fmt(D.rendered_at) + " (" + (isNaN(age) ? "unknown age" : ago(age)) + ")"),
     h("span", null, h("b", { text: "Linear read " }), lr.tickets ? (fmt(lr.oldest) + (lr.newest !== lr.oldest ? " to " + fmt(lr.newest) : "") + ", " + lr.tickets + " tickets") : "never"),
-    h("span", null, h("b", { text: "Last round " }), D.last_round ? D.last_round.id + (D.last_round.closed ? ", closed " + fmt(D.last_round.closed) : ", not closed") : "none"),
+    h("span", null, h("b", { text: "Linear at this render " }), linearThisRender()),
+    h("span", null, h("b", { text: "Last round " }), roundText(D.last_round)),
     h("span", null, h("b", { text: "Lint " }), D.lint.length ? D.lint.length + " failure(s)" : "clean"),
     h("span", null, h("b", { text: "Decisions " }), D.decisions_read ? "read from the backlog at render" : "not read")));
 
   // Headline counts: every state is shown, zero included, and the counts add up to the total.
+  // The board states what is not yet proven; whether to move on is the team's decision.
+  var np = D.not_proven;
   var head = h("section", { "class": "card", "aria-label": "Headline" });
-  head.appendChild(h("div", { "class": "verdict " + (D.ready.ready ? "yes" : "no"),
-    text: (D.ready.ready ? "READY FOR STAGE" : "NOT READY FOR STAGE") + ": " + D.ready.reason }));
+  head.appendChild(h("p", { "class": "summary", text: np.checks + " in-scope check(s) not yet proven on the target build" +
+    (np.items_without_checks ? ", " + np.items_without_checks + " item(s) without checks" : "") + "." }));
   head.appendChild(h("p", { "class": "sub", text: D.totals.items + " items, " + D.totals.checks + " checks. Check states on the target build:" }));
   head.appendChild(h("div", { "class": "counts" }, D.check_counts.map(function (c) {
     return h("div", { "class": "count " + (TONE[c.state] || "s-none") + (c.count ? "" : " zero") },
@@ -291,8 +308,11 @@ details[open] > summary::before { content: "\25BE"; }
           return h("details", null,
             h("summary", null, badge(c.state), h("span", { "class": "mono", text: c.id }), h("span", { text: c.claim })),
             h("div", { "class": "check-body" },
-              h("div", { "class": "meta" }, h("span", { text: "arm " + c.arm }), h("span", { text: "required layers " + c.required.join(", ") }),
-                c.ui_na ? h("span", { text: "UI n/a: " + c.ui_na }) : null, h("span", { text: "required envs " + c.envs.join(", ") })),
+              h("div", { "class": "meta" }, h("span", { text: "arm " + c.arm }),
+                h("span", { text: "required " + (c.envs.length ? c.envs.map(function (e) { return c.required_by_env[e].join(", ") + " on " + e; }).join("; ") : "nowhere") }),
+                c.ui_na ? h("span", { text: "UI n/a: " + c.ui_na }) : null,
+                c.retired ? h("span", { text: "retired: " + c.retired }) : null,
+                c.amendments ? h("span", { text: "amended by " + c.amendments + " later line(s)" }) : null),
               c.note ? h("p", { "class": "sub", text: c.note }) : null,
               h("div", { "class": "envs" }, c.cells.map(function (cell) { return cellView(c, cell); }))));
         }) : h("p", { "class": "empty", text: "No checks." })));

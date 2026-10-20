@@ -29,6 +29,9 @@
 # check: their worktree is declared scratch and the report at
 # data/<task-id>/report.md is the work product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
+# A scout or tester that a regression round names (a data/regressions/<effort>/rounds.jsonl
+# line opened by bin/fm-regression.sh round open --task <id>) also needs every planned check
+# of that round to have a result line; tasks no round names are untouched.
 # Before destructive cleanup, teardown validates task check artifacts and any
 # matching quarantine entries as ordinary single-link files on the state
 # device. It refuses and preserves task state when that proof fails; otherwise
@@ -1100,6 +1103,17 @@ if [ "$REPORT_KIND" = 1 ] && [ "$FORCE" != "--force" ]; then
     echo "The report is the work product. Have the crewmate write it, or use --force after explicit discard approval." >&2
     exit 1
   fi
+  for effort in "$DATA"/regressions/*/; do
+    [ -f "$effort/rounds.jsonl" ] || continue
+    grep -qF "\"$ID\"" "$effort/rounds.jsonl" || continue
+    if ! coverage=$("$SCRIPT_DIR/fm-regression.sh" round check --task "$ID" "${effort%/}" 2>&1); then
+      echo "REFUSED: $KIND task $ID ran a regression round with planned checks that have no recorded result." >&2
+      printf '%s
+' "$coverage" >&2
+      echo "Record a result for each one (not run, with its reason, counts), or use --force after explicit discard approval." >&2
+      exit 1
+    fi
+  done
   if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-decision-hold.sh" verify "$ID" >/dev/null; then
     echo "REFUSED: $KIND task $ID has not passed the unresolved-decision completion gate." >&2
