@@ -43,6 +43,10 @@
 #                   families never schedule under --jobs.
 #   -h, --help      print this header
 #
+# Output timing: every script's output is buffered to a file and replayed
+# after the script exits, serial and --jobs alike, so a leaked child holding
+# the output open cannot stall the run. Output appears per script, not live.
+#
 # Per-script machine-parseable markers (stdout):
 #   FM_TEST_BEGIN <iso8601> <script> family=<family> expected_gate_skip=<class>
 #   FM_TEST_END <iso8601> <script> exit=<code> duration_ms=<n> gate_skip=<true|false>
@@ -1234,11 +1238,12 @@ run_one_serial() {
     "$begin_iso" "$script" "$family" "$expected"
 
   set +e
-  # Stream live output while retaining a copy for gate-skip detection.
-  # PIPESTATUS[0] is the test script; tee's exit is ignored for aggregate.
-  bash "$script" 2>&1 | tee "$out"
-  rc=${PIPESTATUS[0]}
+  # Buffer to a file and replay after the script exits, like the --jobs path.
+  # A pipe reader would block on any leaked child that keeps the pipe open.
+  bash "$script" >"$out" 2>&1
+  rc=$?
   set -e
+  cat "$out"
   : "${rc:=1}"
 
   end_ms=$(now_ms)

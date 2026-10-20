@@ -651,5 +651,61 @@ run_case test_ci_and_docs_call_the_owner
 run_case test_portable_shard_union_and_coverage_guard
 run_case test_jobs_requires_proven_isolated
 run_case test_jobs_parallel_scheduler_and_failure_propagation
+test_serial_ignores_leaked_child_holding_output() {
+  local tmp leak_f order_f pidfile pid rc runner_pid
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-leak.XXXXXX")
+  leak_f="$tmp/leak.test.sh"
+  order_f="$tmp/order.test.sh"
+  pidfile="$tmp/child.pid"
+  # The stopped child inherits the script's stdout and never exits, so a pipe
+  # reader would block until the child dies.
+  cat >"$leak_f" <<SH
+#!/usr/bin/env bash
+echo "leak-line-1"
+sleep 300 &
+kill -STOP \$!
+echo \$! >"$pidfile"
+echo "leak-line-2" >&2
+exit 3
+SH
+  cat >"$order_f" <<'SH'
+#!/usr/bin/env bash
+echo "order-line-1"
+echo "order-line-2" >&2
+exit 0
+SH
+  chmod +x "$leak_f" "$order_f"
+  "$RUNNER" "$leak_f" "$order_f" >"$tmp/out.txt" 2>"$tmp/err.txt" &
+  runner_pid=$!
+  for _ in $(seq 1 100); do
+    kill -0 "$runner_pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "$runner_pid" 2>/dev/null; then
+    kill -9 "$runner_pid" 2>/dev/null || true
+    pid=$(cat "$pidfile" 2>/dev/null || true)
+    [ -z "$pid" ] || kill -9 "$pid" 2>/dev/null || true
+    rm -rf "$tmp"
+    fail "serial runner hung on a leaked child holding the output open"
+  fi
+  set +e
+  wait "$runner_pid"
+  rc=$?
+  set -e
+  pid=$(cat "$pidfile" 2>/dev/null || true)
+  [ -z "$pid" ] || kill -9 "$pid" 2>/dev/null || true
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "leaked-child script failure must propagate"; }
+  grep -q 'FM_TEST_SUMMARY total=2 failed=1' "$tmp/out.txt" \
+    || { rm -rf "$tmp"; fail "leak summary wrong: $(grep FM_TEST_SUMMARY "$tmp/out.txt")"; }
+  grep -Eq "FM_TEST_END .*leak.test.sh exit=3" "$tmp/out.txt" \
+    || { rm -rf "$tmp"; fail "leak script exit status not recorded"; }
+  # Output keeps content and order: begin, script output, end, then the next script.
+  awk '/FM_TEST_BEGIN/{b++} /leak-line-1/{l1=NR} /leak-line-2/{l2=NR} /order-line-1/{o1=NR} END{exit !(b==2 && l1 && l2>l1 && o1>l2)}' "$tmp/out.txt" \
+    || { rm -rf "$tmp"; fail "serial output content or order changed: $(cat "$tmp/out.txt")"; }
+  rm -rf "$tmp"
+  pass "serial runner survives a leaked child holding output open"
+}
+
 run_case test_aggregate_json
+run_case test_serial_ignores_leaked_child_holding_output
 fm_case_summary "fm-test-run"
