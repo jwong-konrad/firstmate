@@ -181,8 +181,13 @@ fm_pr_head_valid() {
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
 }
 
+# uname forks a process, and these helpers run several times per armed poll on
+# every watcher start (bin/fm-pr-check-migrate.sh validates every poll before
+# the watcher may take its lock), so the platform is read once per process.
+FM_PR_UNAME=$(uname)
+
 fm_pr_file_mode() {
-  if [ "$(uname)" = Darwin ]; then
+  if [ "$FM_PR_UNAME" = Darwin ]; then
     stat -f %Lp "$1" 2>/dev/null
   else
     stat -c %a "$1" 2>/dev/null
@@ -190,7 +195,7 @@ fm_pr_file_mode() {
 }
 
 fm_pr_file_device() {
-  if [ "$(uname)" = Darwin ]; then
+  if [ "$FM_PR_UNAME" = Darwin ]; then
     stat -f %d "$1" 2>/dev/null
   else
     stat -c %d "$1" 2>/dev/null
@@ -198,7 +203,7 @@ fm_pr_file_device() {
 }
 
 fm_pr_file_link_count() {
-  if [ "$(uname)" = Darwin ]; then
+  if [ "$FM_PR_UNAME" = Darwin ]; then
     stat -f %l "$1" 2>/dev/null
   else
     stat -c %h "$1" 2>/dev/null
@@ -206,37 +211,94 @@ fm_pr_file_link_count() {
 }
 
 fm_pr_file_inode() {
-  if [ "$(uname)" = Darwin ]; then
+  if [ "$FM_PR_UNAME" = Darwin ]; then
     stat -f %i "$1" 2>/dev/null
   else
     stat -c %i "$1" 2>/dev/null
   fi
 }
 
-fm_pr_file_identity() {
-  local device inode
-  device=$(fm_pr_file_device "$1") || return 1
-  inode=$(fm_pr_file_inode "$1") || return 1
-  [ -n "$device" ] && [ -n "$inode" ] || return 1
-  printf '%s:%s\n' "$device" "$inode"
+# One stat for every identity field a validator needs, so a check that reads
+# mode, device, link count and inode pays one process instead of four. Sets
+# FM_PR_STAT_MODE, FM_PR_STAT_DEVICE, FM_PR_STAT_LINKS and FM_PR_STAT_INODE.
+FM_PR_STAT_MODE=
+FM_PR_STAT_DEVICE=
+FM_PR_STAT_LINKS=
+FM_PR_STAT_INODE=
+fm_pr_stat_fields() {
+  local out
+  FM_PR_STAT_MODE=
+  FM_PR_STAT_DEVICE=
+  FM_PR_STAT_LINKS=
+  FM_PR_STAT_INODE=
+  if [ "$FM_PR_UNAME" = Darwin ]; then
+    out=$(stat -f '%Lp %d %l %i' "$1" 2>/dev/null) || return 1
+  else
+    out=$(stat -c '%a %d %h %i' "$1" 2>/dev/null) || return 1
+  fi
+  # Digits and single spaces only, so plain word splitting is exact; a here-doc
+  # would cost a temporary file per call on bash 3.2.
+  # shellcheck disable=SC2086
+  set -- $out
+  FM_PR_STAT_MODE=${1-}
+  FM_PR_STAT_DEVICE=${2-}
+  FM_PR_STAT_LINKS=${3-}
+  FM_PR_STAT_INODE=${4-}
+  [ -n "$FM_PR_STAT_MODE" ] && [ -n "$FM_PR_STAT_DEVICE" ] \
+    && [ -n "$FM_PR_STAT_LINKS" ] && [ -n "$FM_PR_STAT_INODE" ]
 }
 
+fm_pr_file_identity() {
+  fm_pr_stat_fields "$1" || return 1
+  printf '%s:%s\n' "$FM_PR_STAT_DEVICE" "$FM_PR_STAT_INODE"
+}
+
+# The digest is the first field of the tool's output; read it from the command
+# substitution directly rather than piping through awk.
 fm_pr_sha256() {
+  local out
   if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+    out=$(shasum -a 256 "$1" 2>/dev/null) || return 1
   elif command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" 2>/dev/null | awk '{print $1}'
+    out=$(sha256sum "$1" 2>/dev/null) || return 1
   else
     return 1
   fi
+  printf '%s\n' "${out%% *}"
+}
+
+# Two digests from one tool invocation. shasum is a Perl script on macOS, so its
+# start-up, not the hashing, is what a validation pays for; hashing the sidecar
+# and the check together halves that. Sets FM_PR_SHA256_FIRST and
+# FM_PR_SHA256_SECOND, in argument order.
+FM_PR_SHA256_FIRST=
+FM_PR_SHA256_SECOND=
+fm_pr_sha256_pair() {
+  local first=$1 second=$2 out line1 line2
+  FM_PR_SHA256_FIRST=
+  FM_PR_SHA256_SECOND=
+  if command -v shasum >/dev/null 2>&1; then
+    out=$(shasum -a 256 "$first" "$second" 2>/dev/null) || return 1
+  elif command -v sha256sum >/dev/null 2>&1; then
+    out=$(sha256sum "$first" "$second" 2>/dev/null) || return 1
+  else
+    return 1
+  fi
+  line1=${out%%$'\n'*}
+  line2=${out#*$'\n'}
+  [ "$line1" != "$out" ] && [ "${line2#*$'\n'}" = "$line2" ] || return 1
+  FM_PR_SHA256_FIRST=${line1%% *}
+  FM_PR_SHA256_SECOND=${line2%% *}
+  [ -n "$FM_PR_SHA256_FIRST" ] && [ -n "$FM_PR_SHA256_SECOND" ]
 }
 
 fm_pr_private_file_valid() {
   local path=$1 mode=$2 device=$3
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  [ "$(fm_pr_file_mode "$path")" = "$mode" ] || return 1
-  [ "$(fm_pr_file_device "$path")" = "$device" ] || return 1
-  [ "$(fm_pr_file_link_count "$path")" = 1 ]
+  fm_pr_stat_fields "$path" || return 1
+  [ "$FM_PR_STAT_MODE" = "$mode" ] || return 1
+  [ "$FM_PR_STAT_DEVICE" = "$device" ] || return 1
+  [ "$FM_PR_STAT_LINKS" = 1 ]
 }
 
 fm_pr_regular_destination_or_absent() {
@@ -556,17 +618,20 @@ fm_pr_poll_artifacts_valid() {
   data="$state/$id.pr-poll"
   registration="$state/$id.pr-poll-registration"
   meta="$state/$id.meta"
+  # The private-file validation already stats each file, so its device and inode
+  # are the identities compared against the registration below; they are not
+  # stat'd again.
   fm_pr_private_file_valid "$check" 600 "$state_device" || return 1
+  check_identity="$FM_PR_STAT_DEVICE:$FM_PR_STAT_INODE"
   fm_pr_private_file_valid "$data" 600 "$state_device" || return 1
+  data_identity="$FM_PR_STAT_DEVICE:$FM_PR_STAT_INODE"
   fm_pr_private_file_valid "$registration" 600 "$state_device" || return 1
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
-  [ "$(fm_pr_file_link_count "$meta")" = 1 ] || return 1
   cmp -s "$template" "$check" || return 1
   fm_pr_poll_data_parse "$data" || return 1
-  data_hash=$(fm_pr_sha256 "$data") || return 1
-  template_hash=$(fm_pr_sha256 "$check") || return 1
-  data_identity=$(fm_pr_file_identity "$data") || return 1
-  check_identity=$(fm_pr_file_identity "$check") || return 1
+  fm_pr_sha256_pair "$data" "$check" || return 1
+  data_hash=$FM_PR_SHA256_FIRST
+  template_hash=$FM_PR_SHA256_SECOND
   fm_pr_poll_registration_parse "$registration" || return 1
   [ "$FM_PR_REG_ID" = "$id" ] || return 1
   [ "$FM_PR_REG_PROVIDER" = "$FM_PR_DATA_PROVIDER" ] || return 1
@@ -578,6 +643,7 @@ fm_pr_poll_artifacts_valid() {
   [ "$FM_PR_REG_TEMPLATE_HASH" = "$template_hash" ] || return 1
   [ "$FM_PR_REG_DATA_IDENTITY" = "$data_identity" ] || return 1
   [ "$FM_PR_REG_CHECK_IDENTITY" = "$check_identity" ] || return 1
+  # The metadata parser itself requires an ordinary single-link file.
   fm_pr_metadata_identity_parse "$meta" || return 1
   [ "$FM_PR_META_PROVIDER" = "$FM_PR_DATA_PROVIDER" ] || return 1
   [ "$FM_PR_META_URL" = "$FM_PR_DATA_URL" ] || return 1

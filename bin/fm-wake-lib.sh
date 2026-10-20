@@ -99,6 +99,77 @@ fm_watcher_healthy() {
   return 0
 }
 
+# An arm in progress. bin/fm-watch-arm.sh needs seconds between being launched
+# and its watcher publishing the lock, identity, and first beacon: the arm gate,
+# the watcher's pre-lock PR-check validation, then the three lock files. A
+# turn-end guard that reads only the lock reports supervision OFF for that whole
+# stretch, with the previous cycle's beacon still looking fresh, right after a
+# correct re-arm. So an arm publishes one private record per live arm process for
+# exactly that stretch, and a guard accepts it as supervision being established
+# while the arm is genuinely alive.
+#
+# The record is evidence only while ALL of these hold, so a dead, recycled, or
+# forgotten arm can never excuse a blind turn: the arm pid is alive, its process
+# identity still matches the one recorded (guards pid reuse, as the watcher lock
+# does), the record names this home, and it is younger than FM_ARM_PENDING_MAX
+# (default 120s, comfortably above the gate budget plus the confirmation window,
+# so a wedged arm stops excusing the turn). The arm is a harness-tracked
+# background task that notifies on exit either way, so a live arm is not blind.
+FM_ARM_PENDING_MAX="${FM_ARM_PENDING_MAX:-120}"
+case "$FM_ARM_PENDING_MAX" in ''|*[!0-9]*) FM_ARM_PENDING_MAX=120 ;; esac
+
+fm_arm_pending_path() {  # <state-dir> <arm-pid>
+  printf '%s/.watch-arm-pending.%s\n' "$1" "$2"
+}
+
+fm_arm_pending_publish() {  # <state-dir> <arm-pid> <home>
+  local state=$1 pid=$2 home=$3 path tmp identity
+  path=$(fm_arm_pending_path "$state" "$pid")
+  tmp="$path.tmp"
+  identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 0
+  { printf '%s\n%s\n%s\n' "$pid" "$home" "$identity" > "$tmp" && mv -f "$tmp" "$path"; } 2>/dev/null \
+    || rm -f "$tmp" 2>/dev/null || true
+  return 0
+}
+
+fm_arm_pending_clear() {  # <state-dir> <arm-pid>
+  rm -f "$(fm_arm_pending_path "$1" "$2")" "$(fm_arm_pending_path "$1" "$2").tmp" 2>/dev/null || true
+  return 0
+}
+
+# Exit 0 when a live, identity-matched arm for <home> published its record within
+# FM_ARM_PENDING_MAX. Sets FM_ARM_PENDING_PID. Unreadable or malformed records are
+# treated as absent: this errs toward the guard's existing alarm.
+FM_ARM_PENDING_PID=
+fm_arm_pending_active() {  # <state-dir> <home>
+  local state=$1 home=$2 path rec_pid rec_home rec_identity current age
+  FM_ARM_PENDING_PID=
+  for path in "$state"/.watch-arm-pending.*; do
+    [ -f "$path" ] && [ ! -L "$path" ] || continue
+    case "$path" in *.tmp) continue ;; esac
+    { exec 5< "$path"; } 2>/dev/null || continue
+    IFS= read -r rec_pid <&5 || { exec 5<&-; continue; }
+    IFS= read -r rec_home <&5 || { exec 5<&-; continue; }
+    IFS= read -r rec_identity <&5 || { exec 5<&-; continue; }
+    if IFS= read -r _extra <&5; then
+      exec 5<&-
+      continue
+    fi
+    exec 5<&-
+    [ "$path" = "$(fm_arm_pending_path "$state" "$rec_pid")" ] || continue
+    [ "$rec_home" = "$home" ] || continue
+    fm_pid_alive "$rec_pid" || continue
+    current=$(fm_pid_identity "$rec_pid" 2>/dev/null) || continue
+    [ -n "$rec_identity" ] && [ "$current" = "$rec_identity" ] || continue
+    age=$(fm_path_age "$path")
+    [ "$age" -ge 0 ] && [ "$age" -lt "$FM_ARM_PENDING_MAX" ] || continue
+    # shellcheck disable=SC2034 # Read by callers after fm_arm_pending_active returns.
+    FM_ARM_PENDING_PID=$rec_pid
+    return 0
+  done
+  return 1
+}
+
 fm_lock_clean_known_files() {
   local lockdir=$1
   rm -f \

@@ -167,6 +167,15 @@ Every task left unevaluated counts progressing, whether because the remaining bu
 The safety property is one-directional, the same way record invalidation is: the gate may decline only when it actually evaluated every task and found none progressing, so a spent budget always arms.
 A budgeted arm says so in its printed line, so an operator can tell it apart from an arm that saw real progress, and `--force` still bypasses the gate entirely.
 
+### The confirmation window grows with the fleet
+
+Before the watcher takes its lock it runs `bin/fm-pr-check-migrate.sh --checks-safe`, which authenticates every armed merge poll even when nothing changed.
+That cost is per poll: about 0.3 seconds each originally (4.8 seconds for sixteen polls on a quiet machine, 8.9 seconds on the loaded one that exposed it), against a flat ten second confirmation window that also has to cover process start and the lock files.
+Two changes remove the cliff.
+The authentication spends fewer processes per poll (one `stat` for every identity field, one digest invocation for both files, no `basename`, no state-device stat for a task with no custom check), which brought sixteen polls to about 1.6 seconds with the same checks.
+The arm's window also grows by one second per four armed polls, capped by `FM_ARM_CONFIRM_MAX`, so what is left of the per-poll cost cannot become a guaranteed confirmation timeout.
+The migration is a tracked child of the watcher that forwards termination, so an arm that still gives up cannot leave it running as an orphan that holds the watch lock for a minute.
+
 ### Where the stale suppression stops
 
 The watcher's stale suppression covers exactly the awaiting-firstmate set: a declared external-wait pause, a verified captain-held transfer, an open keyed `needs-decision`/`blocked` in the durable status fold, and a finished task parked on a merge firstmate has not made yet.

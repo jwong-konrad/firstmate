@@ -128,7 +128,13 @@ BEAT="$STATE/.last-watcher-beat"
 # "Fresh" reuses the guard's threshold so there is one definition of liveness.
 GRACE=${FM_GUARD_GRACE:-300}
 # How long to wait for a freshly forked watcher to acquire the lock and beat.
+# This is the BASE window; confirm_window below adds time for the pre-lock work
+# that grows with the fleet.
 CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-10}
+# Ceiling for the scaled window, so a wedged startup still ends in FAILED.
+CONFIRM_MAX=${FM_ARM_CONFIRM_MAX:-60}
+case "$CONFIRM_TIMEOUT" in ''|*[!0-9]*) CONFIRM_TIMEOUT=10 ;; esac
+case "$CONFIRM_MAX" in ''|*[!0-9]*) CONFIRM_MAX=60 ;; esac
 # Poll interval while attached to an existing healthy watcher.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
 CYCLE_LOG="$STATE/.watch-cycle-exits.log"
@@ -289,10 +295,41 @@ healthy_watcher() {
   HEALTHY_PID=$FM_WATCHER_HEALTHY_PID
 }
 
+# Publish this arm's in-progress record (fm_arm_pending_publish in
+# bin/fm-wake-lib.sh) for exactly the stretch where it has been launched but its
+# watcher is not yet the verified lock holder, so bin/fm-turnend-guard.sh does not
+# call a correct re-arm blind. It is cleared the moment a healthy watcher is
+# confirmed, and on every exit path through the EXIT trap, so it never outlives
+# the arm's own verification.
+arm_pending_clear() {
+  fm_arm_pending_clear "$STATE" "$ARM_PID"
+}
+trap arm_pending_clear EXIT
+
 report_attached() {
   local age
+  arm_pending_clear
   age=$(fm_path_age "$BEAT")
   echo "watcher: attached pid=$HEALTHY_PID (beacon ${age}s)"
+}
+
+# The confirmation window for a watcher that is about to start. Before the
+# watcher takes its lock it authenticates every armed merge poll
+# (bin/fm-pr-check-migrate.sh --checks-safe), which costs time per poll even when
+# nothing has changed. A fixed window therefore turned a large fleet into a
+# guaranteed confirmation-timeout: with about sixteen polls the validation alone
+# took 8.9s of a 10s window. One extra second per four polls keeps the window
+# proportional to that work, and FM_ARM_CONFIRM_MAX bounds it.
+confirm_window() {
+  local polls=0 check window
+  for check in "$STATE"/*.check.sh; do
+    [ -e "$check" ] || [ -L "$check" ] || continue
+    polls=$((polls + 1))
+  done
+  window=$(( CONFIRM_TIMEOUT + (polls + 3) / 4 ))
+  [ "$window" -le "$CONFIRM_MAX" ] || window=$CONFIRM_MAX
+  [ "$window" -ge "$CONFIRM_TIMEOUT" ] || window=$CONFIRM_TIMEOUT
+  printf '%s' "$window"
 }
 
 # Give a successor the same bounded confirmation window used for a fresh child.
@@ -302,7 +339,7 @@ wait_for_healthy_successor() {
   local deadline
   # date(1) exposes whole seconds. Add one rounding second so a timeout of one
   # second cannot collapse to a few milliseconds when called near a boundary.
-  deadline=$(( $(date +%s) + CONFIRM_TIMEOUT + 1 ))
+  deadline=$(( $(date +%s) + $(confirm_window) + 1 ))
   while :; do
     healthy_watcher && return 0
     [ "$(date +%s)" -ge "$deadline" ] && return 1
@@ -313,6 +350,43 @@ wait_for_healthy_successor() {
 fail_unexplained_cycle() {
   echo "watcher: FAILED - cycle ended without an actionable reason"
   return 1
+}
+
+# True when the arm that FORKED the watcher this arm attached to has already
+# delivered an actionable wake for that very cycle. Only an owner arm reads a
+# watcher's output, so its ledger row is the one record that says the cycle ended
+# because it produced a wake. The row must name the attached watcher, be owner
+# origin and actionable, and have closed no earlier than this arm attached
+# (cycle_started_at) and no later than now: a row from before the attach or from
+# the future is a recycled pid, never this cycle. The owner writes its row before
+# printing, and this arm has already waited out the successor window, so the row
+# is normally present; a short bounded re-read covers a slow owner.
+owner_delivered_attached_cycle() {
+  local pid=$1 tries=0 now
+  while :; do
+    now=$(date +%s)
+    if [ -f "$CYCLE_LOG" ] && awk -F '\t' -v pid="$pid" -v since="$cycle_started_at" -v now="$now" '
+      NF {
+        origin = ""; reason = ""; watcher = ""; ended = ""
+        for (i = 1; i <= NF; i++) {
+          if (substr($i, 1, 7) == "origin=") origin = substr($i, 8)
+          else if (substr($i, 1, 7) == "reason=") reason = substr($i, 8)
+          else if (substr($i, 1, 12) == "watcher_pid=") watcher = substr($i, 13)
+          else if (substr($i, 1, 9) == "ended_at=") ended = substr($i, 10)
+        }
+        if (origin != "started" || watcher != pid) next
+        if (substr(reason, 1, 11) != "actionable-") next
+        if (ended !~ /^[0-9]+$/ || ended + 0 < since + 0 || ended + 0 > now + 0) next
+        found = 1
+      }
+      END { exit found ? 0 : 1 }
+    ' "$CYCLE_LOG" 2>/dev/null; then
+      return 0
+    fi
+    [ "$tries" -lt 10 ] || return 1
+    tries=$((tries + 1))
+    sleep 0.2
+  done
 }
 
 # Stay alive across identity-matched healthy holders. If one cycle ends, attach
@@ -339,6 +413,13 @@ attach_and_wait() {
       continue
     fi
     cycle_log_append unknown unknown attached-cycle-ended none
+    # The owner arm delivered this cycle's wake to firstmate, so the cycle
+    # ended the ordinary way and this observer simply has no cycle left to
+    # follow. That is not a supervision lapse and must not look like one.
+    if owner_delivered_attached_cycle "$attached_pid"; then
+      echo "watcher: cycle ended - its owning arm delivered the wake; drain and re-arm"
+      return 0
+    fi
     fail_unexplained_cycle
     return 1
   done
@@ -389,6 +470,11 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+
+# From here until a healthy watcher is confirmed, this arm is establishing
+# supervision rather than missing it; say so for the turn-end guard (see
+# arm_pending_clear). A declined arm clears it again through the EXIT trap.
+fm_arm_pending_publish "$STATE" "$ARM_PID" "$FM_HOME"
 
 # Conditional arming gate (see the header). Evaluated BEFORE --restart stops the
 # current watcher, so a declined restart never leaves the home with the old cycle
@@ -647,9 +733,10 @@ owned_child_finished() {
 # until the child gives up. Only then print the honest line.
 # date(1) exposes whole seconds. Keep the configured confirmation budget from
 # collapsing when startup begins just before the next second boundary.
-deadline=$(( $(date +%s) + CONFIRM_TIMEOUT + 1 ))
+deadline=$(( $(date +%s) + $(confirm_window) + 1 ))
 while :; do
   if healthy_watcher; then
+    arm_pending_clear
     if [ "$HEALTHY_PID" = "$child" ]; then
       cycle_refresh_lock_before
       cycle_mark_predecessor_successor "started:$child"

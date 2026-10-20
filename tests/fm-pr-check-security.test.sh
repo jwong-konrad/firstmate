@@ -2839,7 +2839,44 @@ EOF
   pass "GitLab merge requests are followed on any instance and never wake falsely"
 }
 
+# The poll validators run once per armed poll on every watcher start, before the
+# watcher may take its lock, so their process count is the arm's startup cost
+# (8.9s for about sixteen polls on the loaded machine that exposed it). The
+# consolidated helpers must report exactly what the single-purpose ones do.
+test_consolidated_stat_and_digest_helpers_match_the_single_purpose_ones() {
+  local dir a b first second
+  dir="$TMP_ROOT/consolidated-helpers"
+  mkdir -p "$dir"
+  a="$dir/a"
+  b="$dir/b"
+  printf 'alpha\n' > "$a"
+  printf 'beta\n' > "$b"
+  chmod 0600 "$a"
+  ln "$b" "$dir/b-link"
+  fm_pr_stat_fields "$a" || fail "fm_pr_stat_fields rejected a plain file"
+  [ "$FM_PR_STAT_MODE" = "$(fm_pr_file_mode "$a")" ] || fail "mode disagrees with fm_pr_file_mode"
+  [ "$FM_PR_STAT_DEVICE" = "$(fm_pr_file_device "$a")" ] || fail "device disagrees with fm_pr_file_device"
+  [ "$FM_PR_STAT_LINKS" = "$(fm_pr_file_link_count "$a")" ] || fail "link count disagrees with fm_pr_file_link_count"
+  [ "$FM_PR_STAT_INODE" = "$(fm_pr_file_inode "$a")" ] || fail "inode disagrees with fm_pr_file_inode"
+  [ "$(fm_pr_file_identity "$a")" = "$FM_PR_STAT_DEVICE:$FM_PR_STAT_INODE" ] || fail "identity is not device:inode"
+  fm_pr_stat_fields "$b" || fail "fm_pr_stat_fields rejected a hard-linked file"
+  [ "$FM_PR_STAT_LINKS" = 2 ] || fail "a second link must read as 2, got $FM_PR_STAT_LINKS"
+  if fm_pr_stat_fields "$dir/missing"; then fail "fm_pr_stat_fields accepted a missing file"; fi
+  [ -z "$FM_PR_STAT_MODE" ] || fail "a failed stat must not leave stale fields behind"
+  fm_pr_private_file_valid "$a" 600 "$(fm_pr_file_device "$a")" || fail "a private single-link file must validate"
+  fm_pr_private_file_valid "$b" 600 "$(fm_pr_file_device "$b")" && fail "a hard-linked file must not validate as private"
+  fm_pr_sha256_pair "$a" "$b" || fail "fm_pr_sha256_pair failed on two files"
+  first=$(fm_pr_sha256 "$a")
+  second=$(fm_pr_sha256 "$b")
+  [ "$FM_PR_SHA256_FIRST" = "$first" ] || fail "first digest disagrees with fm_pr_sha256"
+  [ "$FM_PR_SHA256_SECOND" = "$second" ] || fail "second digest disagrees with fm_pr_sha256"
+  [ "$first" != "$second" ] || fail "setup: distinct files must hash differently"
+  if fm_pr_sha256_pair "$a" "$dir/missing"; then fail "a missing second file must fail the pair"; fi
+  pass "poll validators: consolidated stat and digest helpers agree with the single-purpose ones"
+}
+
 run_case test_parser_matrix
+run_case test_consolidated_stat_and_digest_helpers_match_the_single_purpose_ones
 run_case test_gitlab_merge_watch
 run_case test_invalid_entrypoints_have_zero_side_effects
 run_case test_valid_recording_and_merge_derivation

@@ -977,6 +977,196 @@ test_linux_pid_identity_ignores_wall_clock_and_detects_pid_reuse() {
   pass "Linux process identity detects pid reuse"
 }
 
+# --- supervision arm fixes: w9 (spurious FAILED), w1 (startup window), g6 --------
+
+# Ledger row exactly as the arm that FORKED a watcher writes it.
+owner_ledger_row() {  # <watcher-pid> <reason> <ended-at>
+  printf 'arm_pid=1\twatcher_pid=%s\torigin=started\tstarted_at=%s\tended_at=%s\texit_code=0\tsignal=none\treason=%s\tbeacon_age=1\tlock_before=none\tlock_after=none\tsuccessor=none\n' \
+    "$1" "$(( $3 - 5 ))" "$3" "$2"
+}
+
+# An arm that ATTACHED to a watcher its sibling arm forked must not call that
+# cycle's ordinary end a supervision failure. Ledger evidence from the field: in
+# 55 of the 56 attached-cycle-ended/successor=none rows, the owner arm had closed
+# the same watcher with an actionable wake 11-12s earlier - exactly the successor
+# window the attached arm waits out. The owner delivers the wake; the observer has
+# nothing left to follow.
+test_attached_arm_treats_an_owner_delivered_wake_as_a_normal_end() {
+  local row dir state fakebin out armout i wpid armpid status ended
+  for row in delivered other-pid stale-row nonzero-exit; do
+    dir=$(make_case "attached-owner-$row")
+    state="$dir/state"
+    fakebin="$dir/fakebin"
+    out="$dir/watch.out"
+    armout="$dir/arm.out"
+    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    wpid=$!
+    i=0
+    while [ "$i" -lt 60 ]; do
+      [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] && [ -e "$state/.last-watcher-beat" ] && break
+      sleep 0.1
+      i=$((i + 1))
+    done
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "($row) seed watcher did not take the lock"
+    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" --force > "$armout" &
+    armpid=$!
+    i=0
+    while [ "$i" -lt 80 ]; do
+      grep -qF "watcher: attached pid=$wpid" "$armout" 2>/dev/null && break
+      sleep 0.1
+      i=$((i + 1))
+    done
+    grep -qF "watcher: attached pid=$wpid" "$armout" || fail "($row) arm did not attach"
+    kill "$wpid" 2>/dev/null || true
+    wait "$wpid" 2>/dev/null || true
+    ended=$(date +%s)
+    case "$row" in
+      delivered)     owner_ledger_row "$wpid" actionable-signal "$ended" ;;
+      other-pid)     owner_ledger_row "$((wpid + 1))" actionable-signal "$ended" ;;
+      stale-row)     owner_ledger_row "$wpid" actionable-signal "$(( ended - 3600 ))" ;;
+      nonzero-exit)  owner_ledger_row "$wpid" nonzero-exit "$ended" ;;
+    esac >> "$state/.watch-cycle-exits.log"
+    wait_for_exit "$armpid" 120
+    status=$?
+    if [ "$row" = delivered ]; then
+      [ "$status" -eq 0 ] || fail "attached arm failed (status $status) after its owner delivered the wake: $(cat "$armout")"
+      ! grep -qF 'watcher: FAILED' "$armout" || fail "attached arm reported FAILED for a cycle its owner closed with a wake: $(cat "$armout")"
+      grep -qF 'watcher: cycle ended - its owning arm delivered the wake' "$armout" \
+        || fail "attached arm did not say why it ended: $(cat "$armout")"
+    else
+      [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "($row) attached arm must still fail (status $status): $(cat "$armout")"
+      grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$armout" \
+        || fail "($row) a real lapse lost its FAILED line: $(cat "$armout")"
+    fi
+  done
+  pass "attached arm: an owner-delivered wake ends quietly, while a missing, foreign, stale, or failed owner row stays FAILED"
+}
+
+# A hermetic bin/ of symlinks to the real scripts with the PR-check migration
+# replaced by a stub that takes FM_STUB_MIGRATE_SECS to finish, standing in for the
+# per-poll validation the real one pays before the watcher may take its lock.
+make_slow_migration_home() {  # <name> <polls>
+  local name=$1 polls=$2 dir n
+  dir=$(make_case "$name")
+  mkdir -p "$dir/bin"
+  ln -s "$ROOT"/bin/* "$dir/bin/" 2>/dev/null || true
+  rm -f "$dir/bin/fm-pr-check-migrate.sh"
+  cat > "$dir/bin/fm-pr-check-migrate.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$FM_STUB_MIGRATE_PIDFILE"
+exec sleep "${FM_STUB_MIGRATE_SECS:-0}"
+SH
+  chmod +x "$dir/bin/fm-pr-check-migrate.sh"
+  : > "$dir/state/.last-check"
+  n=0
+  while [ "$n" -lt "$polls" ]; do
+    n=$((n + 1))
+    : > "$dir/state/poll$n.check.sh"
+  done
+  printf '%s\n' "$dir"
+}
+
+run_slow_migration_arm() {  # <dir> <migrate-secs> <armout>
+  local dir=$1 secs=$2 armout=$3
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
+    FM_STUB_MIGRATE_SECS="$secs" FM_STUB_MIGRATE_PIDFILE="$dir/migrate.pid" \
+    FM_ARM_CONFIRM_TIMEOUT=1 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$dir/bin/fm-watch-arm.sh" --force > "$armout" 2>&1
+}
+
+# The confirmation window was a flat 10s while the pre-lock validation grows with
+# the number of armed merge polls: with about sixteen polls the validation alone
+# took 8.9s, so every arm timed out and monitoring stayed off. The window now grows
+# with the poll count. Same slow migration, same base window: only the poll count
+# differs, so it is the only variable that can flip the outcome.
+test_arm_confirm_window_grows_with_the_armed_poll_count() {
+  local dir armout armpid lock_pid i
+  dir=$(make_slow_migration_home arm-window-many-polls 12)
+  armout="$dir/arm.out"
+  run_slow_migration_arm "$dir" 3 "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 120 ]; do
+    grep -qE 'watcher: (started|FAILED)' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  lock_pid=$(cat "$dir/state/.watch.lock/pid" 2>/dev/null || true)
+  grep -qF 'watcher: started pid=' "$armout" \
+    || { kill "$armpid" "$lock_pid" 2>/dev/null; fail "a 3s startup with 12 armed polls must fit the scaled window: $(cat "$armout")"; }
+  kill "$armpid" 2>/dev/null; kill "$lock_pid" 2>/dev/null
+  wait "$armpid" 2>/dev/null
+
+  dir=$(make_slow_migration_home arm-window-no-polls 0)
+  armout="$dir/arm.out"
+  run_slow_migration_arm "$dir" 3 "$armout"
+  grep -qF 'watcher: FAILED - no live watcher with a fresh beacon' "$armout" \
+    || fail "with no armed polls the same slow startup must still time out, so the window is bounded: $(cat "$armout")"
+  pass "arm: the confirmation window scales with armed polls and still ends in FAILED when startup is wedged"
+}
+
+# After a confirmation timeout the arm kills its watcher. The watcher was running
+# the migration in the foreground, so the migration outlived it: ~70s observed,
+# holding the watch lock's pid and blocking the next arm. The watcher now forwards
+# termination to the migration it started.
+test_abandoned_arm_leaves_no_migration_orphan() {
+  local dir armout mpid i
+  dir=$(make_slow_migration_home arm-no-orphan 0)
+  armout="$dir/arm.out"
+  run_slow_migration_arm "$dir" 30 "$armout"
+  grep -qF 'watcher: FAILED - no live watcher with a fresh beacon' "$armout" \
+    || fail "setup: the arm should have abandoned a 30s migration: $(cat "$armout")"
+  mpid=$(cat "$dir/migrate.pid" 2>/dev/null || true)
+  [ -n "$mpid" ] || fail "setup: the migration never started"
+  i=0
+  while [ "$i" -lt 30 ] && is_live_non_zombie "$mpid"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if is_live_non_zombie "$mpid"; then
+    kill "$mpid" 2>/dev/null
+    fail "the abandoned arm left its PR-check migration running as an orphan (pid $mpid)"
+  fi
+  pass "arm: abandoning a watcher during its pre-lock migration leaves no orphan behind"
+}
+
+# The arm publishes a record for the stretch between launch and a confirmed
+# watcher, so the turn-end guard can tell a re-arm in progress from supervision
+# that is missing. It must exist while the arm is still starting, be gone once the
+# watcher is confirmed, and never survive a declined or failed arm.
+test_arm_publishes_a_pending_record_only_while_starting() {
+  local dir armout state armpid lock_pid i seen=0
+  dir=$(make_slow_migration_home arm-pending-record 0)
+  state="$dir/state"
+  armout="$dir/arm.out"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_STUB_MIGRATE_SECS=2 FM_STUB_MIGRATE_PIDFILE="$dir/migrate.pid" \
+    FM_ARM_CONFIRM_TIMEOUT=10 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$dir/bin/fm-watch-arm.sh" --force > "$armout" 2>&1 &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 120 ]; do
+    ls "$state"/.watch-arm-pending.* >/dev/null 2>&1 && seen=1
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ "$seen" -eq 1 ] || fail "the arm published no in-progress record while its watcher was starting"
+  grep -qF 'watcher: started pid=' "$armout" || fail "setup: arm did not start: $(cat "$armout")"
+  [ ! -e "$state/.watch-arm-pending.$armpid" ] || fail "the in-progress record outlived the confirmed watcher"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  kill "$armpid" "$lock_pid" 2>/dev/null
+  wait "$armpid" 2>/dev/null
+  ls "$state"/.watch-arm-pending.* >/dev/null 2>&1 && fail "an exited arm left its in-progress record behind"
+
+  # A declined arm (nothing progressing) exits through the same trap.
+  dir=$(make_slow_migration_home arm-pending-declined 0)
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" "$dir/bin/fm-watch-arm.sh" > "$dir/arm.out" 2>&1
+  grep -qF 'watcher: not armed' "$dir/arm.out" || true
+  ls "$dir/state"/.watch-arm-pending.* >/dev/null 2>&1 && fail "a declined arm left its in-progress record behind"
+  pass "arm: the in-progress record exists only while the watcher is starting"
+}
+
 run_case test_singleton_start
 run_case test_pid_identity_is_locale_invariant
 run_case test_linux_pid_identity_ignores_wall_clock_and_detects_pid_reuse
@@ -1004,4 +1194,8 @@ run_case test_arm_waits_for_peer_beacon_after_child_stands_down
 run_case test_arm_fails_loud_when_no_fresh_watcher_confirmable
 run_case test_cycle_exit_ledger_links_successor_and_stays_bounded
 run_case test_stopped_watcher_is_live_but_stale_then_exit_is_classified
+run_case test_attached_arm_treats_an_owner_delivered_wake_as_a_normal_end
+run_case test_arm_confirm_window_grows_with_the_armed_poll_count
+run_case test_abandoned_arm_leaves_no_migration_orphan
+run_case test_arm_publishes_a_pending_record_only_while_starting
 fm_case_summary "fm-watcher-lock"

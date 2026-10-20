@@ -1148,7 +1148,33 @@ fi
 # Before acquiring the watcher lock or enumerating any runnable check, replace
 # or quarantine checks created by older versions. The migration compares bytes
 # and reads data only; it never invokes legacy check files through Bash.
-"$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || {
+#
+# The migration runs as a tracked child that this process forwards termination
+# to. Run in the foreground it was orphaned whenever the arm gave up on this
+# watcher (confirmation timeout, restart, a killed arm): the default disposition
+# ended this shell at once while the migration carried on, holding the watch lock
+# for as long as it ran and blocking the next arm's own watcher.
+migrate_pid=
+# shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
+forward_migration_signal() {
+  local rc=$1
+  trap - HUP INT TERM
+  if [ -n "$migrate_pid" ]; then
+    kill -TERM "$migrate_pid" 2>/dev/null || true
+    wait "$migrate_pid" 2>/dev/null || true
+  fi
+  exit "$rc"
+}
+trap 'forward_migration_signal 129' HUP
+trap 'forward_migration_signal 130' INT
+trap 'forward_migration_signal 143' TERM
+"$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe &
+migrate_pid=$!
+wait "$migrate_pid"
+migrate_rc=$?
+migrate_pid=
+trap - HUP INT TERM
+[ "$migrate_rc" -eq 0 ] || {
   echo "watcher: PR check migration blocked; refusing to execute state checks" >&2
   exit 1
 }

@@ -29,11 +29,19 @@ For an in-scope primary checkout, it counts PROGRESSING tasks through `bin/fm-pr
 A deliberately parked fleet has runtime records but nothing a watcher could observe, and warning about it on every turn is noise the guard used to produce; a task that is progressing, unrecorded, or unreadable still counts, so a genuinely unsupervised live fleet alarms exactly as before.
 See [`docs/supervision-arming.md`](supervision-arming.md) for the predicate and its deliberately asymmetric fail-toward-alarming mapping.
 An otherwise silent parked fleet does alarm here once per `FM_PROGRESS_IDLE_TTL`, when its idle verdicts age out and count progressing again; that is the re-observation trigger, it self-quenches as soon as the resulting arm rewrites the records, and the same document explains why the alternative was monitoring staying down while a task resumed.
+A worker's own turn end retires an idle verdict the same way: the verdict is bound to the task's metadata, status log, and turn-end marker, so a parked worker that ends a turn makes the guard count it progressing until the next arm re-observes it and declines again.
+That is the shape recorded as `turnend-guard-parked-mismatch-g4`, and it is the signature binding working as designed rather than the guard and the arm judging differently; both read one record through `fm_progress_verdict_cached`.
 If nothing is progressing, it exits silently.
 If work is progressing, it requires `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`.
 That is the same identity-matched live lock and fresh beacon check used by `bin/fm-watch-arm.sh`.
 A stale beacon blocks even if a watcher pid is still live.
 A fresh leftover beacon blocks if the watcher lock is missing, dead, or identity-mismatched.
+One live arm excuses the gap before a watcher publishes its lock.
+A re-arm needs seconds between its launch and a confirmed watcher: the arm gate, the watcher's pre-lock PR-check validation, then the lock's own identity files, and until the first beacon the only beacon on disk is the previous cycle's.
+Reading only the lock therefore reported `SUPERVISION IS OFF` right after a correct re-arm (reproduced as a blocked guard for about six seconds with sixteen armed polls, including a moment where the lock pid was already visible but its identity files were not).
+So `bin/fm-watch-arm.sh` publishes `state/.watch-arm-pending.<arm pid>` from the moment it is launched until a healthy watcher is confirmed, and the guard accepts `fm_arm_pending_active` from `bin/fm-wake-lib.sh` as supervision being established.
+The record counts only while the arm pid is alive, its process identity still matches the recorded one, the record names this home, and it is younger than `FM_ARM_PENDING_MAX` (120 seconds by default).
+A dead, recycled, foreign, or wedged arm therefore keeps the alarm exactly as before, and a live arm is a tracked background task that reports either way.
 
 `FM_STATE_OVERRIDE` wins over `FM_HOME/state`, and `FM_HOME` wins over repo-root `state/`.
 `FM_GUARD_GRACE` controls the beacon freshness window and defaults to 300 seconds.
