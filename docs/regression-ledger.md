@@ -96,9 +96,10 @@ Tasks that no round names are untouched.
 ## Linear status at render
 
 `render` reads Linear at most once, never once per ticket: it runs the reader named by `REGRESSION_LINEAR_CMD` with every item's `linear_id` on standard input and appends each returned status to `linear.jsonl` with the render time.
-It skips the read and reuses the newest recorded one while that is younger than the re-read interval (`linear.max_read_age_minutes`, or `REGRESSION_LINEAR_MAX_AGE`).
+It skips the read and reuses the newest recorded statuses while the last read attempt is younger than the re-read interval (`linear.max_read_age_minutes`, or `REGRESSION_LINEAR_MAX_AGE`).
+A read attempt is a render that ran the reader, whether it succeeded, failed or returned no rows, so a reader that returns nothing is not re-run within the interval.
 Each render appends a `renders.jsonl` line recording whether Linear was read, reused, not read or failed, and for a read its output bytes and any token count the reader reports, so the cost of the read can be judged over time.
-A failed read is recorded and never stops the render.
+A failed read, including output with any malformed line, is recorded, appends no statuses and never stops the render.
 The reader must only read: the tool never writes to Linear, and nothing it runs may.
 `json`, `lint` and the round commands other than `close` never read Linear.
 The intended render points are round close and session start, which keeps the reads to a few a day.

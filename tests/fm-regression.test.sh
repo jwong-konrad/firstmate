@@ -456,7 +456,7 @@ EOS
 
   REGRESSION_NOW=2026-10-15T23:00:00Z REGRESSION_LINEAR_CMD="$fb/fake-linear" "$REG" render "$d" >/dev/null
   [ "$(wc -l < "$TMP_ROOT/linear-calls" | tr -d ' ')" = 1 ] || fail "linear: a recent read is reused, not read again"
-  assert_contains "$(tail -n 1 "$d/renders.jsonl")" "the last read is 180 min old, under the 240 min re-read interval" "linear: reuse reason"
+  assert_contains "$(tail -n 1 "$d/renders.jsonl")" "the last read attempt is 180 min old, under the 240 min re-read interval" "linear: reuse reason"
   REGRESSION_NOW=2026-10-15T23:00:00Z REGRESSION_LINEAR_MAX_AGE=0 REGRESSION_LINEAR_CMD="$fb/fake-linear" "$REG" render "$d" >/dev/null
   [ "$(wc -l < "$TMP_ROOT/linear-calls" | tr -d ' ')" = 2 ] || fail "linear: the re-read interval is configurable"
 
@@ -464,6 +464,20 @@ EOS
     fail "linear: a failing reader must not stop the render"
   [ "$(tail -n 1 "$d/renders.jsonl" | jq -r .linear.reason)" = "the reader exited 3: rate limited" ] || fail "linear: failure recorded"
   [ "$(wc -l < "$d/linear.jsonl" | tr -d ' ')" = 4 ] || fail "linear: a failed read appends no statuses"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" '"'"'{"ticket":"KG-1","status":"Done"}'"'"' "not json"\n' > "$fb/malformed-linear"
+  printf '#!/usr/bin/env bash\necho run >> "%s/empty-calls"\nexit 0\n' "$TMP_ROOT" > "$fb/empty-linear"
+  chmod +x "$fb/malformed-linear" "$fb/empty-linear"
+  out=$(REGRESSION_NOW=2026-10-15T23:45:00Z REGRESSION_LINEAR_MAX_AGE=0 REGRESSION_LINEAR_CMD="$fb/malformed-linear" "$REG" render "$d") ||
+    fail "linear: a reader with a malformed line must not stop the render"
+  [ "$(tail -n 1 "$d/renders.jsonl" | jq -r .linear.action)" = failed ] || fail "linear: malformed output is recorded as failed"
+  [ "$(wc -l < "$d/linear.jsonl" | tr -d ' ')" = 4 ] || fail "linear: malformed output appends no partial statuses"
+
+  d=$(new_effort linear-empty)
+  item "$d" T1 '{"linear_id":"KG-1"}'
+  check "$d" a T1
+  REGRESSION_LINEAR_CMD="$fb/empty-linear" "$REG" render "$d" >/dev/null
+  REGRESSION_LINEAR_CMD="$fb/empty-linear" "$REG" render "$d" >/dev/null
+  [ "$(wc -l < "$TMP_ROOT/empty-calls" | tr -d ' ')" = 1 ] || fail "linear: a reader that returns no rows is not re-run within the interval"
   pass "Linear status is one batched read per render, reused while recent, and measured"
 }
 

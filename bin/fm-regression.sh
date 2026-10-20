@@ -59,11 +59,11 @@
 #                           prints JSON lines {"ticket","status","assignee"}; an optional line
 #                           {"tokens": <n>} reports its token cost. Each status is appended to
 #                           linear.jsonl with the render time. It must never write to Linear.
-#   REGRESSION_LINEAR_MAX_AGE  minutes within which the newest linear.jsonl read is reused
-#                           instead of read again (default: effort.json linear.max_read_age_minutes,
+#   REGRESSION_LINEAR_MAX_AGE  minutes within which the last read attempt (a render that ran the
+#                           reader, whether it succeeded or failed) is not repeated (default: effort.json linear.max_read_age_minutes,
 #                           else 240). 0 reads at every render.
 # Each render appends {rendered_at, linear: {action, reason, tickets_requested, tickets_returned,
-# bytes, tokens, seconds, last_read_at}} to renders.jsonl, so the cost of every read can be judged.
+# bytes, tokens, seconds, last_read_at, last_attempt_at}} to renders.jsonl, so the cost of every read can be judged.
 # Requires jq. No other dependency: the tool reads only the effort folder and the two readers.
 set -eu
 
@@ -234,20 +234,24 @@ read_decisions() {
 # read_linear: at most one batched Linear read per render, appended to linear.jsonl, and the
 # render's read record (what was done, why, and its cost) written to $TMP/linear-read.json.
 read_linear() {
-  local cmd=${REGRESSION_LINEAR_CMD:-none} max_age last age requested start rc=0 bytes
+  local cmd=${REGRESSION_LINEAR_CMD:-none} max_age last attempt age requested start rc=0 bytes tok
   jq -r 'select(.linear_id != null) | .linear_id' "$DIR/items.jsonl" 2>/dev/null | sort -u > "$TMP/tickets"
   requested=$(wc -l < "$TMP/tickets" | tr -d ' ')
   max_age=${REGRESSION_LINEAR_MAX_AGE:-$(jq -r '.linear.max_read_age_minutes // 240' "$DIR/effort.json")}
   case "$max_age" in ''|*[!0-9]*) die "the Linear re-read interval must be whole minutes, got: $max_age" ;; esac
   last=$(jq -rs '[.[] | .read_at // empty] | max // ""' "$DIR/linear.jsonl" 2>/dev/null || true)
-  age=$(jq -rn --arg now "$NOW" --arg last "$last" \
+  attempt=$(jq -rs '[.[] | select(.linear.action == "read" or .linear.action == "failed") | .rendered_at // empty] | max // ""' \
+    "$DIR/renders.jsonl" 2>/dev/null || true)
+  [ -n "$attempt" ] || attempt=$last
+  age=$(jq -rn --arg now "$NOW" --arg last "$attempt" \
     'try ((($now | fromdateiso8601) - ($last | fromdateiso8601)) / 60 | floor) catch ""')
   # record <action> <reason> [extra-json]
   record() {
     local extra=${3:-}
     [ -n "$extra" ] || extra='{}'
-    jq -cn --arg a "$1" --arg r "$2" --arg last "$last" --argjson n "$requested" --argjson x "$extra" \
-      '{action: $a, reason: $r, tickets_requested: $n, last_read_at: (if $last == "" then null else $last end)} + $x' \
+    jq -cn --arg a "$1" --arg r "$2" --arg last "$last" --arg att "$attempt" --argjson n "$requested" --argjson x "$extra" \
+      '{action: $a, reason: $r, tickets_requested: $n, last_read_at: (if $last == "" then null else $last end),
+        last_attempt_at: (if $att == "" then null else $att end)} + $x' \
       > "$TMP/linear-read.json"
   }
   if [ "$cmd" = none ] || ! command -v "$cmd" >/dev/null 2>&1; then
@@ -255,24 +259,24 @@ read_linear() {
   elif [ "$requested" -eq 0 ]; then
     record not-read "no item has a linear_id"
   elif [ -n "$age" ] && [ "$age" -ge 0 ] && [ "$age" -lt "$max_age" ]; then
-    record reused "the last read is $age min old, under the $max_age min re-read interval"
+    record reused "the last read attempt is $age min old, under the $max_age min re-read interval"
   else
     start=$(date +%s)
     "$cmd" < "$TMP/tickets" > "$TMP/linear.out" 2> "$TMP/linear.err" || rc=$?
     bytes=$(wc -c < "$TMP/linear.out" | tr -d ' ')
     if [ "$rc" -ne 0 ]; then
       record failed "the reader exited $rc: $(head -n 1 "$TMP/linear.err")" "{\"bytes\": $bytes}"
-    elif ! jq -e 'type == "object"' "$TMP/linear.out" >/dev/null 2>&1 && [ "$bytes" -gt 0 ]; then
-      record failed "the reader printed something other than JSON lines" "{\"bytes\": $bytes}"
-    else
-      jq -c --arg now "$NOW" --arg by "render via $(basename "$cmd")" '
+    elif ! jq -c --arg now "$NOW" --arg by "render via $(basename "$cmd")" '
         select((.ticket | type) == "string" and (.status | type) == "string")
         | {ticket, status} + (if .assignee then {assignee} else {} end) + {read_at: $now, read_by: $by}' \
-        "$TMP/linear.out" > "$TMP/linear.new"
+        "$TMP/linear.out" > "$TMP/linear.new" 2>/dev/null ||
+      ! tok=$(jq -s '[.[] | select(.ticket == null and (.tokens | type) == "number") | .tokens] | if length > 0 then add else null end' \
+        "$TMP/linear.out" 2>/dev/null); then
+      record failed "the reader printed something other than JSON lines" "{\"bytes\": $bytes}"
+    else
       cat "$TMP/linear.new" >> "$DIR/linear.jsonl"
       record read "read at this render" "$(jq -cn --argjson b "$bytes" --argjson s "$(($(date +%s) - start))" \
-        --argjson got "$(wc -l < "$TMP/linear.new" | tr -d ' ')" \
-        --argjson tok "$(jq -s '[.[] | select(.ticket == null and (.tokens | type) == "number") | .tokens] | if length > 0 then add else null end' "$TMP/linear.out")" \
+        --argjson got "$(wc -l < "$TMP/linear.new" | tr -d ' ')" --argjson tok "$tok" \
         '{tickets_returned: $got, bytes: $b, tokens: $tok, seconds: $s}')"
     fi
   fi
@@ -391,6 +395,8 @@ case "$CMD" in
     fi
     append rounds "$(jq -cn --arg id "$ROUND" --arg now "$NOW" '{id: $id, closed: $now}')"
     printf 'fm-regression: closed round %s\n' "$ROUND"
+    rmdir "$LOCK" 2>/dev/null || true
+    LOCK=
     CMD=render
     render
     ;;
