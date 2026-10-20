@@ -29,6 +29,7 @@ When you see a background-task-completed system reminder for the arm:
 4. Ordinary wake: re-arm the next cycle with the same background `bin/fm-watch-arm.sh` call if work is still progressing or X mode still needs polling; the arm declines on its own when nothing is.
 5. Do not invent a wake from an attach-status line alone.
    Drain the queue and act only on real wake records or a real watcher reason line.
+   An attached arm that ends with `watcher: cycle ended - its owning arm delivered the wake` is not a failure: the owning arm already delivered the wake, so drain and re-arm.
    Re-arm attaches to an existing healthy cycle when one is already present and follows its verified successor chain.
    See [`watcher-continuity.md`](../watcher-continuity.md) for the arm-layer successor and clean-close failure contract.
 

@@ -996,6 +996,92 @@ test_grok_hook_invokes_adapter() {
   pass ".grok primary hook: Stop hook invokes the grok adapter"
 }
 
+# --- HOOK: an arm launched moments ago (turnend-guard-arm-race-g6) ------------
+#
+# A re-arm needs seconds between launch and a published watcher lock: the arm
+# gate, the watcher's pre-lock PR-check validation, then the lock's own identity
+# files. The guard used to read only the lock, so it called a correct re-arm blind
+# for that whole stretch - while the only beacon on disk was the previous cycle's
+# and still looked fresh. A live, identity-matched arm record for this home now
+# counts as supervision being established; every other shape still alarms.
+
+seed_progressing_task() {  # <dir>
+  local dir=$1
+  printf 'window=test:fm-live\nkind=ship\n' > "$dir/state/live.meta"
+  printf 'working: validating\n' > "$dir/state/live.status"
+  fm_progress_record_write "$dir/state" live progressing working 'validating (running)'
+  touch "$dir/state/.last-watcher-beat"
+}
+
+# Publish the record exactly as bin/fm-watch-arm.sh does, for a live stand-in pid.
+publish_arm_record() {  # <dir> <pid> [home]
+  local dir=$1 pid=$2 home=${3:-}
+  [ -n "$home" ] || home=$(cd "$dir" && pwd)
+  FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_arm_pending_publish "$2" "$3" "$4"' _ \
+    "$dir/bin/fm-wake-lib.sh" "$dir/state" "$pid" "$home"
+}
+
+test_hook_allows_the_turn_while_a_fresh_arm_is_starting() {
+  local dir out status pid
+  dir=$(make_primary_dir "$TMP_ROOT/hook-arm-starting")
+  seed_progressing_task "$dir"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "setup: with no lock and no arm record the guard must alarm"
+  sleep 30 &
+  pid=$!
+  publish_arm_record "$dir" "$pid"
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  expect_code 0 "$status" "a live arm that has not published its lock yet is supervision being established"
+  [ -z "$out" ] || fail "guard warned during a live arm's startup: $out"
+  pass "fm-turnend-guard: a live arm still starting its watcher does not make the turn blind"
+}
+
+test_hook_still_blocks_when_the_arm_record_is_not_a_live_arm() {
+  local dir out status pid other
+  # dead arm
+  dir=$(make_primary_dir "$TMP_ROOT/hook-arm-dead")
+  seed_progressing_task "$dir"
+  sleep 30 &
+  pid=$!
+  publish_arm_record "$dir" "$pid"
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "a record whose arm died must not excuse the turn"
+  # a recycled pid: same pid, different process identity
+  dir=$(make_primary_dir "$TMP_ROOT/hook-arm-recycled")
+  seed_progressing_task "$dir"
+  sleep 30 &
+  pid=$!
+  publish_arm_record "$dir" "$pid"
+  printf '%s\n%s\n%s\n' "$pid" "$(cd "$dir" && pwd)" 'some other process entirely' > "$dir/state/.watch-arm-pending.$pid"
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  expect_code 2 "$status" "a record whose pid now names a different process must not excuse the turn"
+  # another home's arm
+  dir=$(make_primary_dir "$TMP_ROOT/hook-arm-other-home")
+  seed_progressing_task "$dir"
+  other=$(make_primary_dir "$TMP_ROOT/hook-arm-other-home-elsewhere")
+  sleep 30 &
+  pid=$!
+  publish_arm_record "$dir" "$pid" "$(cd "$other" && pwd)"
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  expect_code 2 "$status" "another home's arm must not excuse this home's turn"
+  # an arm that has been starting for longer than any arm legitimately takes
+  dir=$(make_primary_dir "$TMP_ROOT/hook-arm-wedged")
+  seed_progressing_task "$dir"
+  sleep 30 &
+  pid=$!
+  publish_arm_record "$dir" "$pid"
+  touch -t 202001010000 "$dir/state/.watch-arm-pending.$pid"
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  expect_code 2 "$status" "a wedged arm must stop excusing the turn after FM_ARM_PENDING_MAX"
+  assert_contains "$out" "SUPERVISION IS OFF" "the alarm must still say supervision is off"
+  pass "fm-turnend-guard: a dead, recycled, foreign, or wedged arm record keeps the alarm"
+}
+
 run_case test_predicate_healthy_no_inflight
 run_case test_predicate_unhealthy_no_beacon
 run_case test_predicate_unhealthy_stale_beacon
@@ -1041,4 +1127,6 @@ run_case test_pi_extension_forces_followup
 run_case test_pi_extension_injects_once_per_logical_agent_run
 run_case test_pi_extension_retries_after_followup_delivery_failure
 run_case test_grok_hook_invokes_adapter
+run_case test_hook_allows_the_turn_while_a_fresh_arm_is_starting
+run_case test_hook_still_blocks_when_the_arm_record_is_not_a_live_arm
 fm_case_summary "fm-turnend-guard"

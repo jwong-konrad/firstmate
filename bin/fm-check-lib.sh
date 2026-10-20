@@ -19,8 +19,12 @@ fm_custom_check_trust_read() {
   FM_CUSTOM_CHECK_HASH=
   fm_pr_task_id_valid "$id" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
-  state_device=$(fm_pr_file_device "$state") || return 1
   trust="$state/$id.check-trust"
+  # Almost every task has no custom check and so no trust file; settle that with
+  # builtins before paying a stat for the state device (the full private-file
+  # validation below repeats the same two tests).
+  [ -f "$trust" ] && [ ! -L "$trust" ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
   fm_pr_private_file_valid "$trust" 600 "$state_device" || return 1
   exec 9< "$trust" || return 1
   IFS= read -r version <&9 || { exec 9<&-; return 1; }

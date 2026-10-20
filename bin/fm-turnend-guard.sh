@@ -91,6 +91,14 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 fm_supervision_status "$STATE" "$GRACE"
 [ "$FM_SUP_PROGRESSING" -gt 0 ] || exit 0
 fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && exit 0
+# A re-arm launched moments ago has not published its lock yet: the arm gate, the
+# watcher's pre-lock PR-check validation, and the lock's own identity files all
+# come first, and until the beacon is touched the only beacon on disk is the
+# PREVIOUS cycle's. That stretch is supervision being established, not missing,
+# and the arm is a tracked background task that reports either way. Only a live,
+# identity-matched arm for this home that published within FM_ARM_PENDING_MAX
+# counts (fm_arm_pending_active); anything else keeps the alarm exactly as before.
+fm_arm_pending_active "$STATE" "$FM_HOME" && exit 0
 
 afk=0
 [ -e "$STATE/.afk" ] && afk=1

@@ -48,6 +48,13 @@ They remain the final backstop rather than the normal continuity mechanism.
 An actionable child output returns that reason normally.
 A zero/empty child return rechecks the home lock and beacon, attaches to a verified healthy successor when one exists, or emits `watcher: FAILED - cycle ended without an actionable reason` and exits nonzero.
 An attached arm follows verified identity-matched successors and reports the same typed failure if that chain ends without one.
+The one exception is a cycle whose owner delivered its wake.
+The arm that forked a watcher is the only one that reads its output, so when an attached arm finds no successor it consults the ledger for an owner-origin `actionable-*` row naming the attached watcher that closed no earlier than the attach.
+Finding one, it exits 0 with `watcher: cycle ended - its owning arm delivered the wake; drain and re-arm`, because the cycle ended the ordinary way and there is simply nothing left to follow.
+Without that row (no owner row, a different watcher, a row older than the attach, or an owner that failed) it still reports `FAILED`, so a real lapse stays loud.
+In the 800-row ledger that exposed this, 55 of 56 attached-cycle-ended rows with no successor had an owner row for the same watcher 11 to 12 seconds earlier, which is the successor window the attached arm waits out.
+The confirmation window for a fresh watcher is `FM_ARM_CONFIRM_TIMEOUT` plus one second per four armed polls, capped by `FM_ARM_CONFIRM_MAX`, because the watcher authenticates every armed poll before it takes its lock.
+The watcher runs that authentication as a child it forwards termination to, so an arm that gives up on a watcher leaves no orphaned migration holding the lock.
 
 The arm layer appends one tab-separated record per observed cycle to `state/.watch-cycle-exits.log`.
 Each record includes arm and watcher PIDs, start and end timestamps, exit code and signal, classified reason, beacon age, lock identity before and after close, and successor disposition.
