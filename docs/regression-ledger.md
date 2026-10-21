@@ -7,7 +7,7 @@ This document owns the record contract and the meaning of each derived state.
 
 The tool reads only the effort folder (an argument or `REGRESSION_EFFORT_DIR`), a backlog reader for linked decisions (`tasks-axi show <key>`), and an optional read-only Linear reader.
 It has no other firstmate dependency, so it can move to another orchestrator unchanged.
-Records are only ever appended, by hand or by the tool's `round`, `observe` and `render` commands; no command rewrites a line.
+Records are only ever appended, by hand or by the tool's `build`, `check`, `round`, `observe` and `render` commands; no command rewrites a line.
 An effort folder holds private evidence, so keep it out of any shared repository; firstmate keeps its efforts under the gitignored `data/regressions/<effort>/`.
 
 ## Unit of record
@@ -24,9 +24,9 @@ Each record type is one JSON Lines file; `init` creates them empty.
 | File | One line per | Fields |
 |---|---|---|
 | `effort.json` | (one object) | `id`, `title`, `envs` (display order), `target_envs` (default required environments), `default_required_layers` (default `["API","UI"]`), `evidence_root` (prefix for relative evidence paths), `linear.done_statuses`, `linear.closed_statuses`, `linear.max_read_age_minutes` (default 240), `note` |
-| `builds.jsonl` | environment and code version | `env`, `sha` (or `unidentified`), `role` (`baseline`, `target` or `unknown`), `current`, `first_seen`, `evidence` |
+| `builds.jsonl` | environment and code version, or an amendment of one | `env`, `sha` (or `unidentified`), `role` (`baseline`, `target` or `unknown`), `current`, `first_seen`, `evidence`, `note`, `supersedes`, `superseded_by`, `reason`, `date` |
 | `items.jsonl` | tracked issue | `id`, `kind` (`ticket`, `finding`, `dev-question`), `linear_id`, `title`, `scope` (`in` or `out`), `scope_reason`, `owner_next`, `next_action`, `unblock`, `visibility`, `decision_keys`, `related`, `imported`, `note` |
-| `checks.jsonl` | asserted claim, or an amendment of one | `id`, `item`, `claim`, `arm` (`refused`, `allowed`, `self`, `ui`, `logging`, `other`), `required_layers`, `ui_na` (reason), `envs`, `layer_envs` (`{layer: [env, ...]}`), `retired` (reason), `unblock`, `added_in_round`, `note`, `supersedes` |
+| `checks.jsonl` | asserted claim, or an amendment of one | `id`, `item`, `claim`, `arm` (`refused`, `allowed`, `self`, `ui`, `logging`, `other`), `group`, `required_layers`, `ui_na` (reason), `envs`, `layer_envs` (`{layer: [env, ...]}`), `retired` (reason), `unblock`, `added_in_round`, `note`, `supersedes` |
 | `observations.jsonl` | result | `id`, `check`, `round`, `date`, `env`, `build`, `layer`, `result`, `reason`, `evidence`, `recorded_by`, `supersedes` |
 | `rounds.jsonl` | testing round in chronological order, or an amendment of one | `id`, `task`, `opened`, `planned` (check ids), `closed`, `report`, `note` |
 | `linear.jsonl` | ticket status read | `ticket`, `status`, `assignee`, `read_at`, `read_by` |
@@ -41,6 +41,17 @@ Rules for observations:
 - `FIXED` means the check's claim holds on that build, whichever way the claim is phrased.
 - `build` matches a registered build when either sha is a prefix of the other (at least 7 characters), or both are `unidentified`.
 
+Rules for builds:
+
+- A build is named by its `env` and `sha` together, so the same sha in two environments is two builds.
+- A build is amended by a later line with the same `env` and `sha` whose `supersedes` names that sha; its fields replace the earlier ones, exactly as for checks.
+  `build supersede` writes such a line with `current: false`, the `reason`, the `date` and an optional `superseded_by`.
+- The current build of an environment is the build whose latest line saying `current: true` comes last in the file.
+  Registering a newer current build therefore replaces the older one without editing it, and an amendment with `current: true` points the environment back at an older build.
+  Superseding the current build without naming a replacement falls back to the next newest build still marked current.
+- A superseded build stays registered, so its observations never become `unregistered-build`; they are judged as results on a build that is not current.
+- A repeated `env` and `sha` without `supersedes`, and a `supersedes` that names no earlier line in the same environment or not the line's own sha, are lint failures.
+
 Rules for checks and rounds:
 
 - A check is amended by a later line with the same `id` whose `supersedes` names that id; its fields replace the earlier ones, a `null` clears one, and fields it leaves out are kept.
@@ -48,6 +59,9 @@ Rules for checks and rounds:
 - A repeated check id without `supersedes`, and a `supersedes` that names no earlier line or not the line's own id, are lint failures.
 - A rounds line with an already registered `id` amends that round the same way; `round close` appends `{id, closed}`.
   A round keeps the position of its first line.
+
+A check may name a `group`, such as the role windows of a stage phase, so a round can plan the whole group at once whatever items its checks belong to.
+`check add` and `check amend` write validated check lines; `layer_envs` and clearing a field to `null` stay hand-appended amendment lines.
 
 A check requires UI unless it records `ui_na` with a reason.
 Its other required layers come from `required_layers`, else the effort's default.
@@ -82,7 +96,8 @@ The board gives no readiness verdict: whether the work moves to the next stage i
 
 A round is opened before testing starts and closed when its worker reports done.
 
-1. `round open <round> --task <task-id> --checks ... --items ...` registers the round with its planned checks.
+1. `round open <round> --task <task-id> --checks ... --items ... --groups ...` registers the round with its planned checks.
+   `round plan <round>` takes the same selectors and adds checks to a round that is not yet closed, by appending the round's whole new plan as an amendment.
 2. `brief-section <round>` prints the round's "Ledger duty" block for the worker's brief: the planned checks with their required layers per environment, the current builds, and the exact `observe` command.
 3. The worker records each result with `observe`, which validates the line before appending it.
 4. `round check <round>` reports coverage; the worker runs it before reporting done.
@@ -113,7 +128,7 @@ Every failure is listed on the board and counted in its freshness strip; `fm-reg
 - `unregistered-build`: an observation names a build that `builds.jsonl` does not register.
 - `not-relayed`: an item's verdict (fixed, still open, or as designed) has no relay line carrying it; a `withheld` relay records a deliberate hold-back.
 - `item-without-checks`: an in-scope item has no checks.
-- `invalid-record`: a malformed line, such as an unknown layer or result, a missing reason, a dangling `supersedes` on an observation or check, a repeated check id without `supersedes`, a retirement or `ui_na` without a reason, a malformed `layer_envs`, a round planning an unknown check, or an unregistered round.
+- `invalid-record`: a malformed line, such as an unknown layer or result, a missing reason, a dangling `supersedes` on an observation, check or build, a repeated check id or build without `supersedes`, a build line without `env` or `sha`, an empty `group`, a retirement or `ui_na` without a reason, a malformed `layer_envs`, a round planning an unknown check, or an unregistered round.
 
 ## The board
 

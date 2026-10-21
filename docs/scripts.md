@@ -39,7 +39,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-transcript-archive-hook.sh` | Claude Code Stop, SubagentStop, and SessionEnd hook that appends new transcript lines to the archive; silent, always exits 0 (docs/archive.md) |
 | `fm-ledger.sh`           | Write a task's teardown ledger, pane scrollback tail, and scratch snapshot before teardown deletes anything; fail-soft (docs/archive.md) |
 | `fm-recall.sh`           | Build and query the SQLite FTS5 index over reports, handoffs, decisions, learnings, and ledgers, with a raw transcript search (docs/archive.md) |
-| `fm-regression.sh`       | Initialize, lint, and render a regression effort's append-only check ledger as one self-contained HTML board; open, record, check, and close its testing rounds (docs/regression-ledger.md) |
+| `fm-regression.sh`       | Initialize, lint, and render a regression effort's append-only check ledger as one self-contained HTML board; register and supersede builds, add and amend checks, and open, plan, record, check, and close its testing rounds (docs/regression-ledger.md) |
 | `fm-regression.jq`       | Derive step for `fm-regression.sh`: per-check states, headline counts, panels, and lint (docs/regression-ledger.md) |
 | `fm-regression.html`     | Page template `fm-regression.sh render` fills with the derived model (docs/regression-ledger.md) |
 | `fm-context-fill-lib.sh` | Shared context-fill, window, and compaction-point reader for the auto-handoff's context-fill trigger (docs/captain-idle-handoff.md) |

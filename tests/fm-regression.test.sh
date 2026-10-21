@@ -18,6 +18,12 @@
 #   reports coverage (a reasonless NOT-RUN does not count), close refuses until covered and
 #   then appends the close line and renders
 #   the Ledger duty brief section names the round, the planned checks and the gate
+#   builds: build add validates and appends, the newest current line wins its environment (an
+#   older unidentified current line no longer hides a newer build), build supersede retires a
+#   build and can make another current, observations on a superseded build stay registered,
+#   and lint guards repeated and dangling build lines
+#   checks and groups: check add and check amend validate and append, a group is planned as a
+#   whole by round open --groups, and round plan adds checks to an open round, never a closed one
 #   Linear status at render: one batched read, reused while recent, measured per render, and a
 #   failing reader never stops the render; json never reads Linear
 #   teardown refuses a scout or tester whose round still has uncovered planned checks, and
@@ -518,6 +524,142 @@ test_teardown_refuses_uncovered_round() {
   pass "teardown refuses a tester whose round has uncovered checks and leaves other tasks alone"
 }
 
+test_build_commands() {
+  local d out rc m
+  d=$(new_effort builds)
+  item "$d" T1
+  check "$d" s T1 '{"envs":["staging"],"required_layers":["API"],"ui_na":"server-only claim"}'
+  obs "$d" o1 s staging unidentified API FIXED
+  [ "$(state_of "$d" s)" = unknown ] || fail "builds: an unidentified current staging build is unknown"
+  rc=0; out=$("$REG" build add "$d" --env stage --sha XYZ --role boss 2>&1) || rc=$?
+  expect_code 2 "$rc" "builds: add refuses a bad line"
+  for want in "unknown env stage" "sha must be 7 to 40 lowercase hex" "role must be one of baseline, target, unknown"; do
+    assert_contains "$out" "$want" "builds: add validation ($want)"
+  done
+  rc=0; out=$("$REG" build add "$d" --env local-new --sha "${NEW:0:7}" --role target 2>&1) || rc=$?
+  assert_contains "$out" "local-new build $NEW is already registered; use build supersede" "builds: a sha prefix names a registered build"
+  rc=0; out=$("$REG" build add "$d" --env staging --sha ddddddd4444 --role target --current maybe 2>&1) || rc=$?
+  assert_contains "$out" "--current must be yes or no" "builds: --current takes yes or no"
+  [ "$(wc -l < "$d/builds.jsonl" | tr -d ' ')" -eq 4 ] || fail "builds: a refused add must write nothing"
+  out=$("$REG" build add "$d" --env staging --sha ddddddd4444 --role target --evidence "deploy run 1") ||
+    fail "builds: add failed: $out"
+  assert_contains "$out" "registered staging build ddddddd4444; it replaces unidentified as the current staging build" "builds: add says what it replaced"
+  [ "$(tail -n 1 "$d/builds.jsonl")" = '{"env":"staging","sha":"ddddddd4444","role":"target","current":true,"first_seen":"2026-10-15","evidence":"deploy run 1"}' ] ||
+    fail "builds: add line, got $(tail -n 1 "$d/builds.jsonl")"
+  m=$("$REG" json "$d")
+  [ "$(jq -c '[.builds[] | select(.env == "staging") | [.sha, .current]]' <<<"$m")" = '[["unidentified",false],["ddddddd4444",true]]' ] ||
+    fail "builds: the newest current line wins, got $(jq -c '[.builds[] | select(.env == "staging")]' <<<"$m")"
+  [ "$(state_of "$d" s)" = unknown ] || fail "builds: results on the unidentified build stay unknown"
+  obs "$d" o2 s staging ddddddd API FIXED
+  [ "$(state_of "$d" s)" = proven ] || fail "builds: a result on the new current build counts, got $(state_of "$d" s)"
+  "$REG" build add "$d" --env staging --sha eeeeeee5555 --role target --current no >/dev/null || fail "builds: add --current no failed"
+  [ "$(state_of "$d" s)" = proven ] || fail "builds: a build added with --current no does not become current"
+  rc=0; out=$("$REG" build supersede "$d" --env staging --sha unidentified 2>&1) || rc=$?
+  assert_contains "$out" "build supersede needs --reason" "builds: supersede needs a reason"
+  rc=0; out=$("$REG" build supersede "$d" --env staging --sha fffffff --reason x 2>&1) || rc=$?
+  assert_contains "$out" "no staging build fffffff is registered" "builds: supersede names a registered build"
+  rc=0; out=$("$REG" build supersede "$d" --env staging --sha ddddddd --by ddddddd4444 --reason x 2>&1) || rc=$?
+  assert_contains "$out" "a build cannot supersede itself" "builds: supersede refuses itself"
+  out=$("$REG" build supersede "$d" --env staging --sha unidentified --by ddddddd --reason "identified as ddddddd4444") ||
+    fail "builds: supersede failed: $out"
+  assert_contains "$out" "superseded staging build unidentified; ddddddd4444 stays the current staging build" "builds: supersede of an older build"
+  [ "$(tail -n 1 "$d/builds.jsonl")" = '{"env":"staging","sha":"unidentified","supersedes":"unidentified","current":false,"reason":"identified as ddddddd4444","date":"2026-10-15","superseded_by":"ddddddd4444"}' ] ||
+    fail "builds: supersede line, got $(tail -n 1 "$d/builds.jsonl")"
+  out=$("$REG" build supersede "$d" --env staging --sha ddddddd4444 --by eeeeeee --reason "wrong deploy read") ||
+    fail "builds: supersede onto a non-current build failed: $out"
+  assert_contains "$out" "eeeeeee5555 is now the current staging build" "builds: --by makes a non-current build current"
+  [ "$(tail -n 1 "$d/builds.jsonl")" = '{"env":"staging","sha":"eeeeeee5555","supersedes":"eeeeeee5555","current":true,"reason":"supersedes ddddddd4444","date":"2026-10-15"}' ] ||
+    fail "builds: the second amendment line, got $(tail -n 1 "$d/builds.jsonl")"
+  m=$("$REG" json "$d")
+  [ "$(jq -c '[.builds[] | select(.env == "staging") | [.sha, .current, .amendments]]' <<<"$m")" = '[["unidentified",false,1],["ddddddd4444",false,1],["eeeeeee5555",true,1]]' ] ||
+    fail "builds: amended builds, got $(jq -c '[.builds[] | select(.env == "staging")]' <<<"$m")"
+  [ "$(jq '.builds | length' <<<"$m")" = 6 ] || fail "builds: an amended build is still one build"
+  [ "$(state_of "$d" s)" = unknown ] || fail "builds: no result on the new current build, one on unidentified, got $(state_of "$d" s)"
+  [ "$(jq -r '.items[].checks[] | select(.id == "s") | .cells[] | select(.env == "staging") | .detail' <<<"$m")" = "results are on an unidentified build" ] ||
+    fail "builds: the cell is judged against the re-pointed current build"
+  out=$("$REG" lint "$d") || true
+  assert_not_contains "$out" "unregistered-build" "builds: observations on a superseded build stay registered"
+  assert_not_contains "$out" "invalid-record" "builds: tool-written supersede lines are valid"
+  printf '%s\n' '{"env":"staging","sha":"eeeeeee5555","role":"target","current":true}' \
+    '{"env":"staging","sha":"1234567aaaa","supersedes":"1234567aaaa","current":false}' \
+    '{"env":"prod","sha":"ddddddd4444","supersedes":"ddddddd4444"}' '{"sha":"abcdef01234"}' >> "$d/builds.jsonl"
+  out=$("$REG" lint "$d") || true
+  assert_contains "$out" "staging build eeeeeee5555 is registered 2 times; a later line amends it only with supersedes" "builds: a repeated build without supersedes is invalid"
+  assert_contains "$out" "supersedes 1234567aaaa, but supersedes must name an earlier line's sha in the same env" "builds: a dangling supersedes is invalid"
+  assert_contains "$out" "supersedes ddddddd4444, but supersedes must name an earlier line's sha in the same env" "builds: supersedes is per environment"
+  assert_contains "$out" "build line 13 lacks one of env, sha" "builds: a build line needs env and sha"
+  pass "build add and build supersede append validated lines; the newest current build wins its environment"
+}
+
+test_check_commands_and_groups() {
+  local d out rc m
+  d=$(new_effort groups)
+  item "$d" T1
+  item "$d" T2
+  check "$d" a T1
+  check "$d" gone T2 '{"retired":"no longer applies","group":"stage"}'
+  rc=0; out=$("$REG" check add "bad id" "$d" --item T1 --claim c 2>&1) || rc=$?
+  assert_contains "$out" "check id must be a slug" "groups: check ids are slugs"
+  rc=0; out=$("$REG" check add a "$d" --item T1 --claim c 2>&1) || rc=$?
+  assert_contains "$out" "check a is already registered; use check amend" "groups: add refuses an existing id"
+  rc=0; out=$("$REG" check add w1 "$d" --item T9 --claim c 2>&1) || rc=$?
+  assert_contains "$out" "unknown item T9" "groups: add needs a known item"
+  rc=0; out=$("$REG" check add w1 "$d" --item T1 --claim c --arm odd --layers API,GUI --envs moon --group "a b" --round r9 2>&1) || rc=$?
+  expect_code 2 "$rc" "groups: add refuses bad fields"
+  for want in "arm must be one of" "unknown layer GUI" "unknown env moon" "group must be a slug" "round r9 is not registered"; do
+    assert_contains "$out" "$want" "groups: add validation ($want)"
+  done
+  [ "$(wc -l < "$d/checks.jsonl" | tr -d ' ')" -eq 2 ] || fail "groups: a refused add must write nothing"
+  out=$("$REG" check add w1 "$d" --item T1 --claim "B[33] reads back its key set" --arm other --layers API \
+    --envs staging --ui-na "key-set read" --group windows --round r1 --note "role window") || fail "groups: add failed: $out"
+  assert_contains "$out" "added check w1 to T1" "groups: add confirms"
+  [ "$(tail -n 1 "$d/checks.jsonl")" = '{"id":"w1","item":"T1","claim":"B[33] reads back its key set","arm":"other","required_layers":["API"],"envs":["staging"],"ui_na":"key-set read","group":"windows","added_in_round":"r1","note":"role window"}' ] ||
+    fail "groups: add line, got $(tail -n 1 "$d/checks.jsonl")"
+  "$REG" check add w2 "$d" --item T2 --claim "B[32] reads back its key set" --envs staging --group windows >/dev/null ||
+    fail "groups: second add failed"
+  rc=0; out=$("$REG" check amend nope "$d" --group windows 2>&1) || rc=$?
+  assert_contains "$out" "check nope is not registered" "groups: amend needs a registered check"
+  rc=0; out=$("$REG" check amend a "$d" 2>&1) || rc=$?
+  assert_contains "$out" "check amend needs at least one field" "groups: amend needs a field"
+  rc=0; out=$("$REG" check amend a "$d" --item T2 2>&1) || rc=$?
+  assert_contains "$out" "check amend does not take --item" "groups: amend never moves a check"
+  out=$("$REG" check amend a "$d" --group stage --envs local-new,staging) || fail "groups: amend failed: $out"
+  assert_contains "$out" "amended check a (envs, group)" "groups: amend names the fields"
+  [ "$(tail -n 1 "$d/checks.jsonl")" = '{"id":"a","supersedes":"a","envs":["local-new","staging"],"group":"stage"}' ] ||
+    fail "groups: amend line, got $(tail -n 1 "$d/checks.jsonl")"
+  out=$("$REG" lint "$d") || true
+  assert_not_contains "$out" "invalid-record" "groups: tool-written check lines are valid"
+  m=$("$REG" json "$d")
+  [ "$(jq -c '[.items[].checks[] | [.id, .group]]' <<<"$m")" = '[["a","stage"],["w1","windows"],["gone","stage"],["w2","windows"]]' ] ||
+    fail "groups: the model carries each check's group, got $(jq -c '[.items[].checks[] | [.id, .group]]' <<<"$m")"
+  rc=0; out=$("$REG" round open r3 "$d" --groups nogroup 2>&1) || rc=$?
+  assert_contains "$out" "group nogroup has no checks" "groups: open refuses an unknown group"
+  out=$("$REG" round open r3 "$d" --task t3 --groups stage) || fail "groups: open --groups failed: $out"
+  assert_contains "$out" "opened round r3 with 1 planned check(s)" "groups: a group plans its unretired checks"
+  rc=0; out=$("$REG" round plan r3 "$d" 2>&1) || rc=$?
+  assert_contains "$out" "round plan needs --checks, --items or --groups" "groups: plan needs a selector"
+  rc=0; out=$("$REG" round plan r9 "$d" --groups windows 2>&1) || rc=$?
+  assert_contains "$out" "round r9 is not registered" "groups: plan needs a registered round"
+  rc=0; out=$("$REG" round plan r3 "$d" --checks gone 2>&1) || rc=$?
+  assert_contains "$out" "check gone is retired" "groups: plan refuses a retired check"
+  out=$("$REG" round plan r3 "$d" --groups windows,stage) || fail "groups: plan failed: $out"
+  assert_contains "$out" "added 2 planned check(s) to round r3 (3 planned)" "groups: plan adds only new checks"
+  [ "$(tail -n 1 "$d/rounds.jsonl")" = '{"id":"r3","planned":["a","w1","w2"]}' ] || fail "groups: plan line, got $(tail -n 1 "$d/rounds.jsonl")"
+  out=$("$REG" round plan r3 "$d" --checks w1) || fail "groups: a plan with nothing new should succeed"
+  assert_contains "$out" "round r3 already plans every named check" "groups: nothing new appends nothing"
+  [ "$(tail -n 1 "$d/rounds.jsonl")" = '{"id":"r3","planned":["a","w1","w2"]}' ] || fail "groups: no duplicate plan line"
+  rc=0; out=$("$REG" round check r3 "$d") || rc=$?
+  assert_contains "$out" "round r3: 3 of 3 planned check(s) have no line: a, w1, w2" "groups: the planned group is gated"
+  for c in a w1 w2; do
+    "$REG" observe "$d" --round r3 --check "$c" --env staging --build unidentified --layer API --result NOT-RUN --reason later >/dev/null ||
+      fail "groups: observe $c failed"
+  done
+  "$REG" round close r3 "$d" >/dev/null || fail "groups: close failed"
+  rc=0; out=$("$REG" round plan r3 "$d" --checks w1 2>&1) || rc=$?
+  assert_contains "$out" "round r3 is closed; plan a new round instead" "groups: a closed round takes no new plan"
+  pass "check add and amend append validated lines, and a group is planned as a whole into a new or open round"
+}
+
 run_case test_empty_effort
 run_case test_derived_states
 run_case test_counts_add_up_and_not_proven
@@ -531,4 +673,6 @@ run_case test_round_lifecycle
 run_case test_brief_section
 run_case test_linear_read_at_render
 run_case test_teardown_refuses_uncovered_round
+run_case test_build_commands
+run_case test_check_commands_and_groups
 fm_case_summary "fm-regression"
