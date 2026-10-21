@@ -11,7 +11,9 @@
 #   fm-regression.sh render [<effort-dir>] [--out <file>]
 #   fm-regression.sh lint   [<effort-dir>]
 #   fm-regression.sh json   [<effort-dir>]
-#   fm-regression.sh round open  <round> [<effort-dir>] [--task <id>] [--checks <a,b>] [--items <x,y>] [--note <text>]
+#   fm-regression.sh round open  <round> [<effort-dir>] [--task <id>] [--checks <a,b>] [--items <x,y>]
+#                    [--groups <g,h>] [--note <text>]
+#   fm-regression.sh round plan  <round> [<effort-dir>] [--checks <a,b>] [--items <x,y>] [--groups <g,h>]
 #   fm-regression.sh round check <round> [<effort-dir>]
 #   fm-regression.sh round check --task <id> [<effort-dir>]
 #   fm-regression.sh round close <round> [<effort-dir>] [--out <file>]
@@ -19,6 +21,16 @@
 #                    --layer <layer> --result <RESULT> [--reason <text>] [--evidence <path>]
 #                    [--supersedes <line-id>] [--date <YYYY-MM-DD>] [--by <who>] [--id <line-id>]
 #   fm-regression.sh brief-section <round> [<effort-dir>]
+#   fm-regression.sh build add [<effort-dir>] --env <env> --sha <sha|unidentified> --role <role>
+#                    [--current yes|no] [--first-seen <YYYY-MM-DD>] [--evidence <text>] [--note <text>]
+#   fm-regression.sh build supersede [<effort-dir>] --env <env> --sha <sha> --reason <text>
+#                    [--by <sha>] [--evidence <text>] [--date <YYYY-MM-DD>]
+#   fm-regression.sh check add   <check> [<effort-dir>] --item <item> --claim <text> [--arm <arm>]
+#                    [--layers <a,b>] [--envs <a,b>] [--ui-na <reason>] [--group <name>]
+#                    [--unblock <text>] [--note <text>] [--round <r>]
+#   fm-regression.sh check amend <check> [<effort-dir>] [--claim <text>] [--arm <arm>] [--layers <a,b>]
+#                    [--envs <a,b>] [--ui-na <reason>] [--group <name>] [--unblock <text>]
+#                    [--note <text>] [--retired <reason>]
 #
 #   init    create the effort folder: effort.json plus one empty .jsonl file per record type.
 #           Refuses when effort.json already exists, so it never overwrites a ledger.
@@ -30,7 +42,10 @@
 #   json    print the derived model (the page's embedded data) as JSON. Never reads Linear.
 #   round open   append a rounds.jsonl line {id, task, opened, planned, note}. --checks names
 #           planned check ids and --items adds every unretired check of those items; both take a
-#           comma list and may repeat. Refuses an existing round id or an unknown check or item.
+#           comma list and may repeat. --groups adds every unretired check whose group is named.
+#           Refuses an existing round id or an unknown check, item or group.
+#   round plan   add planned checks to a registered, unclosed round: append {id, planned} with
+#           the round's earlier plan plus the new checks (same selectors and refusals as open).
 #   round check  print the round's coverage: every planned, unretired check needs at least one
 #           well-formed observation line in that round (NOT-RUN with a reason counts). Exit 0
 #           when covered, 1 when any planned check has no line. With --task, check every round
@@ -43,6 +58,19 @@
 #           warning; lint counts it on the board.
 #   brief-section print the round's "Ledger duty" Markdown block for a worker brief: the
 #           planned checks, the builds, the exact observe command, and the coverage gate.
+#   build add    append one builds.jsonl line {env, sha, role, current, first_seen, evidence,
+#           note}. --current defaults to yes, and the newest current line wins its environment.
+#           first_seen defaults to today. Refuses an env not in effort.json envs, a sha that is
+#           not 7-40 lowercase hex or "unidentified", and a build already registered in that env.
+#   build supersede  append an amendment {env, sha, supersedes: sha, current: false, reason,
+#           date, superseded_by} that retires a registered build (a sha prefix names it). With
+#           --by <sha>, a build registered in the same env that is not yet current is made
+#           current by a second amendment line. Observations on a superseded build stay registered.
+#   check add    append one checks.jsonl line after validating it (new id, known item, arm, layers,
+#           envs, registered round). --layers sets required_layers and --round added_in_round.
+#   check amend  append {id, supersedes: id, ...} carrying only the fields given; the later line
+#           replaces those fields. --retired retires the check. layer_envs and clearing a field
+#           to null stay hand-appended lines.
 #
 # Exit codes: 0 success, 1 lint failures or an uncovered round, 2 usage or ledger error.
 # The effort folder comes from the argument, else REGRESSION_EFFORT_DIR.
@@ -90,12 +118,14 @@ shift
 case "$CMD" in
   -h|--help|help) usage; exit 0 ;;
   init|render|lint|json|observe|brief-section) ;;
-  round)
-    CMD="round ${1:-}"
+  round|build|check)
+    CMD="$CMD ${1:-}"
     [ "$#" -eq 0 ] || shift
     case "$CMD" in
-      "round open"|"round check"|"round close") ;;
-      *) die "round needs open, check or close (try --help)" ;;
+      "round open"|"round plan"|"round check"|"round close"|"build add"|"build supersede"|"check add"|"check amend") ;;
+      round*) die "round needs open, plan, check or close (try --help)" ;;
+      build*) die "build needs add or supersede (try --help)" ;;
+      *) die "check needs add or amend (try --help)" ;;
     esac
     ;;
   *) die "unknown command: $CMD (try --help)" ;;
@@ -105,7 +135,12 @@ esac
 case "$CMD" in
   init) ALLOWED="id title" ;;
   render|"round close") ALLOWED="out" ;;
-  "round open") ALLOWED="task checks items note" ;;
+  "round open") ALLOWED="task checks items groups note" ;;
+  "round plan") ALLOWED="checks items groups" ;;
+  "build add") ALLOWED="env sha role current first-seen evidence note" ;;
+  "build supersede") ALLOWED="env sha by reason evidence date" ;;
+  "check add") ALLOWED="item claim arm layers envs ui-na group unblock note round" ;;
+  "check amend") ALLOWED="claim arm layers envs ui-na group unblock note retired" ;;
   "round check") ALLOWED="task" ;;
   observe) ALLOWED="round check env build layer result reason evidence supersedes date by id" ;;
   *) ALLOWED="" ;;
@@ -115,15 +150,18 @@ POS=()
 OPT_out='' OPT_id='' OPT_title='' OPT_task='' OPT_checks='' OPT_items='' OPT_note=''
 OPT_round='' OPT_check='' OPT_env='' OPT_build='' OPT_layer='' OPT_result='' OPT_reason=''
 OPT_evidence='' OPT_supersedes='' OPT_date='' OPT_by=''
+OPT_groups='' OPT_sha='' OPT_role='' OPT_current='' OPT_first_seen='' OPT_item='' OPT_claim=''
+OPT_arm='' OPT_layers='' OPT_envs='' OPT_ui_na='' OPT_group='' OPT_unblock='' OPT_retired=''
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --*)
       name=${1#--}
       case " $ALLOWED " in *" $name "*) ;; *) die "$CMD does not take --$name" ;; esac
       [ "$#" -ge 2 ] || die "--$name needs a value"
+      var=${name//-/_}
       case "$name" in
-        checks|items) eval "OPT_$name=\${OPT_$name:+\$OPT_$name,}\$2" ;;
-        *) eval "OPT_$name=\$2" ;;
+        checks|items|groups|layers|envs) eval "OPT_$var=\${OPT_$var:+\$OPT_$var,}\$2" ;;
+        *) eval "OPT_$var=\$2" ;;
       esac
       shift 2
       ;;
@@ -133,7 +171,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 # Positionals: the round id first for the round commands and brief-section, then the folder.
-ROUND=
+ROUND='' CHECK_ID=''
 case "$CMD" in
   "round check")
     if [ -n "$OPT_task" ]; then
@@ -144,7 +182,12 @@ case "$CMD" in
       [ "${#POS[@]}" -le 1 ] || die "one effort folder only"
     fi
     ;;
-  "round open"|"round close"|brief-section)
+  "check add"|"check amend")
+    [ "${#POS[@]}" -ge 1 ] || die "$CMD needs a check id"
+    CHECK_ID=${POS[0]}; POS=("${POS[@]:1}")
+    [ "${#POS[@]}" -le 1 ] || die "one effort folder only"
+    ;;
+  "round open"|"round plan"|"round close"|brief-section)
     [ "${#POS[@]}" -ge 1 ] || die "$CMD needs a round id"
     ROUND=${POS[0]}; POS=("${POS[@]:1}")
     [ "${#POS[@]}" -le 1 ] || die "one effort folder only"
@@ -326,6 +369,67 @@ coverage() {
     'all(.rounds[] | select(.[$k] == $v and .coverage != null); (.coverage.missing | length) == 0)' "$TMP/model.json" >/dev/null
 }
 
+# select_planned: print {planned: [check ids]} for --checks, --items and --groups against
+# $TMP/model.json, or {bad: [reasons]} when any selector names an unknown, empty or retired thing.
+select_planned() {
+  jq -c --arg cs "$OPT_checks" --arg is "$OPT_items" --arg gs "$OPT_groups" '
+    [.items[].checks[]] as $all
+    | ($cs | split(",") | map(select(. != ""))) as $want
+    | ($is | split(",") | map(select(. != ""))) as $its
+    | ($gs | split(",") | map(select(. != ""))) as $grs
+    | (([$want[] | select(. as $k | any($all[]; .id == $k) | not)] | map("unknown check \(.)"))
+      + ([$its[] | select(. as $i | any($all[]; .item == $i) | not)] | map("item \(.) has no checks"))
+      + ([$grs[] | select(. as $g | any($all[]; .group == $g) | not)] | map("group \(.) has no checks"))
+      + ([$want[] | select(. as $k | any($all[]; .id == $k and .state == "retired"))] | map("check \(.) is retired")))
+      as $bad
+    | if ($bad | length) > 0 then {bad: $bad}
+      else {planned: ($want + [$all[] | select(((.item | IN($its[])) or (.group | IN($grs[]))) and .state != "retired") | .id]
+        | reduce .[] as $x ([]; if any(.[]; . == $x) then . else . + [$x] end))} end' "$TMP/model.json"
+}
+
+# resolve_build <env> <sha>: print the one registered sha in <env> that <sha> names, else die.
+resolve_build() {
+  local found
+  found=$(jq -r --arg e "$1" --arg b "$2" '
+    [.builds[] | select(.env == $e) | .sha as $s
+     | select(if $s == "unidentified" or $b == "unidentified" then $s == $b
+       else ($s | length) >= 7 and ($b | length) >= 7 and ($s | startswith($b) or ($b | startswith($s))) end) | $s]
+    | unique | join(" ")' "$TMP/model.json")
+  case "$found" in
+    '') die "no $1 build $2 is registered" ;;
+    *" "*) die "$1 build $2 names more than one registered build: $found" ;;
+  esac
+  printf '%s\n' "$found"
+}
+
+# csv_list <a,b>: print a comma list as a JSON array, empty entries dropped.
+csv_list() {
+  jq -cn --arg s "$1" '$s | split(",") | map(select(. != ""))'
+}
+
+# check_fields: print the check fields given on the command line as one JSON object, after
+# validating them against $TMP/model.json; die naming every bad field.
+check_fields() {
+  local bad
+  bad=$(jq -r --arg arm "$OPT_arm" --argjson ls "$(csv_list "$OPT_layers")" --argjson es "$(csv_list "$OPT_envs")" \
+    --arg g "$OPT_group" --arg r "$OPT_round" '
+    .effort.envs as $envs
+    | [ (if $arm == "" or ($arm | IN("refused", "allowed", "self", "ui", "logging", "other")) then empty
+       else "arm must be one of refused, allowed, self, ui, logging, other" end),
+      ($ls[] | select(IN("code", "API", "DB", "log", "UI") | not) | "unknown layer \(.) (code, API, DB, log, UI)"),
+      ($es[] | select(IN($envs[]) | not) | "unknown env \(.) (effort.json envs)"),
+      (if $g == "" or ($g | test("^[A-Za-z0-9._-]+$")) then empty else "group must be a slug" end),
+      (if $r == "" or any(.rounds[]; .id == $r) then empty else "round \($r) is not registered" end) ]
+    | join("; ")' "$TMP/model.json")
+  [ -z "$bad" ] || die "check $CHECK_ID not recorded: $bad"
+  jq -cn --arg claim "$OPT_claim" --arg arm "$OPT_arm" --argjson ls "$(csv_list "$OPT_layers")" \
+    --argjson es "$(csv_list "$OPT_envs")" --arg una "$OPT_ui_na" --arg g "$OPT_group" --arg u "$OPT_unblock" \
+    --arg n "$OPT_note" --arg r "$OPT_round" --arg ret "$OPT_retired" '
+    {claim: $claim, arm: $arm, required_layers: $ls, envs: $es, ui_na: $una, group: $g, unblock: $u,
+     added_in_round: $r, note: $n, retired: $ret}
+    | with_entries(select(.value != "" and .value != []))'
+}
+
 render() {
   OUT=${OPT_out:-$DIR/board.html}
   read_linear
@@ -351,17 +455,7 @@ case "$CMD" in
     model > "$TMP/model.json" || die "derive failed"
     ! jq -e --arg r "$ROUND" 'any(.rounds[]; .id == $r)' "$TMP/model.json" >/dev/null ||
       die "round $ROUND is already registered; a round is opened once"
-    planned=$(jq -c --arg cs "$OPT_checks" --arg is "$OPT_items" '
-      [.items[].checks[]] as $all
-      | ($cs | split(",") | map(select(. != ""))) as $want
-      | ($is | split(",") | map(select(. != ""))) as $its
-      | (([$want[] | select(. as $k | any($all[]; .id == $k) | not)] | map("unknown check \(.)"))
-        + ([$its[] | select(. as $i | any($all[]; .item == $i) | not)] | map("item \(.) has no checks"))
-        + ([$want[] | select(. as $k | any($all[]; .id == $k and .state == "retired"))] | map("check \(.) is retired")))
-        as $bad
-      | if ($bad | length) > 0 then {bad: $bad}
-        else {planned: ($want + [$all[] | select((.item | IN($its[])) and .state != "retired") | .id]
-          | reduce .[] as $x ([]; if any(.[]; . == $x) then . else . + [$x] end))} end' "$TMP/model.json")
+    planned=$(select_planned)
     if jq -e '.bad' <<<"$planned" >/dev/null; then
       die "round $ROUND not opened: $(jq -r '.bad | join("; ")' <<<"$planned")"
     fi
@@ -370,6 +464,114 @@ case "$CMD" in
       '{id: $id} + (if $task != "" then {task: $task} else {} end) + {opened: $now, planned: $p}
        + (if $note != "" then {note: $note} else {} end)')"
     printf 'fm-regression: opened round %s with %s planned check(s)\n' "$ROUND" "$(jq '.planned | length' <<<"$planned")"
+    ;;
+  "round plan")
+    [ -n "$OPT_checks$OPT_items$OPT_groups" ] || die "round plan needs --checks, --items or --groups"
+    lock
+    model > "$TMP/model.json" || die "derive failed"
+    jq -e --arg r "$ROUND" 'any(.rounds[]; .id == $r)' "$TMP/model.json" >/dev/null || die "round $ROUND is not registered"
+    ! jq -e --arg r "$ROUND" 'any(.rounds[]; .id == $r and .closed != null)' "$TMP/model.json" >/dev/null ||
+      die "round $ROUND is closed; plan a new round instead"
+    planned=$(select_planned)
+    if jq -e '.bad' <<<"$planned" >/dev/null; then
+      die "round $ROUND not planned: $(jq -r '.bad | join("; ")' <<<"$planned")"
+    fi
+    merged=$(jq -c --arg r "$ROUND" --argjson p "$(jq -c .planned <<<"$planned")" '
+      (.rounds[] | select(.id == $r) | .planned // []) as $old
+      | {old: $old, added: [$p[] | select(IN($old[]) | not)]} | . + {all: (.old + .added)}' "$TMP/model.json")
+    if [ "$(jq '.added | length' <<<"$merged")" -eq 0 ]; then
+      printf 'fm-regression: round %s already plans every named check\n' "$ROUND"
+      exit 0
+    fi
+    append rounds "$(jq -cn --arg id "$ROUND" --argjson p "$(jq -c .all <<<"$merged")" '{id: $id, planned: $p}')"
+    printf 'fm-regression: added %s planned check(s) to round %s (%s planned)\n' \
+      "$(jq '.added | length' <<<"$merged")" "$ROUND" "$(jq '.all | length' <<<"$merged")"
+    ;;
+  "build add")
+    for f in env sha role; do
+      eval "[ -n \"\$OPT_$f\" ]" || die "build add needs --$f"
+    done
+    case "${OPT_current:-yes}" in yes|no) ;; *) die "--current must be yes or no" ;; esac
+    lock
+    model > "$TMP/model.json" || die "derive failed"
+    bad=$(jq -r --arg e "$OPT_env" --arg b "$OPT_sha" --arg role "$OPT_role" '
+      .effort.envs as $envs
+      | [ (if $e | IN($envs[]) then empty else "unknown env \($e) (effort.json envs)" end),
+        (if $b | test("^([0-9a-f]{7,40}|unidentified)$") then empty else "sha must be 7 to 40 lowercase hex characters or unidentified" end),
+        (if $role | IN("baseline", "target", "unknown") then empty else "role must be one of baseline, target, unknown" end),
+        (.builds[] | select(.env == $e) | .sha as $s
+         | select(if $s == "unidentified" or $b == "unidentified" then $s == $b
+             else ($s | startswith($b) or ($b | startswith($s))) end)
+         | "\($e) build \($s) is already registered; use build supersede to change it") ]
+      | join("; ")' "$TMP/model.json")
+    [ -z "$bad" ] || die "build not recorded: $bad"
+    prev=$(jq -r --arg e "$OPT_env" '.builds[] | select(.env == $e and .current == true) | .sha' "$TMP/model.json")
+    append builds "$(jq -cn --arg e "$OPT_env" --arg b "$OPT_sha" --arg role "$OPT_role" \
+      --argjson cur "$([ "${OPT_current:-yes}" = yes ] && echo true || echo false)" \
+      --arg fs "${OPT_first_seen:-${NOW%%T*}}" --arg ev "$OPT_evidence" --arg n "$OPT_note" '
+      {env: $e, sha: $b, role: $role, current: $cur, first_seen: $fs}
+      + ({evidence: $ev, note: $n} | with_entries(select(.value != "")))')"
+    printf 'fm-regression: registered %s build %s' "$OPT_env" "$OPT_sha"
+    if [ "${OPT_current:-yes}" = yes ] && [ -n "$prev" ]; then
+      printf '; it replaces %s as the current %s build' "$prev" "$OPT_env"
+    elif [ "${OPT_current:-yes}" = yes ]; then
+      printf ' as the current %s build' "$OPT_env"
+    fi
+    printf '\n'
+    ;;
+  "build supersede")
+    for f in env sha reason; do
+      eval "[ -n \"\$OPT_$f\" ]" || die "build supersede needs --$f"
+    done
+    lock
+    model > "$TMP/model.json" || die "derive failed"
+    old=$(resolve_build "$OPT_env" "$OPT_sha")
+    new=
+    if [ -n "$OPT_by" ]; then
+      new=$(resolve_build "$OPT_env" "$OPT_by")
+      [ "$new" != "$old" ] || die "a build cannot supersede itself"
+    fi
+    date=${OPT_date:-${NOW%%T*}}
+    append builds "$(jq -cn --arg e "$OPT_env" --arg b "$old" --arg why "$OPT_reason" --arg d "$date" \
+      --arg by "$new" --arg ev "$OPT_evidence" '
+      {env: $e, sha: $b, supersedes: $b, current: false, reason: $why, date: $d}
+      + ({superseded_by: $by, evidence: $ev} | with_entries(select(.value != "")))')"
+    printf 'fm-regression: superseded %s build %s' "$OPT_env" "$old"
+    if [ -n "$new" ]; then
+      if jq -e --arg e "$OPT_env" --arg b "$new" 'any(.builds[]; .env == $e and .sha == $b and .current == true)' \
+        "$TMP/model.json" >/dev/null; then
+        printf '; %s stays the current %s build' "$new" "$OPT_env"
+      else
+        append builds "$(jq -cn --arg e "$OPT_env" --arg b "$new" --arg old "$old" --arg d "$date" '
+          {env: $e, sha: $b, supersedes: $b, current: true, reason: "supersedes \($old)", date: $d}')"
+        printf '; %s is now the current %s build' "$new" "$OPT_env"
+      fi
+    fi
+    printf '\n'
+    ;;
+  "check add")
+    case "$CHECK_ID" in ''|*[!A-Za-z0-9._-]*) die "check id must be a slug: $CHECK_ID" ;; esac
+    [ -n "$OPT_item" ] || die "check add needs --item"
+    [ -n "$OPT_claim" ] || die "check add needs --claim"
+    lock
+    model > "$TMP/model.json" || die "derive failed"
+    ! jq -e -s --arg id "$CHECK_ID" 'any(.[]; .id == $id)' "$DIR/checks.jsonl" >/dev/null ||
+      die "check $CHECK_ID is already registered; use check amend to change it"
+    jq -e -s --arg i "$OPT_item" 'any(.[]; .id == $i)' "$DIR/items.jsonl" >/dev/null ||
+      die "check $CHECK_ID not recorded: unknown item $OPT_item"
+    fields=$(check_fields)
+    append checks "$(jq -cn --arg id "$CHECK_ID" --arg it "$OPT_item" --argjson f "$fields" '{id: $id, item: $it} + $f')"
+    printf 'fm-regression: added check %s to %s\n' "$CHECK_ID" "$OPT_item"
+    ;;
+  "check amend")
+    lock
+    model > "$TMP/model.json" || die "derive failed"
+    jq -e -s --arg id "$CHECK_ID" 'any(.[]; .id == $id)' "$DIR/checks.jsonl" >/dev/null ||
+      die "check $CHECK_ID is not registered (check add it first)"
+    fields=$(check_fields)
+    [ "$fields" != '{}' ] || die "check amend needs at least one field to change"
+    append checks "$(jq -cn --arg id "$CHECK_ID" --argjson f "$fields" '{id: $id, supersedes: $id} + $f')"
+    printf 'fm-regression: amended check %s (%s)\n' "$CHECK_ID" "$(jq -r 'keys_unsorted | join(", ")' <<<"$fields")"
     ;;
   "round check")
     model > "$TMP/model.json" || die "derive failed"

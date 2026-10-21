@@ -68,6 +68,24 @@ $effort[0] as $E
     | reduce ($CHECK_AMENDS[] | select(.id == $l.id)) as $a ($l; . + $a)
     | . + {amendments: ([$CHECK_AMENDS[] | select(.id == $l.id)] | length)}
     | del(.supersedes, ._i) | with_entries(select(.value != null))]) as $CHECKS_LIVE
+# A build is named by its env and sha together. A later builds line with the same env and sha
+# whose supersedes names that sha amends the build the same way. The current build of an
+# environment is the one whose latest line saying current: true comes last, so registering a
+# newer current build wins over an older one without editing it.
+| ($builds | to_entries | map(.value + {_i: .key})) as $BUILD_LINES
+| ([$BUILD_LINES[] | . as $l
+    | select(($l.supersedes // null) != null and $l.supersedes == $l.sha
+        and any($BUILD_LINES[]; .env == $l.env and .sha == $l.sha and ._i < $l._i))]) as $BUILD_AMENDS
+| ([$BUILD_LINES[] | select((.env | type) == "string" and (.sha | type) == "string") | . as $l
+    | select(any($BUILD_LINES[]; .env == $l.env and .sha == $l.sha and ._i < $l._i) | not)
+    | ([$l] + [$BUILD_AMENDS[] | select(.env == $l.env and .sha == $l.sha)]) as $ls
+    | reduce $ls[1:][] as $a ($l; . + $a)
+    | . + {amendments: ($ls | length - 1), _cur: ([$ls[] | select(.current == true) | ._i] | max)}
+    | del(.supersedes) | with_entries(select(.value != null))]) as $BUILDS_MERGED
+| ($BUILDS_MERGED | map(. as $b
+    | . + {current: (.current == true
+        and ([$BUILDS_MERGED[] | select(.env == $b.env and .current == true) | ._cur] | max) == $b._cur)}
+    | del(._i, ._cur))) as $BUILDS
 | ($observations | to_entries | map(.value + {_i: .key})) as $OBS_ALL
 | ([$OBS_ALL[] | .supersedes // empty]) as $SUPERSEDED
 | ($OBS_ALL | map(select(.id as $id | $SUPERSEDED | index($id) | not))) as $LIVE
@@ -78,8 +96,8 @@ $effort[0] as $E
 | def same_build($a; $b):
     if $a == "unidentified" or $b == "unidentified" then $a == $b
     else ($a | length) >= 7 and ($b | length) >= 7 and ($a | startswith($b) or ($b | startswith($a))) end;
-  def registered($o): any($builds[]; .env == $o.env and same_build(.sha; $o.build));
-  def current_build($env): [$builds[] | select(.env == $env and .current == true)] | first;
+  def registered($o): any($BUILDS[]; .env == $o.env and same_build(.sha; $o.build));
+  def current_build($env): [$BUILDS[] | select(.env == $env and .current == true)] | first;
   def round_rank($r): ($ROUND_IDS | index($r)) // 1e9;
   def required($c):
     ($c.required_layers // $DEFAULT_LAYERS) as $l
@@ -146,7 +164,7 @@ $effort[0] as $E
 # ---- items, checks, cells ----------------------------------------------------
 ($items | map(.id)) as $ITEM_IDS
 | ($CHECKS_LIVE | map(. as $c | {
-    id, item: .item, claim, arm: (.arm // "other"), required: required($c), ui_na: (.ui_na // null),
+    id, item: .item, claim, arm: (.arm // "other"), group: (.group // null), required: required($c), ui_na: (.ui_na // null),
     envs: check_envs($c), layer_envs: (.layer_envs // null), retired: (.retired // null),
     required_by_env: ([check_envs($c)[] as $e | {key: $e, value: required_in($c; $e)}] | from_entries),
     amendments, note: (.note // null), unblock: (.unblock // null),
@@ -225,6 +243,17 @@ $effort[0] as $E
       | select((.layer_envs | type) != "object"
           or any(.layer_envs | to_entries[]; (.key | IN(layers[]) | not) or (.value | type) != "array"))
       | {rule: "invalid-record", item: null, message: "check \($c.id) has a layer_envs that is not {layer: [env, ...]}"} ]
+  + [ $CHECKS_LIVE[] | select(has("group") and ((.group | type) != "string" or .group == ""))
+      | {rule: "invalid-record", item: null, message: "check \(.id) has a group that is not a non-empty name"} ]
+  + [ $BUILD_LINES[] | select((.env | type) != "string" or (.sha | type) != "string")
+      | {rule: "invalid-record", item: null, message: "build line \(._i + 1) lacks one of env, sha"} ]
+  + [ $BUILD_LINES[] | select(.supersedes != null) | . as $l
+      | select($l.supersedes != $l.sha or (any($BUILD_LINES[]; .env == $l.env and .sha == $l.sha and ._i < $l._i) | not))
+      | {rule: "invalid-record", item: null,
+         message: "build line \($l._i + 1) supersedes \($l.supersedes), but supersedes must name an earlier line's sha in the same env, the same sha as its own"} ]
+  + [ $BUILD_LINES | map(select(.supersedes == null and (.env | type) == "string" and (.sha | type) == "string"))
+      | group_by([.env, .sha])[] | select(length > 1)
+      | {rule: "invalid-record", item: null, message: "\(.[0].env) build \(.[0].sha) is registered \(length) times; a later line amends it only with supersedes"} ]
   + [ $ROUNDS[] | select(has("planned")) | . as $r
       | if (.planned | type) != "array" then {rule: "invalid-record", item: null, message: "round \($r.id) planned is not a list"}
         else (.planned[] | select(. as $k | any($CHECKS_LIVE[]; .id == $k) | not)
@@ -290,7 +319,7 @@ $effort[0] as $E
     last_render: ($renders[-1] // null),
     last_round: ($ROUNDS_COV[-1] // null),
     rounds: $ROUNDS_COV,
-    builds: $builds,
+    builds: $BUILDS,
     totals: {items: ($ITEMS | length), checks: ($CK | length)},
     check_counts: $CHECK_COUNTS, item_counts: $ITEM_COUNTS,
     not_proven: $NOT_PROVEN,

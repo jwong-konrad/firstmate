@@ -309,6 +309,7 @@ details[open] > summary::before { content: "\25BE"; }
             h("summary", null, badge(c.state), h("span", { "class": "mono", text: c.id }), h("span", { text: c.claim })),
             h("div", { "class": "check-body" },
               h("div", { "class": "meta" }, h("span", { text: "arm " + c.arm }),
+                c.group ? h("span", { text: "group " + c.group }) : null,
                 h("span", { text: "required " + (c.envs.length ? c.envs.map(function (e) { return c.required_by_env[e].join(", ") + " on " + e; }).join("; ") : "nowhere") }),
                 c.ui_na ? h("span", { text: "UI n/a: " + c.ui_na }) : null,
                 c.retired ? h("span", { text: "retired: " + c.retired }) : null,
